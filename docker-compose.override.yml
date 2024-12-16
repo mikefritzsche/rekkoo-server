@@ -1,0 +1,17 @@
+services:
+  rekkoo_api:
+    build:
+      target: development
+    command: npm run dev
+    env_file:
+      - .env.common
+      - .env.development
+    volumes:
+      - ./src:/app/src
+      - /app/node_modules
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.rekkoo-dev.rule=Host(`api.rekkoo.local`)"
+      - "traefik.http.routers.rekkoo-dev.entrypoints=web"
+      - "traefik.http.services.rekkoo-dev.loadbalancer.server.port=3100"

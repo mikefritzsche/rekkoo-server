@@ -1,0 +1,15 @@
+services:
+  rekkoo_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rekkoo_api
+    restart: unless-stopped
+    networks:
+      - proxy
+    env_file:
+      - .env.common
+
+networks:
+  proxy:
+    external: true

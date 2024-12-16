@@ -1,0 +1,13 @@
+services:
+  rekkoo_api:
+    build:
+      target: production
+    env_file:
+      - .env
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.routers.rekkoo-prod.rule=Host(`${HOST}`)"
+      - "traefik.http.routers.rekkoo-prod.entrypoints=${ENTRYPOINT}"
+      - "traefik.http.routers.rekkoo-prod.tls=${USE_TLS}"
+      - "traefik.http.routers.rekkoo-prod.tls.certresolver=letsencrypt"
