@@ -5,6 +5,8 @@ const saltRounds = 12;
 const userRoutes = require('./routes/user.routes');
 const authRoutes = require('./routes/auth');
 
+// v0.0.1
+
 const cors = require('cors');
 const dotenv = require('dotenv');
 
