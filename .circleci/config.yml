@@ -41,7 +41,19 @@ commands:
           fingerprints:
             - ${HETZNER_SSH_KEY_FINGERPRINT}
       - run:
+          name: Setup SSH config
+          command: |
+            mkdir -p ~/.ssh
+            echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n\tServerAliveInterval 30\n\tServerAliveCountMax 3" > ~/.ssh/config
+            chmod 600 ~/.ssh/config
+      - run:
+          name: Debug SSH connection
+          command: |
+            echo "Testing SSH connection..."
+            ssh -v ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "echo 'SSH connection successful'"
+      - run:
           name: Deploy to Hetzner
+          no_output_timeout: 30m
           command: |
             BASE_DIR="/home/rekkoo/api"
             if [ "<< parameters.environment >>" = "prod" ]; then
@@ -57,34 +69,34 @@ commands:
 
             echo "Starting deployment to ${DEPLOY_DIR}..."
             
-            # Create deployment directory
-            ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
-              mkdir -p ${DEPLOY_DIR}
-            "
+            # Test directory creation
+            echo "Creating deployment directory..."
+            ssh ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "mkdir -p ${DEPLOY_DIR}" || exit 1
             
+            echo "Copying docker-compose files..."
             # Copy docker-compose files and Dockerfile
-            scp -o StrictHostKeyChecking=no \
-              docker-compose.yml \
-              ${DOCKER_COMPOSE_OVERRIDE} \
-              Dockerfile \
-              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
+            scp docker-compose.yml \
+                ${DOCKER_COMPOSE_OVERRIDE} \
+                Dockerfile \
+                ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
+            echo "Copying environment file..."
             # Copy environment file based on deployment environment
             if [ "<< parameters.environment >>" = "prod" ]; then
-              scp -o StrictHostKeyChecking=no .env.production ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env
-            elif [ "<< parameters.environment >>" = "staging" ]; then
-              scp -o StrictHostKeyChecking=no .env.development ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env
+              scp .env.production ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env || exit 1
             else
-              scp -o StrictHostKeyChecking=no .env.development ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env
+              scp .env.development ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env || exit 1
             fi
             
+            echo "Copying docker image..."
             # Copy docker image
-            scp -o StrictHostKeyChecking=no \
-              /tmp/docker-images/express-app.tar.gz \
-              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
+            scp /tmp/docker-images/express-app.tar.gz \
+                ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
-            # Deploy
-            ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
+            echo "Starting deployment..."
+            # Deploy with increased verbosity
+            ssh ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
+              set -x
               cd ${DEPLOY_DIR} && \
               echo 'Loading Docker image...' && \
               gunzip -c express-app.tar.gz | docker load && \
@@ -95,7 +107,7 @@ commands:
               echo 'Cleaning up...' && \
               rm express-app.tar.gz && \
               echo 'Deployment completed for ${SAFE_BRANCH_NAME} to << parameters.environment >>'
-            "
+            " || exit 1
       - slack/notify:
           event: fail
           template: basic_fail_1
@@ -103,6 +115,7 @@ commands:
           event: pass
           template: success_tagged_deploy_1
 
+# Jobs and workflows sections remain the same
 jobs:
   deploy-prod:
     executor: node-docker
