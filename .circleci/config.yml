@@ -106,7 +106,6 @@ commands:
               rm express-app.tar.gz && \
               echo 'Deployment completed for ${SAFE_BRANCH_NAME} to << parameters.environment >>'
             " || exit 1
-
       - slack/notify:
           event: fail
           template: basic_fail_1
@@ -114,4 +113,52 @@ commands:
           event: pass
           template: success_tagged_deploy_1
 
-# ... rest of the config remains the same ...
+jobs:
+  deploy-prod:
+    executor: node-docker
+    steps:
+      - deploy:
+          environment: prod
+
+  deploy-staging:
+    executor: node-docker
+    steps:
+      - deploy:
+          environment: staging
+
+  deploy-dev:
+    executor: node-docker
+    steps:
+      - deploy:
+          environment: dev
+
+workflows:
+  version: 2
+  build-deploy:
+    jobs:
+      - deploy-prod:
+          context:
+            - hetzner-deploy-secrets
+            - slack-secrets
+            - rekkoo-secrets
+          filters:
+            branches:
+              only: main
+      - deploy-staging:
+          context:
+            - hetzner-deploy-secrets
+            - slack-secrets
+            - rekkoo-secrets
+          filters:
+            branches:
+              ignore:
+                - main
+                - /.*dev.*/
+      - deploy-dev:
+          context:
+            - hetzner-deploy-secrets
+            - slack-secrets
+            - rekkoo-secrets
+          filters:
+            branches:
+              only: /.*dev.*/
