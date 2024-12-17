@@ -21,90 +21,79 @@ commands:
       - run:
           name: Set branch variables
           command: |
-            # Sanitize branch name and save it for reuse
             SAFE_BRANCH_NAME=$(echo ${CIRCLE_BRANCH} | tr '/' '-' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
             echo "export SAFE_BRANCH_NAME=${SAFE_BRANCH_NAME}" >> $BASH_ENV
             source $BASH_ENV
-            echo "Original branch: ${CIRCLE_BRANCH}"
-            echo "Safe branch: ${SAFE_BRANCH_NAME}"
       - run:
           name: Build Docker image
           command: |
-            echo "Building Docker image for << parameters.environment >>/${SAFE_BRANCH_NAME}..."
-            # Use appropriate Dockerfile based on environment
-            DOCKERFILE="Dockerfile"
-            if [ "<< parameters.environment >>" = "staging" ]; then
-              DOCKERFILE="Dockerfile.staging"
-            elif [ "<< parameters.environment >>" = "dev" ]; then
-              DOCKERFILE="Dockerfile.dev"
-            fi
-            echo "Using ${DOCKERFILE} for build..."
-            
-            # Build with environment-specific Dockerfile
-            docker build -t rekkoo-app:${CIRCLE_SHA1} \
-              --build-arg VITE_API_URL=${VITE_API_URL} \
-              -f ${DOCKERFILE} .
-            docker tag rekkoo-app:${CIRCLE_SHA1} rekkoo-app-<< parameters.environment >>-${SAFE_BRANCH_NAME}:latest
-            
-            # Verify build artifacts
-            echo "Verifying build artifacts..."
-            docker run --rm rekkoo-app:${CIRCLE_SHA1} ls -la /usr/share/nginx/html/assets || true
+            echo "Building Docker image for << parameters.environment >>..."
+            docker build -t express-app:${CIRCLE_SHA1} \
+              --build-arg NODE_ENV=<< parameters.environment >> \
+              .
+            docker tag express-app:${CIRCLE_SHA1} express-app-<< parameters.environment >>-${SAFE_BRANCH_NAME}:latest
       - run:
           name: Save Docker image
           command: |
-            echo "Saving Docker image..."
             mkdir -p /tmp/docker-images
-            docker save rekkoo-app-<< parameters.environment >>-${SAFE_BRANCH_NAME}:latest | gzip > /tmp/docker-images/rekkoo-app.tar.gz
+            docker save express-app-<< parameters.environment >>-${SAFE_BRANCH_NAME}:latest | gzip > /tmp/docker-images/express-app.tar.gz
       - add_ssh_keys:
           fingerprints:
             - ${HETZNER_SSH_KEY_FINGERPRINT}
       - run:
           name: Deploy to Hetzner
           command: |
-            # Set base directory
-            BASE_DIR="/home/rekkoo/web"
+            BASE_DIR="/home/rekkoo/api"
             if [ "<< parameters.environment >>" = "prod" ]; then
               DEPLOY_DIR="${BASE_DIR}/prod"
-              COMPOSE_FILES="docker-compose.yml docker-compose.prod.yml"
+              DOCKER_COMPOSE_OVERRIDE="docker-compose.prod.yml"
+            elif [ "<< parameters.environment >>" = "staging" ]; then
+              DEPLOY_DIR="${BASE_DIR}/staging/${SAFE_BRANCH_NAME}"
+              DOCKER_COMPOSE_OVERRIDE="docker-compose.override.yml"
             else
-              DEPLOY_DIR="${BASE_DIR}/<< parameters.environment >>/${SAFE_BRANCH_NAME}"
-              COMPOSE_FILES="docker-compose.yml docker-compose.staging.yml"
+              DEPLOY_DIR="${BASE_DIR}/dev/${SAFE_BRANCH_NAME}"
+              DOCKER_COMPOSE_OVERRIDE="docker-compose.override.yml"
             fi
 
             echo "Starting deployment to ${DEPLOY_DIR}..."
-            echo "Environment: << parameters.environment >>"
-            echo "Branch: ${SAFE_BRANCH_NAME}"
-
+            
             # Create deployment directory
             ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
               mkdir -p ${DEPLOY_DIR}
             "
-
-            # Copy only necessary files
-            for file in $COMPOSE_FILES nginx.conf; do
-              scp -o StrictHostKeyChecking=no \
-                $file \
-                ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
-            done
-
+            
+            # Copy docker-compose files and Dockerfile
+            scp -o StrictHostKeyChecking=no \
+              docker-compose.yml \
+              ${DOCKER_COMPOSE_OVERRIDE} \
+              Dockerfile \
+              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
+            
+            # Copy environment file based on deployment environment
+            if [ "<< parameters.environment >>" = "prod" ]; then
+              scp -o StrictHostKeyChecking=no .env.production ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env
+            elif [ "<< parameters.environment >>" = "staging" ]; then
+              scp -o StrictHostKeyChecking=no .env.development ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env
+            else
+              scp -o StrictHostKeyChecking=no .env.development ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env
+            fi
+            
             # Copy docker image
             scp -o StrictHostKeyChecking=no \
-              /tmp/docker-images/rekkoo-app.tar.gz \
+              /tmp/docker-images/express-app.tar.gz \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
-
+            
             # Deploy
             ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
               cd ${DEPLOY_DIR} && \
               echo 'Loading Docker image...' && \
-              gunzip -c rekkoo-app.tar.gz | docker load && \
-              echo 'Creating .env file...' && \
-              echo 'VITE_API_URL=${VITE_API_URL}' > .env && \
+              gunzip -c express-app.tar.gz | docker load && \
               echo 'Starting containers...' && \
               SAFE_BRANCH_NAME=${SAFE_BRANCH_NAME} \
               DEPLOY_ENV=<< parameters.environment >> \
-              docker compose -f docker-compose.yml -f docker-compose.<< parameters.environment >>.yml up -d && \
+              docker compose -f docker-compose.yml -f ${DOCKER_COMPOSE_OVERRIDE} up -d && \
               echo 'Cleaning up...' && \
-              rm rekkoo-app.tar.gz && \
+              rm express-app.tar.gz && \
               echo 'Deployment completed for ${SAFE_BRANCH_NAME} to << parameters.environment >>'
             "
       - slack/notify:
@@ -154,7 +143,7 @@ workflows:
             branches:
               ignore:
                 - main
-                - /.*dev.*/  # Ignore branches containing 'dev'
+                - /.*dev.*/
       - deploy-dev:
           context:
             - hetzner-deploy-secrets
@@ -162,4 +151,4 @@ workflows:
             - rekkoo-secrets
           filters:
             branches:
-              only: /.*dev.*/  # Only run for branches containing 'dev'
+              only: /.*dev.*/
