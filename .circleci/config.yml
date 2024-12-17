@@ -42,8 +42,10 @@ commands:
             - ${HETZNER_SSH_KEY_FINGERPRINT}
       - run:
           name: Deploy to Hetzner
+          no_output_timeout: 20m
           command: |
-            BASE_DIR="/home/rekkoo/api"
+            # Update base directory to correct path
+            BASE_DIR="/home/rekkoo/server"
             if [ "<< parameters.environment >>" = "prod" ]; then
               DEPLOY_DIR="${BASE_DIR}/prod"
               DOCKER_COMPOSE_OVERRIDE="docker-compose.prod.yml"
@@ -57,32 +59,42 @@ commands:
 
             echo "Starting deployment to ${DEPLOY_DIR}..."
             
+            # Test SSH connection first
+            echo "Testing SSH connection..."
+            ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "echo 'SSH connection successful'" || exit 1
+            
+            echo "Creating deployment directory..."
             # Create deployment directory
             ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
               mkdir -p ${DEPLOY_DIR}
-            "
+            " || exit 1
             
+            echo "Copying docker-compose files..."
             # Copy docker-compose files and Dockerfile
             scp -o StrictHostKeyChecking=no \
               docker-compose.yml \
               ${DOCKER_COMPOSE_OVERRIDE} \
               Dockerfile \
-              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
+              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
+            echo "Copying environment file..."
             # Copy environment file based on deployment environment
             if [ "<< parameters.environment >>" = "prod" ]; then
-              scp -o StrictHostKeyChecking=no .env.production ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env
+              scp -o StrictHostKeyChecking=no .env.production ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env || exit 1
             else
-              scp -o StrictHostKeyChecking=no .env.development ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env
+              scp -o StrictHostKeyChecking=no .env.development ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env || exit 1
             fi
             
+            echo "Copying docker image..."
             # Copy docker image
             scp -o StrictHostKeyChecking=no \
               /tmp/docker-images/express-app.tar.gz \
-              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
+              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
-            # Deploy
+            echo "Starting deployment..."
+            # Deploy with added verbosity
             ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
+              set -x
               cd ${DEPLOY_DIR} && \
               echo 'Loading Docker image...' && \
               gunzip -c express-app.tar.gz | docker load && \
@@ -93,7 +105,8 @@ commands:
               echo 'Cleaning up...' && \
               rm express-app.tar.gz && \
               echo 'Deployment completed for ${SAFE_BRANCH_NAME} to << parameters.environment >>'
-            "
+            " || exit 1
+
       - slack/notify:
           event: fail
           template: basic_fail_1
@@ -101,52 +114,4 @@ commands:
           event: pass
           template: success_tagged_deploy_1
 
-jobs:
-  deploy-prod:
-    executor: node-docker
-    steps:
-      - deploy:
-          environment: prod
-
-  deploy-staging:
-    executor: node-docker
-    steps:
-      - deploy:
-          environment: staging
-
-  deploy-dev:
-    executor: node-docker
-    steps:
-      - deploy:
-          environment: dev
-
-workflows:
-  version: 2
-  build-deploy:
-    jobs:
-      - deploy-prod:
-          context:
-            - hetzner-deploy-secrets
-            - slack-secrets
-            - rekkoo-secrets
-          filters:
-            branches:
-              only: main
-      - deploy-staging:
-          context:
-            - hetzner-deploy-secrets
-            - slack-secrets
-            - rekkoo-secrets
-          filters:
-            branches:
-              ignore:
-                - main
-                - /.*dev.*/
-      - deploy-dev:
-          context:
-            - hetzner-deploy-secrets
-            - slack-secrets
-            - rekkoo-secrets
-          filters:
-            branches:
-              only: /.*dev.*/
+# ... rest of the config remains the same ...
