@@ -76,18 +76,10 @@ commands:
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
             echo "Copying environment files..."
-            if [ "<< parameters.environment >>" = "prod" ]; then
-              # For production, just copy the .env file
-              scp -o StrictHostKeyChecking=no \
-                .env \
-                ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env || exit 1
-            else
-              # For staging/dev, copy both .env.common and .env.development
-              scp -o StrictHostKeyChecking=no \
-                .env.common \
-                .env.development \
-                ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
-            fi
+            scp -o StrictHostKeyChecking=no \
+              .env.common \
+              .env.development \
+              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
             echo "Copying docker image..."
             scp -o StrictHostKeyChecking=no \
