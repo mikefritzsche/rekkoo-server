@@ -73,12 +73,7 @@ commands:
             scp -o StrictHostKeyChecking=no \
               docker-compose.yml \
               ${DOCKER_COMPOSE_OVERRIDE} \
-              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
-            
-            echo "Copying environment files..."
-            scp -o StrictHostKeyChecking=no \
-              .env.common \
-              .env.development \
+              Dockerfile \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
             echo "Copying docker image..."
