@@ -28,6 +28,7 @@ commands:
           name: Build Docker image
           command: |
             echo "Building Docker image for << parameters.environment >>..."
+            cd prod
             docker build -t express-app:${CIRCLE_SHA1} \
               --build-arg NODE_ENV=<< parameters.environment >> \
               .
@@ -47,12 +48,15 @@ commands:
             BASE_DIR="/home/rekkoo/server"
             if [ "<< parameters.environment >>" = "prod" ]; then
               DEPLOY_DIR="${BASE_DIR}/prod"
+              ENV_SOURCE=".env"
               DOCKER_COMPOSE_OVERRIDE="docker-compose.prod.yml"
             elif [ "<< parameters.environment >>" = "staging" ]; then
               DEPLOY_DIR="${BASE_DIR}/staging/${SAFE_BRANCH_NAME}"
-              DOCKER_COMPOSE_OVERRIDE="docker-compose.override.yml"
+              ENV_SOURCE=".env"
+              DOCKER_COMPOSE_OVERRIDE="docker-compose.staging.yml"
             else
               DEPLOY_DIR="${BASE_DIR}/dev/${SAFE_BRANCH_NAME}"
+              ENV_SOURCE=".env"
               DOCKER_COMPOSE_OVERRIDE="docker-compose.override.yml"
             fi
 
@@ -69,25 +73,18 @@ commands:
             " || exit 1
             
             echo "Copying docker-compose files..."
-            # Copy docker-compose files and Dockerfile from root directory
+            # Copy docker-compose files and Dockerfile from prod directory
             scp -o StrictHostKeyChecking=no \
-              docker-compose.yml \
-              ${DOCKER_COMPOSE_OVERRIDE} \
-              Dockerfile \
+              prod/docker-compose.yml \
+              prod/${DOCKER_COMPOSE_OVERRIDE} \
+              prod/Dockerfile \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
-            echo "Copying environment files..."
-            # Copy environment files from root directory
+            echo "Copying environment file..."
+            # Copy environment file
             scp -o StrictHostKeyChecking=no \
-              .env.common \
-              .env.development \
-              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
-
-            # Create combined .env file on the server
-            ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
-              cd ${DEPLOY_DIR} && \
-              cat .env.common .env.development > .env
-            " || exit 1
+              prod/${ENV_SOURCE} \
+              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/.env || exit 1
             
             echo "Copying docker image..."
             # Copy docker image
