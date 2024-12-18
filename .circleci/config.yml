@@ -25,6 +25,103 @@ commands:
             echo "export SAFE_BRANCH_NAME=${SAFE_BRANCH_NAME}" >> $BASH_ENV
             source $BASH_ENV
       - run:
+          name: Create deploy script
+          command: |
+            cat > deploy.sh << 'EOL'
+            #!/bin/bash
+
+            # Default environment variables
+            export SAFE_BRANCH_NAME=${SAFE_BRANCH_NAME:-main}
+            export HOST=${HOST:-api.rekkoo.com}
+            export ENTRYPOINT=${ENTRYPOINT:-websecure}
+            export USE_TLS=${USE_TLS:-true}
+
+            # Base compose command
+            COMPOSE_CMD="docker compose -f docker-compose.yml -f docker-compose.prod.yml"
+
+            # Function to check if containers are running
+            check_status() {
+                echo "Checking container status..."
+                $COMPOSE_CMD ps
+            }
+
+            # Function to set up environment files
+            setup_env() {
+                echo "Setting up environment files..."
+                if [ ! -f .env.common ]; then
+                    cp ../.env.common .
+                fi
+                if [ ! -f .env ]; then
+                    cp .env.common .env
+                fi
+            }
+
+            # Function to display logs
+            show_logs() {
+                if [ "$1" == "--follow" ] || [ "$1" == "-f" ]; then
+                    echo "Showing logs (follow mode)..."
+                    $COMPOSE_CMD logs -f
+                else
+                    echo "Showing logs..."
+                    $COMPOSE_CMD logs
+                fi
+            }
+
+            # Main command handling
+            case "$1" in
+                "up")
+                    echo "Starting production environment..."
+                    setup_env
+                    $COMPOSE_CMD up -d --no-build
+                    check_status
+                    ;;
+            
+                "down")
+                    echo "Stopping production environment..."
+                    $COMPOSE_CMD down
+                    ;;
+            
+                "restart")
+                    echo "Restarting production environment..."
+                    $COMPOSE_CMD down
+                    setup_env
+                    $COMPOSE_CMD up -d --no-build
+                    check_status
+                    ;;
+            
+                "rebuild")
+                    echo "Rebuilding and starting production environment..."
+                    setup_env
+                    $COMPOSE_CMD up -d --build
+                    check_status
+                    ;;
+            
+                "logs")
+                    show_logs "$2"
+                    ;;
+            
+                "status")
+                    check_status
+                    ;;
+            
+                *)
+                    echo "Usage: $0 {up|down|restart|rebuild|logs|status}"
+                    echo
+                    echo "Commands:"
+                    echo "  up       Start the production environment"
+                    echo "  down     Stop the production environment"
+                    echo "  restart  Restart the production environment"
+                    echo "  rebuild  Rebuild and start the production environment"
+                    echo "  logs     Show container logs (use -f or --follow for following)"
+                    echo "  status   Check container status"
+                    exit 1
+                    ;;
+            esac
+
+            exit 0
+            EOL
+            chmod +x deploy.sh
+      - run:
           name: Build Docker image
           command: |
             echo "Building Docker image for << parameters.environment >>..."
@@ -69,11 +166,11 @@ commands:
               mkdir -p ${DEPLOY_DIR}
             " || exit 1
             
-            echo "Copying docker-compose files..."
+            echo "Copying deployment files..."
             scp -o StrictHostKeyChecking=no \
               docker-compose.yml \
               ${DOCKER_COMPOSE_OVERRIDE} \
-              Dockerfile \
+              deploy.sh \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
             echo "Copying docker image..."
@@ -85,17 +182,7 @@ commands:
             ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
               set -x
               cd ${DEPLOY_DIR} && \
-              echo 'Setting up environment files...' && \
-              if [ "<< parameters.environment >>" = "prod" ]; then
-                # For production, only copy .env.common and create .env
-                cp ${BASE_DIR}/.env.common . && \
-                cp .env.common .env
-              else
-                # For staging/dev, copy both files and combine them
-                cp ${BASE_DIR}/.env.common . && \
-                cp ${BASE_DIR}/.env.development . && \
-                cat .env.common .env.development > .env
-              fi && \
+              chmod +x deploy.sh && \
               echo 'Loading Docker image...' && \
               gunzip -c rekkoo-server.tar.gz | docker load && \
               echo 'Starting containers...' && \
@@ -103,7 +190,7 @@ commands:
               export HOST=${HOST:-api.rekkoo.com} && \
               export ENTRYPOINT=${ENTRYPOINT:-websecure} && \
               export USE_TLS=${USE_TLS:-true} && \
-              docker compose -f docker-compose.yml -f ${DOCKER_COMPOSE_OVERRIDE} up -d --no-build && \
+              ./deploy.sh up && \
               echo 'Cleaning up...' && \
               rm rekkoo-server.tar.gz && \
               echo 'Deployment completed for ${SAFE_BRANCH_NAME} to << parameters.environment >>'

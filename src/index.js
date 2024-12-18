@@ -1,9 +1,9 @@
 const express = require('express');
 // const db = require('./config/db');
-const bcrypt = require('bcrypt');
-const saltRounds = 12;
-const userRoutes = require('./routes/user.routes');
-const authRoutes = require('./routes/auth');
+// const bcrypt = require('bcrypt');
+// const saltRounds = 12;
+// const userRoutes = require('./routes/user.routes');
+// const authRoutes = require('./routes/auth');
 
 // v0.0.1
 
