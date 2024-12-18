@@ -86,8 +86,8 @@ commands:
               set -x
               cd ${DEPLOY_DIR} && \
               echo 'Setting up environment files...' && \
-              cp ${BASE_DIR}/prod/.env.common . && \
-              cp ${BASE_DIR}/prod/.env.development . && \
+              cp ${BASE_DIR}/.env.common . && \
+              cp ${BASE_DIR}/.env.development . && \
               cat .env.common .env.development > .env && \
               echo 'Loading Docker image...' && \
               gunzip -c rekkoo-server.tar.gz | docker load && \
