@@ -1,0 +1,12 @@
+services:
+  rekkoo-server:
+    image: rekkoo-server-staging-${SAFE_BRANCH_NAME}:latest
+    container_name: rekkoo-server-staging-${SAFE_BRANCH_NAME}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.services.rekkoo-staging-${SAFE_BRANCH_NAME}.loadbalancer.server.port=80"
+      - "traefik.http.routers.rekkoo-staging-${SAFE_BRANCH_NAME}.rule=Host(`staging-api.rekkoo.com`)"
+      - "traefik.http.routers.rekkoo-staging-${SAFE_BRANCH_NAME}.entrypoints=websecure"
+      - "traefik.http.routers.rekkoo-staging-${SAFE_BRANCH_NAME}.tls=true"
+      - "traefik.http.routers.rekkoo-staging-${SAFE_BRANCH_NAME}.service=rekkoo-server-staging-${SAFE_BRANCH_NAME}"

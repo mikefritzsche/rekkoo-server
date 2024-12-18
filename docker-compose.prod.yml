@@ -1,5 +1,5 @@
 services:
-  rekkoo_api:
+  rekkoo-server:
     build:
       target: production
     env_file:

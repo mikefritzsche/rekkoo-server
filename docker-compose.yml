@@ -1,9 +1,9 @@
 services:
-  rekkoo_api:
+  rekkoo-server:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: rekkoo_api
+    container_name: rekkoo-server
     restart: unless-stopped
     networks:
       - proxy

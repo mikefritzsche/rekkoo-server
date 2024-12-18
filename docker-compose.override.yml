@@ -1,5 +1,5 @@
 services:
-  rekkoo_api:
+  rekkoo-server:
     build:
       target: development
     command: npm run dev
