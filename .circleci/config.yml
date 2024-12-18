@@ -69,15 +69,15 @@ commands:
             " || exit 1
             
             echo "Copying docker-compose files..."
-            # Copy docker-compose files and Dockerfile
+            # Copy docker-compose files and Dockerfile from prod directory
             scp -o StrictHostKeyChecking=no \
-              docker-compose.yml \
-              ${DOCKER_COMPOSE_OVERRIDE} \
-              Dockerfile \
+              prod/docker-compose.yml \
+              prod/${DOCKER_COMPOSE_OVERRIDE} \
+              prod/Dockerfile \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
             echo "Copying environment files..."
-            # Copy environment files
+            # Copy environment files from root directory
             scp -o StrictHostKeyChecking=no \
               .env.common \
               .env.development \
