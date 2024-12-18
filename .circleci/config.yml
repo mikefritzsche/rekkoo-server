@@ -85,9 +85,10 @@ commands:
             ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
               set -x
               cd ${DEPLOY_DIR} && \
-              echo 'Copying environment files from root...' && \
-              cp ${BASE_DIR}/.env.common ${DEPLOY_DIR}/ && \
-              cp ${BASE_DIR}/.env.development ${DEPLOY_DIR}/ && \
+              echo 'Setting up environment files...' && \
+              cp ${BASE_DIR}/prod/.env.common . && \
+              cp ${BASE_DIR}/prod/.env.development . && \
+              cat .env.common .env.development > .env && \
               echo 'Loading Docker image...' && \
               gunzip -c rekkoo-server.tar.gz | docker load && \
               echo 'Starting containers...' && \
