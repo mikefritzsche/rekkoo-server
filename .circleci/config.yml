@@ -28,8 +28,6 @@ commands:
           name: Build Docker image
           command: |
             echo "Building Docker image for << parameters.environment >>..."
-            # Ensure we're in the directory containing the Dockerfile and src
-            cd server
             if [ "<< parameters.environment >>" = "prod" ]; then
               docker build --target production -t express-app:${CIRCLE_SHA1} .
             else
@@ -73,9 +71,9 @@ commands:
             
             echo "Copying docker-compose files..."
             scp -o StrictHostKeyChecking=no \
-              server/docker-compose.yml \
-              server/${DOCKER_COMPOSE_OVERRIDE} \
-              server/Dockerfile \
+              docker-compose.yml \
+              ${DOCKER_COMPOSE_OVERRIDE} \
+              Dockerfile \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
             echo "Copying docker image..."
@@ -116,8 +114,6 @@ commands:
       - slack/notify:
           event: pass
           template: success_tagged_deploy_1
-
-# ... rest of the config remains the same ...
 
 jobs:
   deploy-prod:
