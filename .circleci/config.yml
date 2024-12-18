@@ -99,11 +99,11 @@ commands:
               echo 'Loading Docker image...' && \
               gunzip -c rekkoo-server.tar.gz | docker load && \
               echo 'Starting containers...' && \
-              SAFE_BRANCH_NAME=${SAFE_BRANCH_NAME} \
-              HOST=${HOST} \
-              ENTRYPOINT=${ENTRYPOINT} \
-              USE_TLS=${USE_TLS} \
-              docker compose -f docker-compose.yml -f ${DOCKER_COMPOSE_OVERRIDE} up -d && \
+              export SAFE_BRANCH_NAME=${SAFE_BRANCH_NAME} && \
+              export HOST=${HOST:-api.rekkoo.com} && \
+              export ENTRYPOINT=${ENTRYPOINT:-websecure} && \
+              export USE_TLS=${USE_TLS:-true} && \
+              docker compose -f docker-compose.yml -f ${DOCKER_COMPOSE_OVERRIDE} up -d --no-build && \
               echo 'Cleaning up...' && \
               rm rekkoo-server.tar.gz && \
               echo 'Deployment completed for ${SAFE_BRANCH_NAME} to << parameters.environment >>'

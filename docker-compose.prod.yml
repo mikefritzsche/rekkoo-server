@@ -1,5 +1,7 @@
+# docker-compose.prod.yml
 services:
   rekkoo-server:
+    image: rekkoo-server-prod-${SAFE_BRANCH_NAME}:latest
     build:
       target: production
     env_file:
