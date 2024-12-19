@@ -2,7 +2,7 @@ const express = require('express');
 const db = require('./config/db');
 // const bcrypt = require('bcrypt');
 // const saltRounds = 12;
-// const userRoutes = require('./routes/user.routes');
+const userRoutes = require('./routes/user.routes');
 // const authRoutes = require('./routes/auth');
 
 // v0.0.2
@@ -20,7 +20,7 @@ app.use(cors());
 app.use(express.json());
 
 // Routes
-// app.use('/api/v1.0/users', userRoutes);
+app.use('/api/v1.0/users', userRoutes);
 // app.use('/api/v1.0/auth', authRoutes);
 
 // Error handling middleware
@@ -43,6 +43,7 @@ app.get('/', (req, res) => {
         process.env.DB_PORT,
     ]
   });
+
 });
 
 app.get('/api/v1.0', (req, res) => {
