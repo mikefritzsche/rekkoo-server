@@ -7,15 +7,15 @@ services:
     env_file:
       - .env
     environment:
-      - PORT
-      - HOST
-      - ENTRYPOINT
-      - USE_TLS
-      - DB_USER
-      - DB_PASSWORD
-      - DB_NAME
-      - DB_HOST
-      - DB_PORT
+      PORT: ${PORT}
+      HOST: ${HOST}
+      ENTRYPOINT: ${ENTRYPOINT}
+      USE_TLS: ${USE_TLS}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
