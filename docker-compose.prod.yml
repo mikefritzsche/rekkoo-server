@@ -2,6 +2,7 @@
 services:
   rekkoo-server:
     image: rekkoo-server-prod-${SAFE_BRANCH_NAME}:latest
+    container_name: rekkoo-server-prod
     build:
       target: production
     env_file:
@@ -9,7 +10,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.rekkoo-prod.rule=Host(`${HOST}`)"
-      - "traefik.http.routers.rekkoo-prod.entrypoints=${ENTRYPOINT}"
-      - "traefik.http.routers.rekkoo-prod.tls=${USE_TLS}"
-      - "traefik.http.routers.rekkoo-prod.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.rekkoo-server-prod.rule=Host(`${HOST}`)"
+      - "traefik.http.routers.rekkoo-server-prod.entrypoints=${ENTRYPOINT}"
+      - "traefik.http.routers.rekkoo-server-prod.tls=${USE_TLS}"
+      - "traefik.http.routers.rekkoo-server-prod.tls.certresolver=letsencrypt"
