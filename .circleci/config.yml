@@ -1,4 +1,3 @@
-# config.yml
 version: 2.1
 
 orbs:
@@ -51,15 +50,12 @@ commands:
             if [ "<< parameters.environment >>" = "prod" ]; then
               DEPLOY_DIR="${BASE_DIR}/prod"
               DOCKER_COMPOSE_OVERRIDE="docker-compose.prod.yml"
-              ENV_FILE=".env"
             elif [ "<< parameters.environment >>" = "staging" ]; then
               DEPLOY_DIR="${BASE_DIR}/staging/${SAFE_BRANCH_NAME}"
               DOCKER_COMPOSE_OVERRIDE="docker-compose.staging.yml"
-              ENV_FILE=".env"
             else
               DEPLOY_DIR="${BASE_DIR}/dev/${SAFE_BRANCH_NAME}"
               DOCKER_COMPOSE_OVERRIDE="docker-compose.override.yml"
-              ENV_FILE=".env.development"
             fi
 
             echo "Starting deployment to ${DEPLOY_DIR}..."
@@ -72,25 +68,21 @@ commands:
               mkdir -p ${DEPLOY_DIR}
             " || exit 1
             
-            # Copy deployment files including .env files
+            # Copy deployment files
             echo "Copying configuration files..."
             scp -o StrictHostKeyChecking=no \
               docker-compose.yml \
               ${DOCKER_COMPOSE_OVERRIDE} \
               scripts/deploy.sh \
-              .env.common \
-              ${ENV_FILE} \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
+
+            # Copy .env.common to parent directory for deploy.sh
+            echo "Copying environment files..."
+            scp -o StrictHostKeyChecking=no \
+              .env.common \
+              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${BASE_DIR}/ || exit 1
             
-            # Rename environment file if needed
-            ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
-              cd ${DEPLOY_DIR}
-              if [ '${ENV_FILE}' != '.env' ]; then
-                mv ${ENV_FILE} .env
-              fi
-            " || exit 1
-            
-            # Copy docker image
+            # Copy and load docker image
             echo "Copying Docker image..."
             scp -o StrictHostKeyChecking=no \
               /tmp/docker-images/rekkoo-server.tar.gz \
