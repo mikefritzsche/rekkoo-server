@@ -1,3 +1,4 @@
+# docker-compose.prod.yml
 services:
   rekkoo-server:
     image: rekkoo-server-prod-${SAFE_BRANCH_NAME}:latest
@@ -6,6 +7,10 @@ services:
     env_file:
       - .env
     environment:
+      - PORT
+      - HOST
+      - ENTRYPOINT
+      - USE_TLS
       - DB_USER
       - DB_PASSWORD
       - DB_NAME

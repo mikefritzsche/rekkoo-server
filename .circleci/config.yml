@@ -1,3 +1,4 @@
+# config.yml
 version: 2.1
 
 orbs:
@@ -61,27 +62,27 @@ commands:
             echo "Starting deployment to ${DEPLOY_DIR}..."
             
             # Test SSH connection
-            echo "Testing SSH connection..."
             ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "echo 'SSH connection successful'" || exit 1
             
-            echo "Creating deployment directory..."
+            # Create deployment directory
             ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
               mkdir -p ${DEPLOY_DIR}
             " || exit 1
             
-            echo "Copying deployment files..."
+            # Copy all necessary files including .env
             scp -o StrictHostKeyChecking=no \
               docker-compose.yml \
               ${DOCKER_COMPOSE_OVERRIDE} \
+              .env \
               scripts/deploy.sh \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
-            echo "Copying docker image..."
+            # Copy and load docker image
             scp -o StrictHostKeyChecking=no \
               /tmp/docker-images/rekkoo-server.tar.gz \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
             
-            echo "Starting deployment..."
+            # Deploy
             ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
               set -x
               cd ${DEPLOY_DIR}
