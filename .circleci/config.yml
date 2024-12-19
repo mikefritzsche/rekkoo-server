@@ -75,22 +75,8 @@ commands:
               ${DOCKER_COMPOSE_OVERRIDE} \
               scripts/deploy.sh \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
-
-            # Verify .env.common exists before copying
-            if [ ! -f ".env.common" ]; then
-              echo "Warning: .env.common not found in current directory"
-              echo "Current directory contents:"
-              ls -la
-              exit 1
-            fi
             
-            # Copy .env.common to parent directory for deploy.sh
-            echo "Copying environment files..."
-            scp -o StrictHostKeyChecking=no \
-              .env.common \
-              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${BASE_DIR}/ || exit 1
-            
-            # Copy and load docker image
+            # Copy docker image
             echo "Copying Docker image..."
             scp -o StrictHostKeyChecking=no \
               /tmp/docker-images/rekkoo-server.tar.gz \
