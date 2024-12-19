@@ -33,7 +33,16 @@ app.get('/api/v1.0/health', (req, res) => {
   res.json({ status: 'ok', message: 'Rekko Health Check Successful' });
 });
 app.get('/', (req, res) => {
-  res.json({ message: 'Welcome to Rekkoo' });
+  res.json({
+    message: 'Welcome to Rekkoo',
+    env: [
+        process.env.DB_USER,
+        process.env.DB_HOST,
+        process.env.DB_NAME,
+        process.env.DB_PASSWORD,
+        process.env.DB_PORT,
+    ]
+  });
 });
 
 app.get('/api/v1.0', (req, res) => {
