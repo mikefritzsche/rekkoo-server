@@ -15,6 +15,7 @@ check_status() {
     $COMPOSE_CMD ps
 }
 
+# Function to set up environment files
 setup_env() {
     echo "Setting up environment files..."
     # First, get .env.common from parent directory if it doesn't exist
@@ -22,13 +23,21 @@ setup_env() {
         cp ../.env.common .
     fi
 
-    # Copy main .env from parent directory if it exists there
-    if [ -f ../.env ] && [ ! -f .env ]; then
+    # Copy main .env from parent directory, overwriting if it exists
+    if [ -f ../.env ]; then
         echo "Copying .env from parent directory..."
-        cp ../.env .
-    # If no .env in parent directory, create from .env.common
-    elif [ ! -f .env ]; then
-        echo "Creating .env from .env.common..."
+        cp -f ../.env .
+        # Ensure the copy was successful
+        if [ $? -eq 0 ]; then
+            echo "Successfully copied .env file"
+            echo "Current .env contents:"
+            cat .env
+        else
+            echo "Failed to copy .env file"
+            exit 1
+        fi
+    else
+        echo "No .env found in parent directory, creating from .env.common..."
         cp .env.common .env
     fi
 }
