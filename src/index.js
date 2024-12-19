@@ -1,7 +1,7 @@
 const express = require('express');
 const db = require('./config/db');
-// const bcrypt = require('bcrypt');
-// const saltRounds = 12;
+const bcrypt = require('bcrypt');
+const saltRounds = 12;
 const userRoutes = require('./routes/user.routes');
 // const authRoutes = require('./routes/auth');
 
@@ -34,14 +34,7 @@ app.get('/api/v1.0/health', (req, res) => {
 });
 app.get('/', (req, res) => {
   res.json({
-    message: 'Welcome to Rekkoo',
-    env: [
-        process.env.DB_USER,
-        process.env.DB_HOST,
-        process.env.DB_NAME,
-        process.env.DB_PASSWORD,
-        process.env.DB_PORT,
-    ]
+    message: 'Welcome to Rekkoo'
   });
 
 });

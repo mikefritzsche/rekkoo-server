@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../config/db');
 const bcrypt = require("bcrypt");
+const saltRounds = 12;
 
 router.get('/', async (req, res) => {
   try {
@@ -54,8 +55,8 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   const { username, email, password, full_name, is_active, is_verified } = req.body;
-
   const password_hash = await bcrypt.hash(password, saltRounds);
+  console.log('create user: ', { username, email, password, password_hash, full_name, is_active, is_verified })
   try {
     const result = await db.query(
       'INSERT INTO users (username, email, password_hash, full_name, is_active, is_verified) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *',
