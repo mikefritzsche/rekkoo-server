@@ -1,5 +1,5 @@
 const express = require('express');
-// const db = require('./config/db');
+const db = require('./config/db');
 // const bcrypt = require('bcrypt');
 // const saltRounds = 12;
 // const userRoutes = require('./routes/user.routes');
