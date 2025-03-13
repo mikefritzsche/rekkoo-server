@@ -76,7 +76,7 @@ const authController = {
       );
 
       if (result.rows.length === 0) {
-        return res.status(401).json({ error: 'Invalid credentials' });
+        return res.status(401).json({ error: 'Invalid credentials - no rows auth/controllers' });
       }
 
       const user = result.rows[0];
@@ -84,7 +84,7 @@ const authController = {
       // Check password
       const validPassword = await bcrypt.compare(password, user.password_hash);
       if (!validPassword) {
-        return res.status(401).json({ error: 'Invalid credentials' });
+        return res.status(401).json({ error: 'Invalid credentials - password  auth/controllers' });
       }
 
       // Update last login
