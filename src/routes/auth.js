@@ -204,6 +204,37 @@ router.post('/users/:id/roles', [
 });
 
 // http://localhost:8000/auth/amazon/callback
+const REDIRECT_URI = 'https://api.rekkoo.com/auth/amazon/callback';
+app.get('/auth/amazon', (req, res) => {
+  res.redirect(`https://www.amazon.com/ap/oa?client_id=${process.env.AMAZON_CLIENT_ID}&scope=profile&response_type=code&redirect_uri=${REDIRECT_URI}`);
+});
+
+// Step 2: Handle the callback with authorization code
+app.get('/auth/amazon/callback', async (req, res) => {
+  const code = req.query.code;
+
+  try {
+    // Exchange code for tokens
+    const response = await axios.post('https://api.amazon.com/auth/o2/token', null, {
+      params: {
+        grant_type: 'authorization_code',
+        code,
+        client_id: process.env.AMAZON_CLIENT_ID,
+        client_secret: process.env.AMAZON_CLIENT_SECRET,
+        redirect_uri: REDIRECT_URI
+      }
+    });
+
+    // Store these tokens securely
+    const { access_token, refresh_token, expires_in } = response.data;
+
+    // Now you can use access_token for SP-API calls
+    res.send('Authentication successful');
+  } catch (error) {
+    console.error('OAuth error:', error.response?.data || error);
+    res.status(500).send('Authentication failed');
+  }
+});
 
 module.exports = router;
 

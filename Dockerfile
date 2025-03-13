@@ -10,7 +10,7 @@ EXPOSE 3000
 CMD ["npm", "run", "dev"]
 
 FROM base AS production
-RUN npm ci --only=production
+RUN npm install --omit=dev
 COPY src src
 COPY .env* ./
 EXPOSE 3000
