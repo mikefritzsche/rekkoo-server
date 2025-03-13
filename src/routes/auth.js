@@ -206,7 +206,7 @@ router.post('/users/:id/roles', [
 // http://localhost:8000/auth/amazon/callback
 const REDIRECT_URI = 'https://api.rekkoo.com/auth/amazon/callback';
 router.get('/amazon', (req, res) => {
-  res.redirect(`https://www.amazon.com/ap/oa?client_id=${process.env.AMAZON_CLIENT_ID}&scope=profile&response_type=code&redirect_uri=${REDIRECT_URI}`);
+  res.redirect(`https://www.amazon.com/ap/oa?client_id=${process.env.AMAZON_CLIENT_ID}&scope=profile:user_id,profile:email,profile:name&response_type=code&redirect_uri=${REDIRECT_URI}`);
 });
 
 // Step 2: Handle the callback with authorization code
