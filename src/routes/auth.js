@@ -233,6 +233,7 @@ router.get('/amazon/callback', async (req, res) => {
     // Store these tokens securely
     const { access_token, refresh_token, expires_in } = response.data;
 
+    console.log(`Code: `, code)
     console.log('Access Token:', access_token);
     console.log('Refresh Token:', refresh_token);
     console.log('Expires In:', expires_in);
