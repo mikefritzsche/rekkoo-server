@@ -85,6 +85,7 @@ router.get('/amazon/spapi-authorize', (req, res) => {
   };
 
   const authorizationUrl = `${amazonAuthUrl}?${qs.stringify(queryParams)}`;
+  console.log(`auth url: `, authorizationUrl)
 
   // Redirect user to Amazon's authorization page
   res.redirect(authorizationUrl);
@@ -93,6 +94,7 @@ router.get('/amazon/spapi-authorize', (req, res) => {
 // Handle the OAuth callback from Amazon
 router.get('/amazon/spapi-callback', async (req, res) => {
   const { state, spapi_oauth_code, selling_partner_id } = req.query;
+  console.log(`amazon spapi auth callback: `, {state, spapi_oauth_code, selling_partner_id});
 
   // Verify state to prevent CSRF attacks
   if (!state || !stateMap.has(state)) {
