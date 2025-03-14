@@ -1,9 +1,9 @@
-// routes/auth.js
-
 // auth.routes.js - Authentication routes for Express backend
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const axios = require('axios');
+const qs = require('querystring');
 const { body, validationResult } = require('express-validator');
 const {
   register,
@@ -20,6 +20,51 @@ const {
   refreshToken
 } = require('../controllers/auth.controller');
 
+const {
+  AMAZON_SELLER_ID,
+  AMAZON_REFRESH_TOKEN,
+  AMAZON_ACCESS_TOKEN,
+  AMAZON_SANDBOX_CLIENT_ID,
+  AMAZON_SANDBOX_CLIENT_SECRET,
+  AMAZON_ACCESS_KEY,
+  AMAZON_SECRET_KEY,
+  AMAZON_ROLE_ARN,
+  AMAZON_MARKETPLACE_ID,
+  AMAZON_ASSOCIATE_ID,
+  AMAZON_APP_ID,
+  AMAZON_CLIENT_ID,
+  AMAZON_CLIENT_SECRET,
+  APP_URL,
+} = process.env
+
+const REDIRECT_URI = 'https://api.rekkoo.com/auth/amazon/spapi-callback';
+const amazonAuthUrl = 'https://sellercentral.amazon.com/apps/authorize/consent';
+const amazonTokenUrl = 'https://api.amazon.com/auth/o2/token';
+
+// Store state for CSRF protection
+const stateMap = new Map();
+
+// Generate a random state for CSRF protection
+const generateState = () => {
+  const state = crypto.randomBytes(16).toString('hex');
+  // Store state with expiration (5 minutes)
+  stateMap.set(state, Date.now() + 300000); // 5 min expiration
+  return state;
+};
+
+// Clean expired states
+const cleanupStates = () => {
+  const now = Date.now();
+  for (const [state, expiry] of stateMap.entries()) {
+    if (now > expiry) {
+      stateMap.delete(state);
+    }
+  }
+};
+
+// Schedule cleanup every 10 minutes
+setInterval(cleanupStates, 600000);
+
 // Validation middleware
 const validateRequest = (req, res, next) => {
   const errors = validationResult(req);
@@ -28,6 +73,205 @@ const validateRequest = (req, res, next) => {
   }
   next();
 };
+
+router.get('/amazon/spapi-authorize', (req, res) => {
+  const state = generateState();
+
+  const queryParams = {
+    application_id: AMAZON_APP_ID,
+    state,
+    redirect_uri: REDIRECT_URI,
+    version: 'beta'
+  };
+
+  const authorizationUrl = `${amazonAuthUrl}?${qs.stringify(queryParams)}`;
+
+  // Redirect user to Amazon's authorization page
+  res.redirect(authorizationUrl);
+});
+
+// Handle the OAuth callback from Amazon
+router.get('/amazon/spapi-callback', async (req, res) => {
+  const { state, spapi_oauth_code, selling_partner_id } = req.query;
+
+  // Verify state to prevent CSRF attacks
+  if (!state || !stateMap.has(state)) {
+    return res.status(400).send('Invalid state parameter. Possible CSRF attack or expired session.');
+  }
+
+  // Remove the used state
+  stateMap.delete(state);
+
+  if (!spapi_oauth_code) {
+    return res.status(400).send('Authorization code not received from Amazon.');
+  }
+
+  try {
+    // Exchange the authorization code for access tokens
+    const tokenResponse = await axios.post(amazonTokenUrl, qs.stringify({
+      grant_type: 'authorization_code',
+      code: spapi_oauth_code,
+      redirect_uri: REDIRECT_URI,
+      client_id: AMAZON_CLIENT_ID,
+      client_secret: AMAZON_CLIENT_SECRET,
+    }), {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    });
+
+    const { access_token, refresh_token, expires_in } = tokenResponse.data;
+
+    console.log(`access/refresh tokens: `, [access_token, refresh_token]);
+    console.log(`expires in: `, expires_in)
+
+    // Store tokens in database or session (implementation depends on your app architecture)
+    // For this example, we'll just create a user session
+    req.session.spApiTokens = {
+      access_token,
+      refresh_token,
+      expires_at: Date.now() + expires_in * 1000,
+      selling_partner_id
+    };
+
+    // Redirect to dashboard or confirmation page
+    res.redirect(`${APP_URL}/dashboard`);
+
+  } catch (error) {
+    console.error('Error exchanging authorization code for tokens:', error.response?.data || error.message);
+    res.status(500).send('Failed to complete OAuth process. Please try again.');
+  }
+});
+
+// Refresh access token when it expires
+router.get('/refresh-token', async (req, res) => {
+  // Check if user has refresh token
+  if (!req.session.spApiTokens || !req.session.spApiTokens.refresh_token) {
+    return res.status(401).json({ error: 'No refresh token available. Please authenticate again.' });
+  }
+
+  try {
+    const refreshResponse = await axios.post(amazonTokenUrl, qs.stringify({
+      grant_type: 'refresh_token',
+      refresh_token: req.session.spApiTokens.refresh_token,
+      client_id: AMAZON_CLIENT_ID,
+      client_secret: AMAZON_CLIENT_SECRET,
+    }), {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      }
+    });
+
+    const { access_token, refresh_token, expires_in } = refreshResponse.data;
+
+    console.log(`refresh access/refresh token: `, [access_token, refresh_token])
+    console.log(`refresh expires in: `, expires_in)
+
+    // Update session with new tokens
+    req.session.spApiTokens = {
+      ...req.session.spApiTokens,
+      access_token,
+      // Amazon might not return a new refresh token every time
+      refresh_token: refresh_token || req.session.spApiTokens.refresh_token,
+      expires_at: Date.now() + expires_in * 1000
+    };
+
+    res.json({ success: true, expires_in });
+
+  } catch (error) {
+    console.error('Error refreshing token:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to refresh access token.' });
+  }
+});
+
+// https://www.amazon.com/ap/oa?client_id=amzn1.application-oa2-client.4ba4635cf6c941ee9ba658809a50d0c6&scope=profile:user_id%20profile:email%20profile:name%20profile:postal_code&response_type=code&redirect_uri=https%3A%2F%2Fapi.rekkoo.com%2Fauth%2Famazon%2Fcallback
+
+router.get('/amazon', (req, res) => {
+  const authUrl = `https://sellercentral.amazon.com/apps/authorize/consent?application_id=${process.env.AMAZON_CLIENT_ID}&state=state&version=beta`;
+  res.redirect(authUrl);
+});
+
+// Step 2: Handle the callback with authorization code
+router.get('/amazon/callback', async (req, res) => {
+  const code = req.query.code;
+
+  try {
+    // Exchange code for tokens
+    const response = await axios.post('https://api.amazon.com/auth/o2/token', null, {
+      params: {
+        grant_type: 'authorization_code',
+        code,
+        client_id: AMAZON_CLIENT_ID,
+        client_secret: AMAZON_CLIENT_SECRET,
+        redirect_uri: REDIRECT_URI
+      }
+    });
+
+    // Store these tokens securely
+    const { access_token, refresh_token, expires_in } = response.data;
+
+    console.log(`Code: `, code)
+    console.log('Access Token:', access_token);
+    console.log('Refresh Token:', refresh_token);
+    console.log('Expires In:', expires_in);
+
+    // Now you can use access_token for SP-API calls
+    res.send('Authentication successful');
+  } catch (error) {
+    console.error('OAuth error:', error.response?.data || error);
+    res.status(500).send('Authentication failed');
+  }
+});
+
+router.get('/amazon/spapi/refresh-token', async (req, res) => {
+  const REFRESH_TOKEN = process.env.REFRESH_TOKEN;
+
+  try {
+    const tokenResponse = await axios.post('https://api.amazon.com/auth/o2/token', null, {
+      params: {
+        grant_type: 'refresh_token',
+        refresh_token: REFRESH_TOKEN,
+        client_id: process.env.AMAZON_CLIENT_ID,
+        client_secret: process.env.AMAZON_CLIENT_SECRET,
+      },
+    });
+
+    const { access_token } = tokenResponse.data;
+
+    // Use the new access token for API requests
+    console.log('New Access Token:', access_token);
+
+    res.send('Token refreshed successfully!');
+  } catch (error) {
+    console.error('Error refreshing token:', error.response?.data || error.message);
+    res.status(500).send('Error refreshing token');
+  }
+});
+
+// Check authentication status
+router.get('/amazon/status', (req, res) => {
+  if (req.session.spApiTokens && req.session.spApiTokens.access_token) {
+    // Check if token is expired
+    const isExpired = Date.now() > req.session.spApiTokens.expires_at;
+
+    res.json({
+      authenticated: true,
+      sellingPartnerId: req.session.spApiTokens.selling_partner_id,
+      tokenExpired: isExpired
+    });
+  } else {
+    res.json({ authenticated: false });
+  }
+});
+
+// Logout - clear tokens
+router.get('/logout', (req, res) => {
+  if (req.session.spApiTokens) {
+    delete req.session.spApiTokens;
+  }
+
+  res.json({ success: true, message: 'Logged out successfully' });
+});
 
 // =============================================
 // Authentication Routes
@@ -201,73 +445,6 @@ router.post('/users/:id/roles', [
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// http://localhost:8000/auth/amazon/callback
-const REDIRECT_URI = 'https://api.rekkoo.com/auth/amazon/callback';
-
-// https://www.amazon.com/ap/oa?client_id=amzn1.application-oa2-client.4ba4635cf6c941ee9ba658809a50d0c6&scope=profile:user_id%20profile:email%20profile:name%20profile:postal_code&response_type=code&redirect_uri=https%3A%2F%2Fapi.rekkoo.com%2Fauth%2Famazon%2Fcallback
-
-router.get('/amazon', (req, res) => {
-  const authUrl = `https://sellercentral.amazon.com/apps/authorize/consent?application_id=${process.env.AMAZON_CLIENT_ID}&state=state&version=beta`;
-  res.redirect(authUrl);
-});
-
-// Step 2: Handle the callback with authorization code
-router.get('/amazon/callback', async (req, res) => {
-  const code = req.query.code;
-
-  try {
-    // Exchange code for tokens
-    const response = await axios.post('https://api.amazon.com/auth/o2/token', null, {
-      params: {
-        grant_type: 'authorization_code',
-        code,
-        client_id: process.env.AMAZON_CLIENT_ID,
-        client_secret: process.env.AMAZON_CLIENT_SECRET,
-        redirect_uri: REDIRECT_URI
-      }
-    });
-
-    // Store these tokens securely
-    const { access_token, refresh_token, expires_in } = response.data;
-
-    console.log(`Code: `, code)
-    console.log('Access Token:', access_token);
-    console.log('Refresh Token:', refresh_token);
-    console.log('Expires In:', expires_in);
-
-    // Now you can use access_token for SP-API calls
-    res.send('Authentication successful');
-  } catch (error) {
-    console.error('OAuth error:', error.response?.data || error);
-    res.status(500).send('Authentication failed');
-  }
-});
-
-router.get('/amazon/spapi/refresh-token', async (req, res) => {
-  const REFRESH_TOKEN = process.env.REFRESH_TOKEN;
-
-  try {
-    const tokenResponse = await axios.post('https://api.amazon.com/auth/o2/token', null, {
-      params: {
-        grant_type: 'refresh_token',
-        refresh_token: REFRESH_TOKEN,
-        client_id: process.env.AMAZON_CLIENT_ID,
-        client_secret: process.env.AMAZON_CLIENT_SECRET,
-      },
-    });
-
-    const { access_token } = tokenResponse.data;
-
-    // Use the new access token for API requests
-    console.log('New Access Token:', access_token);
-
-    res.send('Token refreshed successfully!');
-  } catch (error) {
-    console.error('Error refreshing token:', error.response?.data || error.message);
-    res.status(500).send('Error refreshing token');
   }
 });
 
