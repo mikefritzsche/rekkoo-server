@@ -3,6 +3,7 @@
 // auth.routes.js - Authentication routes for Express backend
 const express = require('express');
 const router = express.Router();
+const axios = require('axios');
 const { body, validationResult } = require('express-validator');
 const {
   register,
@@ -205,8 +206,10 @@ router.post('/users/:id/roles', [
 
 // http://localhost:8000/auth/amazon/callback
 const REDIRECT_URI = 'https://api.rekkoo.com/auth/amazon/callback';
+
+// https://www.amazon.com/ap/oa?client_id=amzn1.application-oa2-client.4ba4635cf6c941ee9ba658809a50d0c6&scope=profile:user_id%20profile:email%20profile:name%20profile:postal_code&response_type=code&redirect_uri=https%3A%2F%2Fapi.rekkoo.com%2Fauth%2Famazon%2Fcallback
 router.get('/amazon', (req, res) => {
-  res.redirect(`https://www.amazon.com/ap/oa?client_id=${process.env.AMAZON_CLIENT_ID}&scope=profile:user_id,profile:email,profile:name&response_type=code&redirect_uri=${REDIRECT_URI}`);
+  res.redirect(`https://www.amazon.com/ap/oa?client_id=${process.env.AMAZON_CLIENT_ID}&scope=profile:user_id%20profile:email%20profile:name%20profile:postal_code&response_type=code&redirect_uri=${REDIRECT_URI}`);
 });
 
 // Step 2: Handle the callback with authorization code
