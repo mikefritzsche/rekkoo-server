@@ -11,20 +11,18 @@ const createSpApiClient = async () => {
     region: 'na', // or EU, FE depending on your marketplace
     refresh_token: process.env.AMAZON_REFRESH_TOKEN,
     credentials: {
-      // client_id: process.env.AMAZON_CLIENT_ID,
-      // client_secret: process.env.AMAZON_CLIENT_SECRET,
-      // access_key: process.env.AMAZON_ACCESS_KEY,
-      // secret_key: process.env.AMAZON_SECRET_KEY,
-      // role_arn: process.env.AMAZON_ROLE_ARN, // if using IAM Role
-
       SELLING_PARTNER_APP_CLIENT_ID: process.env.AMAZON_CLIENT_ID,
       SELLING_PARTNER_APP_CLIENT_SECRET: process.env.AMAZON_CLIENT_SECRET,
       AWS_ACCESS_KEY_ID: process.env.AMAZON_ACCESS_KEY,
       AWS_SECRET_ACCESS_KEY: process.env.AMAZON_SECRET_KEY,
       // AWS_SELLING_PARTNER_ROLE: process.env.AMAZON_ROLE_ARN,
     },
+    endpoint_versions: {
+      catalogItems: '2022-04-01',
+      listingsItems: '2021-08-01',
+    },
     options: {
-      use_sandbox: false  // This is critical to use the sandbox environment
+      use_sandbox: true  // This is critical to use the sandbox environment
     }
   });
 };
@@ -35,8 +33,10 @@ router.get('/get-endpoints', async (req, res) => {
   const endpoints = spApi.endpoints || 'Not directly accessible'
   res.json({operations, endpoints})
 })
+
 router.get('/get-asin', async (req, res) => {
-  res.json({asin: extractAsinFromUrl(req.query.url)})
+  const asin = extractAsinFromUrl(req.query.url)
+  res.json({asin})
 })
 
 router.get('/test-api-connection', async (req, res) => {
@@ -100,6 +100,90 @@ const extractAsinFromUrl = (amazonUrl) => {
   }
 };
 
+// Function to get product details by ASIN
+const getProductDetails = async (asin) => {
+  try {
+    // Instantiate the SP-API client
+    const spApiClient = await createSpApiClient();
+
+    // Call the Catalog Items API to get product details
+    const productDetails = await spApiClient.callAPI({
+      operation: 'getCatalogItem',
+      endpoint: 'catalogItems',
+      query: {
+        marketplaceId: 'ATVPDKIKX0DER', // US marketplace ID (replace with your marketplace ID if different)
+        includedData: 'attributes,identifiers,images,salesRanks,summaries', // Specify the data you want
+        asin: asin, // The ASIN of the product
+      },
+    });
+
+    return productDetails;
+  } catch (error) {
+    console.error('Error fetching product details:', error);
+    throw error;
+  }
+};
+
+// Function to search for products by keyword
+const searchProducts = async (keyword) => {
+  try {
+    // Instantiate the SP-API client
+    const spApiClient = await createSpApiClient();
+
+    // Define the query parameters
+    const query = {
+      marketplaceIds: ['ATVPDKIKX0DER'], // US marketplace ID (must be an array)
+      keywords: keyword, // The search keyword
+      includedData: 'identifiers,images,attributes', // Specify the data you want
+    };
+
+    console.log('Making API request with query:', query); // Log the query
+
+    // Call the Catalog Items API to search for products
+    const searchResults = await spApiClient.callAPI({
+      operation: 'searchCatalogItems',
+      endpoint: 'catalogItems',
+      query: query,
+    });
+
+    return searchResults;
+  } catch (error) {
+    console.error('Full error details:', error); // Log the full error object
+    throw error;
+  }
+};
+
+// Example usage in an Express route
+router.get('/search', async (req, res) => {
+  const keyword = req.query.keyword; // Get keyword from query parameter
+  if (!keyword) {
+    return res.status(400).json({ error: 'Keyword is required' });
+  }
+
+  try {
+    const searchResults = await searchProducts(keyword);
+    res.json(searchResults);
+  } catch (error) {
+    console.error('Error in /search route:', error); // Log the error in the route
+    res.status(500).json({
+      error: 'Failed to search for products',
+      details: error.message || error.toString(), // Include error details in the response
+    });
+  }
+});
+
+
+router.get('/product/:asin', async (req, res) => {
+  const asin = req.params.asin; // Get ASIN from the URL parameter
+  console.log(`asin: `, asin)
+  try {
+    const productDetails = await getProductDetails(asin);
+    res.json(productDetails);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch product details' });
+  }
+});
+
 router.get('/get-access-token', async (req, res) => {
   const getAccessToken = async () => {
     const clientId = process.env.AMAZON_CLIENT_ID;
@@ -129,6 +213,7 @@ router.get('/get-access-token', async (req, res) => {
 
 })
 
+// B0CYGGTT73
 // Get inventory levels
 router.get('/inventory', async (req, res) => {
   try {

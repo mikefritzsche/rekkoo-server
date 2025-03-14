@@ -208,8 +208,10 @@ router.post('/users/:id/roles', [
 const REDIRECT_URI = 'https://api.rekkoo.com/auth/amazon/callback';
 
 // https://www.amazon.com/ap/oa?client_id=amzn1.application-oa2-client.4ba4635cf6c941ee9ba658809a50d0c6&scope=profile:user_id%20profile:email%20profile:name%20profile:postal_code&response_type=code&redirect_uri=https%3A%2F%2Fapi.rekkoo.com%2Fauth%2Famazon%2Fcallback
+
 router.get('/amazon', (req, res) => {
-  res.redirect(`https://www.amazon.com/ap/oa?client_id=${process.env.AMAZON_CLIENT_ID}&scope=profile:user_id%20profile:email%20profile:name%20profile:postal_code&response_type=code&redirect_uri=${REDIRECT_URI}`);
+  const authUrl = `https://sellercentral.amazon.com/apps/authorize/consent?application_id=${process.env.AMAZON_CLIENT_ID}&state=state&version=beta`;
+  res.redirect(authUrl);
 });
 
 // Step 2: Handle the callback with authorization code
@@ -231,11 +233,40 @@ router.get('/amazon/callback', async (req, res) => {
     // Store these tokens securely
     const { access_token, refresh_token, expires_in } = response.data;
 
+    console.log('Access Token:', access_token);
+    console.log('Refresh Token:', refresh_token);
+    console.log('Expires In:', expires_in);
+
     // Now you can use access_token for SP-API calls
     res.send('Authentication successful');
   } catch (error) {
     console.error('OAuth error:', error.response?.data || error);
     res.status(500).send('Authentication failed');
+  }
+});
+
+router.get('/amazon/spapi/refresh-token', async (req, res) => {
+  const REFRESH_TOKEN = process.env.REFRESH_TOKEN;
+
+  try {
+    const tokenResponse = await axios.post('https://api.amazon.com/auth/o2/token', null, {
+      params: {
+        grant_type: 'refresh_token',
+        refresh_token: REFRESH_TOKEN,
+        client_id: process.env.AMAZON_CLIENT_ID,
+        client_secret: process.env.AMAZON_CLIENT_SECRET,
+      },
+    });
+
+    const { access_token } = tokenResponse.data;
+
+    // Use the new access token for API requests
+    console.log('New Access Token:', access_token);
+
+    res.send('Token refreshed successfully!');
+  } catch (error) {
+    console.error('Error refreshing token:', error.response?.data || error.message);
+    res.status(500).send('Error refreshing token');
   }
 });
 
