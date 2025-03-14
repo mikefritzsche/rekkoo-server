@@ -96,6 +96,6 @@ app.get('/gifster-fetch', async (req, res) => {
 })
 
 app.listen(PORT, () => {
-  console.log(`amazon: `, process.env.AMAZON_ACCESS_TOKEN)
+  console.log(`DB_SSL: `, process.env.DB_SSL)
   console.log(`Server running on port ${PORT}`);
 });

@@ -8,7 +8,7 @@ const pool = new Pool({
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port: process.env.DB_PORT || 5432,
-  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+  ssl: false, //process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
   max: parseInt(process.env.DB_POOL_MAX || '20', 10),     // Maximum clients in pool
   idleTimeoutMillis: 30000,                               // Close idle clients after 30 seconds
   connectionTimeoutMillis: 2000,                          // Return error after 2 seconds if connection not established
