@@ -2,12 +2,16 @@ const express = require('express');
 const userRoutes = require('./routes/user.routes');
 const claudeRoutes = require('./routes/claude');
 const tmdbRoutes = require('./routes/tmdb.routes');
-const googleRoutes = require('./routes/google.routes');
+const ytmusicRoutes = require('./routes/ytmusic.routes');
+const placesRoutes = require('./routes/places.routes');
+const booksRoutes = require('./routes/books.routes');
 const productsRoutes = require('./routes/products.routes');
 const imagesRoutes = require('./routes/stock-images.routes');
 const spotifyRoutes = require('./routes/spotify.routes');
 const authRoutes = require('./routes/auth');
 const amazonRoutes = require('./routes/amazon.routes');
+const geminiRoutes = require('./routes/gemini.routes');
+const axios = require('axios')
 
 // v0.0.2
 
@@ -36,8 +40,11 @@ app.use(express.json());
 // Routes
 app.use('/api/v1.0/users', userRoutes);
 app.use('/api/v1.0/claude', claudeRoutes);
-app.use('/v1.0/tmdb', tmdbRoutes);
-app.use('/v1.0/google', googleRoutes);
+app.use('/v1.0/media', tmdbRoutes);
+app.use('/v1.0/ytmusic', ytmusicRoutes);
+app.use('/v1.0/places', placesRoutes);
+app.use('/v1.0/books', booksRoutes);
+app.use('/v1.0/suggestions', geminiRoutes);
 app.use('/v1.0/products', productsRoutes);
 app.use('/v1.0/images', imagesRoutes);
 app.use('/v1.0/spotify', spotifyRoutes);

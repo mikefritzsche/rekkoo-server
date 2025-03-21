@@ -16,8 +16,8 @@ const TMDB_CONFIG = {
 };
 
 // Utility function for movie search
-async function searchSingleMovie(title) {
-    const searchUrl = `${TMDB_CONFIG.baseUrl}/search/multi?api_key=${TMDB_CONFIG.apiKey}&query=${encodeURIComponent(title)}`;
+async function searchSingleMovie(query, page = 1, include_adult) {
+    const searchUrl = `${TMDB_CONFIG.baseUrl}/search/multi?api_key=${TMDB_CONFIG.apiKey}&query=${encodeURIComponent(query)}&page=${page}&include_adult=${include_adult}`;
 
     const response = await fetch(searchUrl);
 
@@ -26,16 +26,6 @@ async function searchSingleMovie(title) {
     }
 
     return await response.json();
-    // return data.results.map(movie => ({
-    //     id: movie.id,
-    //     title: movie.title,
-    //     releaseDate: movie.release_date,
-    //     overview: movie.overview,
-    //     posterPath: movie.poster_path ?
-    //         `https://image.tmdb.org/t/p/w500${movie.poster_path}` :
-    //         null,
-    //     voteAverage: movie.vote_average
-    // }));
 }
 
 // Apply rate limiting to all TMDB routes
@@ -44,19 +34,35 @@ async function searchSingleMovie(title) {
 router.get('/search', async (req, res) => {
     try {
         // Input validation
-        const { query } = req.query;
+        const { query, page, include_adult } = req.query;
 
         // Search for all movies
-        const searchResults = await searchSingleMovie(query)
+        const searchResults = await searchSingleMovie(query, page, include_adult)
 
         res.json(searchResults);
     } catch (error) {
-        console.error('TMDB search error:', error);
+        console.error('media search error:', error);
         res.status(500).json({
             error: 'Internal server error'
         });
     }
 });
+
+router.get('/movie/:id', async (req, res) => {
+    const { id } = req.params
+
+    const searchUrl = `${TMDB_CONFIG.baseUrl}/movie/${id}?api_key=${TMDB_CONFIG.apiKey}&append_to_response=recommendations,similar,videos,external_ids`;
+    try {
+        const response = await fetch(searchUrl);
+        const data = await response.json();
+        // data.similar = await getSimilarMovies(id)
+        res.json({...data})
+    } catch (error) {
+        res.status(500).json({error, searchUrl})
+    }
+
+})
+
 // Search multiple movies endpoint
 router.post('/search/multiple', async (req, res) => {
     try {

@@ -81,7 +81,8 @@ router.get('/amazon/spapi-authorize', (req, res) => {
     application_id: AMAZON_APP_ID,
     state,
     redirect_uri: REDIRECT_URI,
-    version: 'beta'
+    version: 'beta',
+    scope: 'sellingpartnerapi::notifications'
   };
 
   const authorizationUrl = `${amazonAuthUrl}?${qs.stringify(queryParams)}`;
