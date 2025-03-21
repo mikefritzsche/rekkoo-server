@@ -140,7 +140,6 @@ router.get('/details-new/:id', async (req, res) => {
   const {id} = req.params
 
   let url = `https://places.googleapis.com/v1/places/${id}`
-  // https://places.googleapis.com/v1/places/ChIJj3xVuvi0YVMRkFK_BVuZ5V8?fields=*&key=AIzaSyB-9D1IkE06GzKoZ33y4Kehg9U6n78eO0A
   // let url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${id}&key=${process.env.GOOGLE_API_KEY_WEB}`
   const fields = [
     'website',
