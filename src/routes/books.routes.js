@@ -5,6 +5,7 @@ const fetch = require('node-fetch');
 const API_KEY = process.env.GOOGLE_API_KEY_WEB;
 
 router.get('/', async (req, res) => {
+  console.log(`query: `, req.query)
   try {
     const { query, orderBy = 'relevance', startIndex = 0, maxResults = 40 } = req.query;
     if (!query) return res.status(400).json({error: "Query is required"});
@@ -16,16 +17,14 @@ router.get('/', async (req, res) => {
       maxResults,
     }
     const url = `https://www.googleapis.com/books/v1/volumes?${new URLSearchParams(queryParams)}`
-    console.log(`books url: `, url)
     const response = await fetch(url);
 
     // if (!response.ok) throw new Error('Google Books API request failed');
 
     const data = await response.json();
-    console.log(`data: `, data)
 
     data.items?.map(item => ({
-      id: `book_${item.id}`,
+      id: `${item.id}`,
       title: item.volumeInfo.title,
       subtitle: item.volumeInfo.authors?.join(', '),
       additionalInfo: item.volumeInfo.publishedDate,
@@ -38,5 +37,25 @@ router.get('/', async (req, res) => {
     res.status(500).json({error: 'Internal Server Error'});
   }
 })
+
+router.get('/volume/details/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({error: "Volume id is required"});
+
+    const url = `https://www.googleapis.com/books/v1/volumes/${id}`
+
+    const response = await fetch(url);
+
+    // if (!response.ok) throw new Error('Google Books API request failed');
+
+    const data = await response.json();
+    return res.json(data)
+  } catch (error) {
+    console.error('Book search error:', error);
+    res.status(500).json({error: 'Internal Server Error'});
+  }
+})
+
 
 module.exports = router;

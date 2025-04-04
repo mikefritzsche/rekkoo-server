@@ -1,4 +1,18 @@
 const express = require('express');
+const http = require('http');
+const cors = require('cors');
+const dotenv = require('dotenv');
+
+dotenv.config();
+
+// --- 1. Import Services and Route Initializers ---
+const SocketService = require('./services/socket-service');
+
+// Import route *initializer functions* where needed
+const initializeChatRoutes = require('./routes/chat.routes'); // Exports a function: (socketService) => router
+const initializeSyncRoutes = require('./routes/sync.routes'); // Exports a function: (socketService) => router
+
+// Import standard routes (assuming they export the router directly: module.exports = router;)
 const userRoutes = require('./routes/user.routes');
 const claudeRoutes = require('./routes/claude');
 const tmdbRoutes = require('./routes/tmdb.routes');
@@ -11,52 +25,62 @@ const spotifyRoutes = require('./routes/spotify.routes');
 const authRoutes = require('./routes/auth');
 const amazonRoutes = require('./routes/amazon.routes');
 const geminiRoutes = require('./routes/gemini.routes');
-const axios = require('axios')
+const openlibraryRoutes = require('./routes/openlibrary.routes');
+// Note: Removed the (socketService) from require lines above
 
-// v0.0.2
-
-const cors = require('cors');
-const dotenv = require('dotenv');
-
-dotenv.config();
-
+// --- 2. Initialize Express App and HTTP Server ---
 const app = express();
+const server = http.createServer(app); // Pass express app to http server
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// --- 3. Initialize Socket.IO Service ---
+// Needs to happen *after* server is created, but *before* routes using it are mounted.
+const socketService = new SocketService(server);
+
+// --- 4. Middleware ---
 app.use(cors({
-  origin: '*',
+  // Consider making origin more specific for production
+  origin: '*', // Or ['http://localhost:xxxx', 'https://your-frontend-domain.com']
   methods: ['GET', 'DELETE', 'POST', 'PUT', 'OPTIONS'],
   allowedHeaders: [
     'Content-Type',
-    'Authorization',
+    'Authorization', // Important for JWT
     'Cache-Control',
     'Pragma',
     'X-Random'
+    // Add any other custom headers your frontend sends
   ],
 }));
-app.use(express.json());
+app.use(express.json()); // Parse JSON bodies
 
-// Routes
+// --- Optional: Add Authentication Middleware BEFORE protected routes ---
+// const { authenticateJWT } = require('./auth/middleware'); // Example path
+// If most routes need auth, you could add it globally:
+// app.use(authenticateJWT);
+// Or apply it selectively within specific route files or using app.use('/path', authenticateJWT, routes);
+
+// --- 5. Mount Routes ---
+// Routes that DON'T need socketService
 app.use('/api/v1.0/users', userRoutes);
 app.use('/api/v1.0/claude', claudeRoutes);
 app.use('/v1.0/media', tmdbRoutes);
 app.use('/v1.0/ytmusic', ytmusicRoutes);
 app.use('/v1.0/places', placesRoutes);
 app.use('/v1.0/books', booksRoutes);
+app.use('/v1.0/recommendations', openlibraryRoutes);
 app.use('/v1.0/suggestions', geminiRoutes);
 app.use('/v1.0/products', productsRoutes);
 app.use('/v1.0/images', imagesRoutes);
 app.use('/v1.0/spotify', spotifyRoutes);
 app.use('/auth', authRoutes);
-app.use('/amazon', amazonRoutes);
+app.use('/amazon', amazonRoutes); // Assuming this doesn't need socketService
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ message: 'Something went wrong!' });
-});
+// Routes that DO need socketService
+// Call the initializer function here, passing the created instance
+app.use('/api/chat', initializeChatRoutes(socketService));
+app.use('/sync', initializeSyncRoutes(socketService));
 
+// --- 6. Basic/Utility Routes ---
 app.get('/api/v1.0/health', (req, res) => {
   res.json({ status: 'ok', message: 'Rekko Health Check Successful' });
 });
@@ -65,44 +89,61 @@ app.get('/', (req, res) => {
     message: 'Welcome to Rekkoo'
   });
 });
-
 app.get('/api/v1.0', (req, res) => {
   res.json({ message: 'Welcome to Rekkoo API' });
 });
 
+// --- Problematic Route (Keep in mind previous warnings) ---
 app.get('/gifster-fetch', async (req, res) => {
   try {
-    // https%3A%2F%2Fwww.amazon.com%2Fgp%2Fproduct%2FB0718T232Z%2Fref%3Dox_sc_saved_title_3%3Fsmid%3DA30QSGOJR8LMXA%26psc%3D1
-    const url = req.query.url // || `https://www.amazon.com/gp/product/B0718T232Z/ref=ox_sc_saved_title_3?smid=A30QSGOJR8LMXA&psc=1`
+    const url = req.query.url;
+    if (!url) {
+      return res.status(400).json({ message: 'Missing url query parameter' });
+    }
+    console.log(`[${new Date().toISOString()}] Fetching Giftster URL: ${url}`);
+    // Consider adding error handling and checking the response status from fetch
     const resp = await fetch(`https://www.giftster.com/fetch/?url=${encodeURIComponent(url)}`, {
       "headers": {
+        // Headers might need updating or removal, especially the cookie
         "accept": "application/json, text/plain, */*",
         "accept-language": "en-US,en;q=0.9",
-        "priority": "u=1, i",
-        "sec-ch-ua": "\"Not(A:Brand\";v=\"99\", \"Google Chrome\";v=\"133\", \"Chromium\";v=\"133\"",
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": "\"macOS\"",
-        "sec-fetch-dest": "empty",
-        "sec-fetch-mode": "cors",
-        "sec-fetch-site": "same-origin",
-        "sec-gpc": "1",
-        // "x-csrftoken": "pdIWjZa5oAlO6WOFuHlcV7yhX9T9fQ85",
-        "cookie": "_gcl_au=1.1.948493471.1741272541; mobileNavOpen=false; showAddGiftPrefs=true; showAddChildAccount=true; _ga=GA1.1.1903527802.1741272541; cc_cookie=%7B%22categories%22%3A%5B%22necessary%22%2C%22analytics%22%2C%22advertising%22%2C%22education%22%5D%2C%22revision%22%3A0%2C%22data%22%3Anull%2C%22consentTimestamp%22%3A%222025-03-06T14%3A49%3A03.918Z%22%2C%22consentId%22%3A%22ab7877ef-15b9-4b07-89eb-5dd90a8bc0f3%22%2C%22services%22%3A%7B%22necessary%22%3A%5B%5D%2C%22analytics%22%3A%5B%5D%2C%22advertising%22%3A%5B%5D%2C%22education%22%3A%5B%5D%7D%2C%22lastConsentTimestamp%22%3A%222025-03-06T14%3A49%3A03.918Z%22%2C%22expirationTime%22%3A1756997343918%7D; SIGNED_IN=true; csrftoken=pdIWjZa5oAlO6WOFuHlcV7yhX9T9fQ85; sessionid=2kr7jit2z4z4f7q3w6co5ax4cbau0ija; __cf_bm=bNiiqrx9.iWzOP0Gg4Ch1r2PI6oKLlGvVQfVqVy4ar0-1741702694-1.0.1.1-eUQK7tCkZfQPTMrbu3lGTEg7AGfIelS.bobWrCXANizWKhTNT_zuMSqxgwIsaLlA752JT77mfdmmw0X8qgY106rAg720Y2.v5Xj5GXtD_RA; _ga_P78WTYE0QE=GS1.1.1741702682.2.1.1741702730.12.0.1976679405",
-        "Referer": "https://www.giftster.com/list/v9hdL/",
+        "Referer": "https://www.giftster.com/", // Simplier Referer might be better
         "Referrer-Policy": "strict-origin-when-cross-origin"
+        // Avoid sending fixed cookies like this - it will break
       },
-      "body": null,
       "method": "GET"
     });
+
+    if (!resp.ok) {
+      console.error(`[${new Date().toISOString()}] Giftster fetch failed with status: ${resp.status} ${resp.statusText}`);
+      // Try to get error body if possible
+      let errorBody = 'Could not retrieve error details.';
+      try {
+        errorBody = await resp.text();
+      } catch (e) { /* Ignore if body cannot be read */ }
+      return res.status(resp.status).json({ message: `Giftster fetch failed: ${resp.statusText}`, details: errorBody });
+    }
+
     const data = await resp.json();
+    console.log(`[${new Date().toISOString()}] Giftster fetch successful for: ${url}`);
     res.json(data);
   } catch(error) {
-    console.log(error);
-    res.status(500).json({ message: 'Something went wrong!' });
+    console.error(`[${new Date().toISOString()}] Error in /gifster-fetch:`, error);
+    res.status(500).json({ message: 'Something went wrong during Giftster fetch!' });
   }
-})
+});
 
-app.listen(PORT, () => {
-  console.log(`DB_SSL: `, process.env.DB_SSL)
-  console.log(`Server running on port ${PORT}`);
+
+// --- 7. Error Handling Middleware (Keep this last) ---
+app.use((err, req, res, next) => {
+  console.error(`[${new Date().toISOString()}] Unhandled Error:`, err); // Log the full error
+  // Avoid exposing detailed error stacks in production
+  res.status(err.status || 500).json({ message: err.message || 'Something went wrong!' });
+});
+
+// --- 8. Start Server ---
+server.listen(PORT, () => { // Correctly use server.listen
+  console.log(`DB_SSL: `, process.env.DB_SSL); // Make sure DB_SSL is actually used somewhere if logged
+  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Socket.IO listening on port ${PORT}`);
 });
