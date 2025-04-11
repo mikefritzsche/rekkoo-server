@@ -1,0 +1,18 @@
+version: "3.9"
+services:
+  rekkoo-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rekkoo-server
+    restart: unless-stopped
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+    networks:
+      - proxy
+    env_file:
+      - .env.common
+
+networks:
+  proxy:
+    external: true

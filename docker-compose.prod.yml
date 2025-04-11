@@ -1,0 +1,28 @@
+# docker-compose.prod.yml
+services:
+  rekkoo-server:
+    image: rekkoo-server-prod-${SAFE_BRANCH_NAME}:latest
+    build:
+      target: production
+    env_file:
+      - .env
+    environment:
+      PORT: ${PORT}
+      HOST: ${HOST}
+      ENTRYPOINT: ${ENTRYPOINT}
+      USE_TLS: ${USE_TLS}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      JWT_SECRET: ${JWT_SECRET}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.services.rekkoo-server-api.loadbalancer.server.port=3100"
+      - "traefik.http.routers.rekkoo-server-api.rule=Host(`${HOST}`)"
+      - "traefik.http.routers.rekkoo-server-api.entrypoints=${ENTRYPOINT}"
+      - "traefik.http.routers.rekkoo-server-api.tls=${USE_TLS}"
+      - "traefik.http.routers.rekkoo-server-api.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.rekkoo-server-api.service=rekkoo-server-api"

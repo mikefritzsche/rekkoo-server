@@ -1,0 +1,154 @@
+version: 2.1
+
+orbs:
+  slack: circleci/slack@4.12.5
+
+executors:
+  node-docker:
+    docker:
+      - image: cimg/node:20.0
+    resource_class: medium
+
+commands:
+  deploy:
+    parameters:
+      environment:
+        type: string
+    steps:
+      - checkout
+      - setup_remote_docker:
+          docker_layer_caching: true
+      - run:
+          name: Set branch variables
+          command: |
+            SAFE_BRANCH_NAME=$(echo ${CIRCLE_BRANCH} | tr '/' '-' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g')
+            echo "export SAFE_BRANCH_NAME=${SAFE_BRANCH_NAME}" >> $BASH_ENV
+            source $BASH_ENV
+      - run:
+          name: Build Docker image
+          command: |
+            echo "Building Docker image for << parameters.environment >>..."
+            if [ "<< parameters.environment >>" = "prod" ]; then
+              docker build --target production -t express-app:${CIRCLE_SHA1} .
+            else
+              docker build --target staging -t express-app:${CIRCLE_SHA1} .
+            fi
+            docker tag express-app:${CIRCLE_SHA1} rekkoo-server-<< parameters.environment >>-${SAFE_BRANCH_NAME}:latest
+      - run:
+          name: Save Docker image
+          command: |
+            mkdir -p /tmp/docker-images
+            docker save rekkoo-server-<< parameters.environment >>-${SAFE_BRANCH_NAME}:latest | gzip > /tmp/docker-images/rekkoo-server.tar.gz
+      - add_ssh_keys:
+          fingerprints:
+            - ${HETZNER_SSH_KEY_FINGERPRINT}
+      - run:
+          name: Deploy to Hetzner
+          no_output_timeout: 20m
+          command: |
+            BASE_DIR="/home/rekkoo/server"
+            if [ "<< parameters.environment >>" = "prod" ]; then
+              DEPLOY_DIR="${BASE_DIR}/prod"
+              DOCKER_COMPOSE_OVERRIDE="docker-compose.prod.yml"
+            elif [ "<< parameters.environment >>" = "staging" ]; then
+              DEPLOY_DIR="${BASE_DIR}/staging/${SAFE_BRANCH_NAME}"
+              DOCKER_COMPOSE_OVERRIDE="docker-compose.staging.yml"
+            else
+              DEPLOY_DIR="${BASE_DIR}/dev/${SAFE_BRANCH_NAME}"
+              DOCKER_COMPOSE_OVERRIDE="docker-compose.override.yml"
+            fi
+
+            echo "Starting deployment to ${DEPLOY_DIR}..."
+            
+            # Test SSH connection
+            ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "echo 'SSH connection successful'" || exit 1
+            
+            # Create deployment directory
+            ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
+              mkdir -p ${DEPLOY_DIR}
+            " || exit 1
+            
+            # Copy deployment files
+            echo "Copying configuration files..."
+            scp -o StrictHostKeyChecking=no \
+              docker-compose.yml \
+              ${DOCKER_COMPOSE_OVERRIDE} \
+              scripts/deploy.sh \
+              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
+            
+            # Copy docker image
+            echo "Copying Docker image..."
+            scp -o StrictHostKeyChecking=no \
+              /tmp/docker-images/rekkoo-server.tar.gz \
+              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/ || exit 1
+            
+            # Deploy
+            echo "Starting deployment..."
+            ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
+              set -x
+              cd ${DEPLOY_DIR}
+              chmod +x deploy.sh
+              gunzip -c rekkoo-server.tar.gz | docker load
+              export SAFE_BRANCH_NAME=${SAFE_BRANCH_NAME}
+              export HOST=\${HOST:-api.rekkoo.com}
+              export ENTRYPOINT=\${ENTRYPOINT:-websecure}
+              export USE_TLS=\${USE_TLS:-true}
+              ./deploy.sh up
+              rm rekkoo-server.tar.gz
+            " || exit 1
+      - slack/notify:
+          event: fail
+          template: basic_fail_1
+      - slack/notify:
+          event: pass
+          template: success_tagged_deploy_1
+
+jobs:
+  deploy-prod:
+    executor: node-docker
+    steps:
+      - deploy:
+          environment: prod
+
+  deploy-staging:
+    executor: node-docker
+    steps:
+      - deploy:
+          environment: staging
+
+  deploy-dev:
+    executor: node-docker
+    steps:
+      - deploy:
+          environment: dev
+
+workflows:
+  version: 2
+  build-deploy:
+    jobs:
+      - deploy-prod:
+          context:
+            - hetzner-deploy-secrets
+            - slack-secrets
+            - rekkoo-secrets
+          filters:
+            branches:
+              only: main
+      - deploy-staging:
+          context:
+            - hetzner-deploy-secrets
+            - slack-secrets
+            - rekkoo-secrets
+          filters:
+            branches:
+              ignore:
+                - main
+                - /.*dev.*/
+      - deploy-dev:
+          context:
+            - hetzner-deploy-secrets
+            - slack-secrets
+            - rekkoo-secrets
+          filters:
+            branches:
+              only: /.*dev.*/
