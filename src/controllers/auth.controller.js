@@ -115,7 +115,6 @@ const verifyEmail = async (req, res) => {
  * @route POST /auth/login
  */
 const login = async (req, res) => {
-  console.log('login: ', req.body);
   try {
     const { username, email, password } = req.body;
     const identifier = username || email;

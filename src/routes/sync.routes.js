@@ -91,14 +91,9 @@ module.exports = (socketService) => {
         const changeLogPrefix = `${logPrefix} Change [${table_name}/${record_id}/${operation}]:`;
 
         // Basic validation
-        if (!table_name || !record_id || !operation || !['lists', 'items', 'user_settings'].includes(table_name) || !['create', 'update', 'delete'].includes(operation)) {
+        if (!table_name || !record_id || !operation || !['lists', 'items'].includes(table_name) || !['create', 'update', 'delete'].includes(operation)) {
           console.error(`${changeLogPrefix} Invalid change structure/values.`);
           throw new Error(`Invalid change structure for record ${record_id || 'MISSING_ID'}. Table: ${table_name}, Op: ${operation}`);
-        }
-        
-        // Early validation for user_settings - record_id must match user_id
-        if (table_name === 'user_settings' && record_id !== userId) {
-          throw new Error(`User ${userId} cannot modify settings for user ${record_id}`);
         }
         if ((operation === 'create' || operation === 'update') && !data) {
           console.error(`${changeLogPrefix} Missing data for create/update.`);
@@ -140,15 +135,17 @@ module.exports = (socketService) => {
         switch (operation) {
           case 'create': {
             console.log(`${changeLogPrefix} Attempting to create.`);
-            // For offline-first support, check if record exists and treat as update if it does
-            const existingCheck = await client.query(`SELECT id FROM ${table_name} WHERE id = $1::uuid AND deleted_at IS NULL`, [record_id]);
-            if (existingCheck.rows.length > 0) {
-              console.log(`${changeLogPrefix} Record exists, converting create to update operation.`);
-              operation = 'update'; // Convert to update operation
-              break; // Exit switch to process as update
+            // Check for existing (soft-deleted or active) to prevent ID collision if client reuses IDs improperly
+            const collisionCheck = await client.query(`SELECT id FROM ${table_name} WHERE id = $1::uuid`, [record_id]);
+            if (collisionCheck.rows.length > 0) {
+              console.warn(`${changeLogPrefix} Record already exists (possibly soft-deleted). Rejecting create.`);
+              // Option 1: Throw error
+              throw new Error(`Cannot create record ${record_id}, ID already exists.`);
+              // Option 2: Treat as update (more complex, needs careful handling)
+              // results.push({ success: false, operation, record_id, error: 'Record already exists' });
+              // continue; // Skip to next change
             }
 
-            // Only proceed with create if we didn't convert to update
             const columns = Object.keys(filteredData);
             const values = Object.values(filteredData);
             const valuePlaceholders = columns.map((_, i) => `$${i + 2}`).join(', ');
@@ -156,64 +153,13 @@ module.exports = (socketService) => {
             // Add owner_id correctly
             let insertOwnerId = userId;
             if (table_name === 'items') {
-              const itemCheck = await client.query(`SELECT l.owner_id FROM items i JOIN lists l ON i.list_id = l.id WHERE i.id = $1::uuid AND i.deleted_at IS NULL`, [record_id]);
-              if (itemCheck.rows.length === 0) throw new Error(`Item ${record_id} not found or already deleted.`);
-              if (itemCheck.rows[0].owner_id !== userId) throw new Error(`User ${userId} does not own the list containing item ${record_id}.`);
-            } else if (table_name === 'lists') {
-              const listCheck = await client.query(`SELECT owner_id FROM lists WHERE id = $1::uuid AND deleted_at IS NULL`, [record_id]);
-              if (listCheck.rows.length === 0) throw new Error(`List ${record_id} not found or already deleted.`);
-              if (listCheck.rows[0].owner_id !== userId) throw new Error(`User ${userId} does not own list ${record_id}.`);
-            } else if (table_name === 'user_settings') {
-              // Debug log all relevant IDs for troubleshooting
-              console.log(`[user_settings] Auth User: ${userId}, Record ID: ${record_id}, Operation: ${operation}, Data:`, JSON.stringify(data, null, 2));
-              
-              // For user_settings, we need to validate both the record_id and data.user_id
-              const settingsUserId = data?.user_id;
-              if (!settingsUserId) {
-                throw new Error(`Missing required user_id in user_settings data`);
+              if (!listIdForItem) throw new Error(`Cannot determine list_id for creating item ${record_id}`);
+              // Verify pusher owns the target list
+              const listOwnerCheck = await client.query(`SELECT owner_id FROM lists WHERE id = $1::uuid AND owner_id = $2::uuid AND deleted_at IS NULL`, [listIdForItem, userId]);
+              if (listOwnerCheck.rows.length === 0) {
+                throw new Error(`User ${userId} does not own the target list ${listIdForItem} for item creation.`);
               }
-              
-              // Record ID should match the authenticated user for security
-              if (record_id !== userId) {
-                throw new Error(`Invalid record_id ${record_id} - must match authenticated user ${userId}`);
-              }
-              
-              // Data.user_id must also match authenticated user
-              if (settingsUserId !== userId) {
-                throw new Error(`Data user_id ${settingsUserId} does not match authenticated user ${userId}`);
-              }
-              
-              // Handle different operations
-              if (operation === 'update') {
-                const settingsCheck = await client.query(
-                  `SELECT user_id FROM user_settings WHERE user_id = $1::uuid`, 
-                  [userId]
-                );
-                if (settingsCheck.rows.length === 0) {
-                  console.log(`[user_settings] No existing settings found for user ${userId}, converting update to create`);
-                  operation = 'create'; // Convert to create operation
-                }
-              }
-              else if (operation === 'delete') {
-                const settingsCheck = await client.query(
-                  `SELECT user_id FROM user_settings WHERE user_id = $1::uuid`, 
-                  [userId]
-                );
-                if (settingsCheck.rows.length === 0) {
-                  console.log(`[user_settings] No settings to delete for user ${userId}, skipping`);
-                  continue; // Skip to next change
-                }
-              }
-              else if (operation === 'create') {
-                const existingCheck = await client.query(
-                  `SELECT user_id FROM user_settings WHERE user_id = $1::uuid`,
-                  [userId]
-                );
-                if (existingCheck.rows.length > 0) {
-                  console.log(`[user_settings] Settings already exist for user ${userId}, converting create to update`);
-                  operation = 'update'; // Convert to update operation
-                }
-              }
+              insertOwnerId = userId; // Items are owned by the list owner implicitly through list_id
             }
 
             const finalColumns = ['id', ...columns];
@@ -222,26 +168,17 @@ module.exports = (socketService) => {
               finalColumns.push('owner_id');
             }
 
-            // Generate proper placeholders with type casting only for UUID columns
-            const finalPlaceholders = finalColumns.map((col, i) => {
-              // Only cast id and owner_id columns to UUID
-              if (col === 'id' || col === 'owner_id') {
-                return `$${i + 1}::uuid`;
-              }
-              return `$${i + 1}`;
-            });
-            
+            const finalPlaceholders = ['$1::uuid', ...valuePlaceholders];
+            if (table_name === 'lists') {
+              finalPlaceholders.push(`$${columns.length + 2}::uuid`);
+            }
+
             const finalValues = [record_id, ...values];
             if (table_name === 'lists') {
               finalValues.push(insertOwnerId);
             }
 
-            // Debug logs
-            console.log('valuePlaceholders: ', valuePlaceholders);
-            console.log('finalColumns: ', finalColumns);
-            console.log('filteredData: ', filteredData);
-            console.log('finalPlaceholders: ', finalPlaceholders);
-            console.log('finalValues: ', finalValues);
+
             const insertResult = await client.query(
               `INSERT INTO ${table_name} (${finalColumns.join(', ')}) VALUES (${finalPlaceholders.join(', ')}) RETURNING id`,
               finalValues
@@ -265,25 +202,17 @@ module.exports = (socketService) => {
             }
 
             // Verify ownership before update
+            let ownerCheckField = 'owner_id';
+            let ownerCheckValue = userId;
             if (table_name === 'items') {
               // For items, check if the user owns the list the item belongs to
               const itemCheck = await client.query(`SELECT l.owner_id FROM items i JOIN lists l ON i.list_id = l.id WHERE i.id = $1::uuid AND i.deleted_at IS NULL`, [record_id]);
               if (itemCheck.rows.length === 0) throw new Error(`Item ${record_id} not found or already deleted.`);
               if (itemCheck.rows[0].owner_id !== userId) throw new Error(`User ${userId} does not own the list containing item ${record_id}.`);
-            } else if (table_name === 'lists') {
+            } else { // 'lists' table
               const listCheck = await client.query(`SELECT owner_id FROM lists WHERE id = $1::uuid AND deleted_at IS NULL`, [record_id]);
               if (listCheck.rows.length === 0) throw new Error(`List ${record_id} not found or already deleted.`);
               if (listCheck.rows[0].owner_id !== userId) throw new Error(`User ${userId} does not own list ${record_id}.`);
-            } else if (table_name === 'user_settings') {
-              // For user_settings, the record_id must match the user_id
-              if (record_id !== userId) {
-                throw new Error(`User ${userId} cannot modify settings for user ${record_id}`);
-              }
-              // Verify the settings record exists
-              const settingsCheck = await client.query(`SELECT user_id FROM user_settings WHERE user_id = $1::uuid`, [record_id]);
-              if (settingsCheck.rows.length === 0) {
-                throw new Error(`User settings for ${record_id} not found`);
-              }
             }
 
 
@@ -364,15 +293,16 @@ module.exports = (socketService) => {
         // We track the *original* client data for potential conflict resolution later
         await client.query(
           `INSERT INTO sync_tracking
-               (table_name, record_id, operation, data, created_at)
-           VALUES ($1, $2::uuid, $3, $4, CURRENT_TIMESTAMP)
+               (table_name, record_id, operation, data, created_at, user_id) -- Added user_id
+           VALUES ($1, $2::uuid, $3, $4, CURRENT_TIMESTAMP, $5::uuid)
            ON CONFLICT (table_name, record_id) DO UPDATE SET
              operation = EXCLUDED.operation,
              data = EXCLUDED.data,
              created_at = CURRENT_TIMESTAMP,
+             user_id = EXCLUDED.user_id, -- Ensure user_id is updated too
              deleted_at = NULL -- IMPORTANT: Undelete tracking record on new push
              `,
-          [table_name, record_id, operation, JSON.stringify(data || {})] // Store original client data
+          [table_name, record_id, operation, JSON.stringify(data || {}), userId] // Store original client data
         );
 
       } // end for loop over changes

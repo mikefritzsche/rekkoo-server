@@ -39,7 +39,8 @@ const socketService = new SocketService(server);
 
 // --- 4. Middleware ---
 app.use(cors({
-  origin: '*',
+  // Consider making origin more specific for production
+  origin: '*', // Or ['http://localhost:xxxx', 'https://your-frontend-domain.com']
   methods: ['GET', 'DELETE', 'POST', 'PUT', 'OPTIONS'],
   allowedHeaders: [
     'Content-Type',
@@ -47,6 +48,7 @@ app.use(cors({
     'Cache-Control',
     'Pragma',
     'X-Random'
+    // Add any other custom headers your frontend sends
   ],
 }));
 app.use(express.json()); // Parse JSON bodies
