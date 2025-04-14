@@ -9,7 +9,7 @@ RUN npm install --omit=dev # Install only production deps first (layer caching)
 RUN npm install # Install all deps including devDependencies
 
 FROM base AS development
-RUN #npm install
+RUN npm install
 COPY src src
 COPY .env* ./
 ENV PORT=3100

@@ -1,5 +1,5 @@
 services:
-  rekkoo-server:
+  rekkoo-server-api:
     build:
       context: .
       dockerfile: Dockerfile

@@ -1,6 +1,7 @@
 // socket-service.js
 const socketIo = require('socket.io');
 const jwt = require('jsonwebtoken'); // Or your auth mechanism
+const db = require('../config/db');
 
 class SocketService {
   constructor(server) {
@@ -20,20 +21,41 @@ class SocketService {
     });
 
     // --- Authentication Middleware ---
-    this.io.use((socket, next) => {
+    this.io.use(async (socket, next) => {
       const token = socket.handshake.auth.token;
       if (!token) {
         console.error('Socket connection failed: No token provided.');
         return next(new Error('Authentication error: No token'));
       }
+
       try {
-        // Replace with your actual token verification logic
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        socket.user = decoded; // Attach user info
+        // Verify token and check session against database
+        const sessionResult = await db.query(
+          `SELECT u.id, u.username, u.email, u.email_verified
+           FROM user_sessions s
+           JOIN users u ON s.user_id = u.id
+           WHERE s.token = $1
+             AND s.expires_at > NOW()
+             AND u.account_locked = false`,
+          [token]
+        );
+
+        if (sessionResult.rows.length === 0) {
+          console.error('Socket connection failed: Invalid or expired session');
+          return next(new Error('Authentication error: Invalid session'));
+        }
+
+        // Attach user to socket
+        socket.user = {
+          id: sessionResult.rows[0].id,
+          username: sessionResult.rows[0].username,
+          email: sessionResult.rows[0].email
+        };
+
         console.log(`Socket authenticated for user: ${socket.user.id}`);
         next();
       } catch (err) {
-        console.error('Socket connection failed: Invalid token.');
+        console.error('Socket connection failed:', err);
         next(new Error('Authentication error: Invalid token'));
       }
     });
@@ -89,6 +111,15 @@ class SocketService {
 
       socket.on('error', (err) => {
         console.error(`Socket Error on ${socket.id}:`, err);
+      });
+
+      // Handle ping events
+      socket.on('ping', (data) => {
+        console.log(`Received ping from socket ${socket.id}, user ${socket.user?.id}`);
+        socket.emit('pong', { 
+          timestamp: new Date().toISOString(),
+          message: 'Pong response from server'
+        });
       });
     });
   }
