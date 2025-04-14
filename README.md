@@ -14,4 +14,4 @@
  - Production: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d 
  - (Ensure all required environment variables like HOST, PORT, ENTRYPOINT, USE_TLS, etc., are set in your production environment or .env file).
 
- v0.0.1 - Initial release
+ v0.0.2 - version bump
