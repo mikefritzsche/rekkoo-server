@@ -143,6 +143,7 @@ app.use((err, req, res, next) => {
 
 // --- 8. Start Server ---
 server.listen(PORT, () => { // Correctly use server.listen
+  console.log(`env: `, process.env)
   console.log(`DB_SSL: `, process.env.DB_SSL); // Make sure DB_SSL is actually used somewhere if logged
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`Socket.IO listening on port ${PORT}`);
