@@ -42,36 +42,39 @@ const authenticateJWT = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     try {
-      // Use a single query operation to check session and get user details
-      const sessionResult = await db.query(
-        `SELECT u.id, u.username, u.email, u.email_verified, 
-                s.expires_at, s.last_activity_at
-         FROM user_sessions s
-         JOIN users u ON s.user_id = u.id
-         WHERE s.token = $1
-           AND s.expires_at > NOW()
-           AND u.account_locked = false`,
-        [token]
+      // First get user details from token
+      const userResult = await db.query(
+        `SELECT id, username, email, email_verified
+         FROM users 
+         WHERE id = $1 AND account_locked = false`,
+        [decoded.userId]
       );
 
-      if (sessionResult.rows.length === 0) {
-        return res.status(401).json({ message: 'Invalid or expired session' });
+      if (userResult.rows.length === 0) {
+        return res.status(401).json({ message: 'User not found or account locked' });
       }
 
-      // Update session last activity
-      await db.query(
-        `UPDATE user_sessions 
-         SET last_activity_at = NOW()
-         WHERE token = $1`,
+      // Check if session exists (optional)
+      const sessionResult = await db.query(
+        `SELECT expires_at FROM user_sessions 
+         WHERE token = $1 AND expires_at > NOW()`,
         [token]
       );
+
+      // Update session last activity if exists
+      if (sessionResult.rows.length > 0) {
+        await db.query(
+          `UPDATE user_sessions SET last_activity_at = NOW() WHERE token = $1`,
+          [token]
+        );
+      }
 
       // Attach user to request
       req.user = {
-        id: sessionResult.rows[0].id,
-        username: sessionResult.rows[0].username,
-        email: sessionResult.rows[0].email,
-        emailVerified: sessionResult.rows[0].email_verified
+        id: userResult.rows[0].id,
+        username: userResult.rows[0].username,
+        email: userResult.rows[0].email,
+        emailVerified: userResult.rows[0].email_verified
       };
 
       next();

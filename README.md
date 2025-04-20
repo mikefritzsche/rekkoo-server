@@ -1,6 +1,6 @@
 ## Docker Usage:
 
-- local:  docker compose --env-file=.env.development --env-file=.env.common up -d
+- local:  docker compose --env-file=.env.common --env-file=.env.development -f docker-compose.yml -f docker-compose.override.yml up -d --build 
 - Development: docker compose up
 - Production: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 

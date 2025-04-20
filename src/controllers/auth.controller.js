@@ -206,7 +206,7 @@ const login = async (req, res) => {
       );
 
       // Generate JWT token (short-lived access token)
-      const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
+      const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
         expiresIn: '24h' // Token expires in 1 hour
       });
 
@@ -226,7 +226,7 @@ const login = async (req, res) => {
       await client.query(
         `INSERT INTO user_sessions (user_id, token, ip_address, user_agent, expires_at)
          VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 days')`,
-        [user.id, token, req.ip, req.headers['user-agent']]
+        [user.id, accessToken, req.ip, req.headers['user-agent']]
       );
 
       // Log successful login
@@ -237,12 +237,12 @@ const login = async (req, res) => {
           user.id,
           req.ip,
           req.headers['user-agent'],
-          JSON.stringify({ session_token: token })
+          JSON.stringify({ session_token: accessToken })
         ]
       );
 
       return {
-        token,
+        accessToken,
         refreshToken,
         user: {
           id: user.id,
@@ -254,7 +254,7 @@ const login = async (req, res) => {
 
     return res.status(200).json({
       message: 'Login successful',
-      token: result.token,
+      accessToken: result.accessToken,
       refreshToken: result.refreshToken,
       user: result.user
     });
@@ -345,7 +345,7 @@ const refreshToken = async (req, res) => {
       );
 
       return {
-        token: newToken,
+        accessToken: newToken,
         refreshToken: newRefreshToken,
         user
       };
@@ -353,7 +353,7 @@ const refreshToken = async (req, res) => {
 
     return res.status(200).json({
       message: 'Token refreshed successfully',
-      token: result.token,
+      accessToken: result.accessToken,
       refreshToken: result.refreshToken,
       user: result.user
     });

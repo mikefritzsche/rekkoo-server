@@ -32,15 +32,15 @@ module.exports = (socketService) => {
         `SELECT st.*,
                 CASE
                   WHEN st.table_name = 'lists' THEN l.title
-                  WHEN st.table_name = 'items' THEN i.title
+                  WHEN st.table_name = 'listItems' THEN li.title
                   ELSE NULL
                 END as record_title
          FROM sync_tracking st
          LEFT JOIN lists l ON st.table_name = 'lists' AND st.record_id::uuid = l.id AND l.owner_id = $2::uuid -- Join owner check
-         LEFT JOIN items i ON st.table_name = 'items' AND st.record_id::uuid = i.id AND i.list_id IN (SELECT id FROM lists WHERE owner_id = $2::uuid) -- Join owner check via list
+         LEFT JOIN listItems li ON st.table_name = 'listItems' AND st.record_id::uuid = li.id AND li.list_id IN (SELECT id FROM lists WHERE owner_id = $2::uuid) -- Join owner check via list
          WHERE st.created_at > $1
            AND st.deleted_at IS NULL
-           AND (l.owner_id = $2::uuid OR i.list_id IS NOT NULL) -- Ensure at least one join matched owner
+           AND (l.owner_id = $2::uuid OR li.list_id IS NOT NULL) -- Ensure at least one join matched owner
          ORDER BY st.created_at ASC`,
         [timestamp, userId]
       );
@@ -81,7 +81,6 @@ module.exports = (socketService) => {
         return res.json({ success: true, results: [], message: "No changes provided." });
       }
 
-
       console.log(`${logPrefix} Processing ${changes.length} changes.`);
       const results = [];
       let changesMade = false; // Track if any actual DB modification occurred
@@ -91,7 +90,7 @@ module.exports = (socketService) => {
         const changeLogPrefix = `${logPrefix} Change [${table_name}/${record_id}/${operation}]:`;
 
         // Basic validation
-        if (!table_name || !record_id || !operation || !['lists', 'items'].includes(table_name) || !['create', 'update', 'delete'].includes(operation)) {
+        if (!table_name || !record_id || !operation || !['lists', 'items', 'user_settings', 'users'].includes(table_name) || !['create', 'update', 'delete'].includes(operation)) {
           console.error(`${changeLogPrefix} Invalid change structure/values.`);
           throw new Error(`Invalid change structure for record ${record_id || 'MISSING_ID'}. Table: ${table_name}, Op: ${operation}`);
         }
@@ -119,166 +118,189 @@ module.exports = (socketService) => {
           // Add more specific data filtering/validation as needed
         }
 
-        // Determine actual owner_id for filtering/insertion
-        // For items, the owner is the owner of the list it belongs to.
-        // For lists, the owner is directly the user.
-        let recordOwnerId = userId; // Default to the pusher for lists
-        let listIdForItem = null;
+        // Verify ownership before update for lists and items
+        let ownerCheckField = 'owner_id';
+        let ownerCheckValue = userId;
         if (table_name === 'items') {
-          listIdForItem = data?.list_id; // Get list_id from incoming data for new items
-          if (!listIdForItem && operation === 'create') {
-            throw new Error(`Missing list_id for creating item ${record_id}`);
+          // For items, check if the user owns the list the item belongs to
+          if (operation === 'create') {
+            // For create, verify the list_id belongs to the user
+            const listCheck = await client.query(
+              `SELECT owner_id FROM lists WHERE id = $1::uuid AND deleted_at IS NULL`,
+              [data.list_id]
+            );
+            if (listCheck.rows.length === 0) {
+              throw new Error(`List ${data.list_id} not found or already deleted.`);
+            }
+            if (listCheck.rows[0].owner_id !== userId) {
+              throw new Error(`User ${userId} does not own the list ${data.list_id}.`);
+            }
+          } else {
+            // For update/delete, check the item's list ownership
+            const itemCheck = await client.query(
+              `SELECT l.owner_id FROM items i JOIN lists l ON i.list_id = l.id WHERE i.id = $1::uuid AND i.deleted_at IS NULL`,
+              [record_id]
+            );
+            if (itemCheck.rows.length === 0) {
+              throw new Error(`Item ${record_id} not found or already deleted.`);
+            }
+            if (itemCheck.rows[0].owner_id !== userId) {
+              throw new Error(`User ${userId} does not own the list containing item ${record_id}.`);
+            }
+          }
+        } else if (table_name === 'lists') {
+          if (operation === 'create') {
+            // For create, verify the owner_id matches the authenticated user
+            if (data.owner_id !== userId) {
+              throw new Error(`Cannot create list for another user.`);
+            }
+          } else {
+            // For update/delete, check list ownership
+            const listCheck = await client.query(
+              `SELECT owner_id FROM lists WHERE id = $1::uuid AND deleted_at IS NULL`,
+              [record_id]
+            );
+            if (listCheck.rows.length === 0) {
+              throw new Error(`List ${record_id} not found or already deleted.`);
+            }
+            if (listCheck.rows[0].owner_id !== userId) {
+              throw new Error(`User ${userId} does not own list ${record_id}.`);
+            }
           }
         }
 
-        // Process the operation
-        switch (operation) {
-          case 'create': {
-            console.log(`${changeLogPrefix} Attempting to create.`);
-            // Check for existing (soft-deleted or active) to prevent ID collision if client reuses IDs improperly
-            const collisionCheck = await client.query(`SELECT id FROM ${table_name} WHERE id = $1::uuid`, [record_id]);
-            if (collisionCheck.rows.length > 0) {
-              console.warn(`${changeLogPrefix} Record already exists (possibly soft-deleted). Rejecting create.`);
-              // Option 1: Throw error
-              throw new Error(`Cannot create record ${record_id}, ID already exists.`);
-              // Option 2: Treat as update (more complex, needs careful handling)
-              // results.push({ success: false, operation, record_id, error: 'Record already exists' });
-              // continue; // Skip to next change
+        const updateClauses = Object.keys(filteredData).map((key, i) => `${key} = $${i + 2}`);
+        let updateValues = [record_id, ...Object.values(filteredData)];
+
+        let queryResult;
+        if (operation === 'create') {
+          // Check if record already exists
+          const existingCheck = await client.query(
+            `SELECT id, created_at FROM ${table_name} WHERE id = $1::uuid AND deleted_at IS NULL`,
+            [record_id]
+          );
+
+          if (existingCheck.rows.length > 0) {
+            console.log(`${changeLogPrefix} Record already exists, checking timestamps`);
+            const existingRecord = existingCheck.rows[0];
+            
+            // If the existing record is newer, skip the update
+            if (new Date(existingRecord.created_at) > new Date()) {
+              console.log(`${changeLogPrefix} Existing record is newer, skipping update`);
+              results.push({ 
+                success: true, 
+                operation: 'create', 
+                record_id, 
+                message: 'Record already exists with newer timestamp' 
+              });
+              continue;
             }
 
-            const columns = Object.keys(filteredData);
-            const values = Object.values(filteredData);
-            const valuePlaceholders = columns.map((_, i) => `$${i + 2}`).join(', ');
+            // Record exists and is older, proceed with update
+            console.log(`${changeLogPrefix} Converting to update operation`);
+            const updateQuery = `
+              UPDATE ${table_name}
+              SET ${updateClauses.join(', ')}, updated_at = CURRENT_TIMESTAMP
+              WHERE id = $1::uuid AND deleted_at IS NULL
+              RETURNING id
+            `;
+            console.log(`${changeLogPrefix} Executing update query:`, updateQuery);
+            console.log(`${changeLogPrefix} With values:`, updateValues);
+            queryResult = await client.query(updateQuery, updateValues);
+          } else {
+            // Record doesn't exist, proceed with create
+            const insertColumns = Object.keys(filteredData);
+            const insertValues = Object.values(filteredData);
+            const insertQuery = `
+              INSERT INTO ${table_name} (id, ${insertColumns.join(', ')}, created_at, updated_at)
+              VALUES ($1::uuid, ${insertColumns.map((_, i) => `$${i + 2}`).join(', ')}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+              RETURNING id
+            `;
+            console.log(`${changeLogPrefix} Executing insert query:`, insertQuery);
+            console.log(`${changeLogPrefix} With values:`, [record_id, ...insertValues]);
+            queryResult = await client.query(insertQuery, [record_id, ...insertValues]);
+          }
+        } else {
+          // For update operations, use UPDATE
+          let updateQuery = `
+            UPDATE ${table_name}
+            SET ${updateClauses.join(', ')}, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1::uuid AND deleted_at IS NULL
+            RETURNING id
+          `;
+          let returningColumn = 'id';
 
-            // Add owner_id correctly
-            let insertOwnerId = userId;
-            if (table_name === 'items') {
-              if (!listIdForItem) throw new Error(`Cannot determine list_id for creating item ${record_id}`);
-              // Verify pusher owns the target list
-              const listOwnerCheck = await client.query(`SELECT owner_id FROM lists WHERE id = $1::uuid AND owner_id = $2::uuid AND deleted_at IS NULL`, [listIdForItem, userId]);
-              if (listOwnerCheck.rows.length === 0) {
-                throw new Error(`User ${userId} does not own the target list ${listIdForItem} for item creation.`);
-              }
-              insertOwnerId = userId; // Items are owned by the list owner implicitly through list_id
+          // Special handling for user_settings table (assuming PK is user_id)
+          if (table_name === 'user_settings') {
+            updateQuery = `
+              UPDATE ${table_name}
+              SET ${updateClauses.join(', ')}, updated_at = CURRENT_TIMESTAMP
+              WHERE user_id = $1::uuid AND deleted_at IS NULL
+              RETURNING user_id
+            `;
+            returningColumn = 'user_id';
+            // IMPORTANT: Use the authenticated userId for the WHERE clause value
+            updateValues[0] = userId; 
+            console.log(`${changeLogPrefix} Using user_id specific update query and ensuring userId ('${userId}') is used for WHERE clause.`);
+          }
+
+          console.log(`${changeLogPrefix} Executing update query:`, updateQuery);
+          console.log(`${changeLogPrefix} With values:`, updateValues);
+          queryResult = await client.query(updateQuery, updateValues);
+
+          // Use the correct column name from the result
+          if (queryResult.rows.length > 0) {
+             console.log(`${changeLogPrefix} Update returned column: ${returningColumn} = ${queryResult.rows[0][returningColumn]}`);
+          }
+        }
+
+        if (queryResult.rowCount === 1) {
+          console.log(`${changeLogPrefix} Operation completed successfully.`);
+          changesMade = true;
+
+          // Store the change in sync_tracking
+          const trackingData = {
+            ...filteredData,
+            id: record_id,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          };
+
+          // For user_settings, ensure JSON fields are properly stringified
+          if (table_name === 'user_settings') {
+            if (trackingData.notification_preferences && typeof trackingData.notification_preferences === 'object') {
+              trackingData.notification_preferences = JSON.stringify(trackingData.notification_preferences);
             }
-
-            const finalColumns = ['id', ...columns];
-            // Add owner_id to query if it's a direct column (like in 'lists')
-            if (table_name === 'lists') {
-              finalColumns.push('owner_id');
+            if (trackingData.privacy_settings && typeof trackingData.privacy_settings === 'object') {
+              trackingData.privacy_settings = JSON.stringify(trackingData.privacy_settings);
             }
+          }
 
-            const finalPlaceholders = ['$1::uuid', ...valuePlaceholders];
-            if (table_name === 'lists') {
-              finalPlaceholders.push(`$${columns.length + 2}::uuid`);
-            }
+          // For lists, ensure custom_fields is properly stringified
+          if (table_name === 'lists' && trackingData.custom_fields && typeof trackingData.custom_fields === 'object') {
+            trackingData.custom_fields = JSON.stringify(trackingData.custom_fields);
+          }
 
-            const finalValues = [record_id, ...values];
-            if (table_name === 'lists') {
-              finalValues.push(insertOwnerId);
-            }
+          const trackingQuery = `
+            INSERT INTO sync_tracking
+              (table_name, record_id, operation, data, created_at)
+            VALUES ($1, $2::uuid, $3, $4, CURRENT_TIMESTAMP)
+            ON CONFLICT (table_name, record_id) DO UPDATE SET
+              operation = EXCLUDED.operation,
+              data = EXCLUDED.data,
+              created_at = CURRENT_TIMESTAMP,
+              deleted_at = NULL
+          `;
 
+          console.log(`${changeLogPrefix} Executing tracking query:`, trackingQuery);
+          console.log(`${changeLogPrefix} With values:`, [table_name, record_id, operation, JSON.stringify(trackingData)]);
 
-            const insertResult = await client.query(
-              `INSERT INTO ${table_name} (${finalColumns.join(', ')}) VALUES (${finalPlaceholders.join(', ')}) RETURNING id`,
-              finalValues
-            );
-            if (insertResult.rowCount === 1) {
-              console.log(`${changeLogPrefix} Created successfully.`);
-              changesMade = true;
-            } else {
-              console.error(`${changeLogPrefix} Failed to create.`);
-              throw new Error(`Database insert failed for ${record_id}`);
-            }
-            break;
-          } // end case 'create'
-
-          case 'update': {
-            console.log(`${changeLogPrefix} Attempting to update.`);
-            if (!filteredData || Object.keys(filteredData).length === 0) {
-              console.warn(`${changeLogPrefix} No valid data provided for update. Skipping.`);
-              results.push({ success: false, operation, record_id, error: 'No data to update' });
-              continue; // Skip to next change
-            }
-
-            // Verify ownership before update
-            let ownerCheckField = 'owner_id';
-            let ownerCheckValue = userId;
-            if (table_name === 'items') {
-              // For items, check if the user owns the list the item belongs to
-              const itemCheck = await client.query(`SELECT l.owner_id FROM items i JOIN lists l ON i.list_id = l.id WHERE i.id = $1::uuid AND i.deleted_at IS NULL`, [record_id]);
-              if (itemCheck.rows.length === 0) throw new Error(`Item ${record_id} not found or already deleted.`);
-              if (itemCheck.rows[0].owner_id !== userId) throw new Error(`User ${userId} does not own the list containing item ${record_id}.`);
-            } else { // 'lists' table
-              const listCheck = await client.query(`SELECT owner_id FROM lists WHERE id = $1::uuid AND deleted_at IS NULL`, [record_id]);
-              if (listCheck.rows.length === 0) throw new Error(`List ${record_id} not found or already deleted.`);
-              if (listCheck.rows[0].owner_id !== userId) throw new Error(`User ${userId} does not own list ${record_id}.`);
-            }
-
-
-            const updateClauses = Object.keys(filteredData).map((key, i) => `${key} = $${i + 2}`);
-            const updateValues = [record_id, ...Object.values(filteredData)];
-
-            const updateResult = await client.query(
-              `UPDATE ${table_name}
-               SET ${updateClauses.join(', ')}, updated_at = CURRENT_TIMESTAMP
-               WHERE id = $1::uuid AND deleted_at IS NULL
-               RETURNING id`, // Check ownership implicitly via previous query/logic
-              updateValues
-            );
-
-            if (updateResult.rowCount === 1) {
-              console.log(`${changeLogPrefix} Updated successfully.`);
-              changesMade = true;
-            } else {
-              console.warn(`${changeLogPrefix} Update failed (maybe record deleted concurrently?).`);
-              // Don't throw, but report failure for this change
-              results.push({ success: false, operation, record_id, error: 'Update failed, record potentially missing or deleted' });
-              continue; // Move to next change
-            }
-            break;
-          } // end case 'update'
-
-          case 'delete': {
-            console.log(`${changeLogPrefix} Attempting to soft delete.`);
-            // Verify ownership before delete (similar to update)
-            if (table_name === 'items') {
-              const itemCheck = await client.query(`SELECT l.owner_id FROM items i JOIN lists l ON i.list_id = l.id WHERE i.id = $1::uuid AND i.deleted_at IS NULL`, [record_id]);
-              if (itemCheck.rows.length === 0) {
-                console.warn(`${changeLogPrefix} Item not found or already deleted. Skipping delete.`);
-                results.push({ success: true, operation, record_id, message: 'Already deleted or not found' }); // Idempotent success
-                continue;
-              }
-              if (itemCheck.rows[0].owner_id !== userId) throw new Error(`User ${userId} does not own the list containing item ${record_id}. Cannot delete.`);
-            } else { // 'lists' table
-              const listCheck = await client.query(`SELECT owner_id FROM lists WHERE id = $1::uuid AND deleted_at IS NULL`, [record_id]);
-              if (listCheck.rows.length === 0) {
-                console.warn(`${changeLogPrefix} List not found or already deleted. Skipping delete.`);
-                results.push({ success: true, operation, record_id, message: 'Already deleted or not found' }); // Idempotent success
-                continue;
-              }
-              if (listCheck.rows[0].owner_id !== userId) throw new Error(`User ${userId} does not own list ${record_id}. Cannot delete.`);
-            }
-
-            // Perform soft delete
-            const deleteResult = await client.query(
-              `UPDATE ${table_name} SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-               WHERE id = $1::uuid AND deleted_at IS NULL
-               RETURNING id`,
-              [record_id]
-            );
-
-            if (deleteResult.rowCount === 1) {
-              console.log(`${changeLogPrefix} Soft deleted successfully.`);
-              changesMade = true;
-              // Optional: If deleting a list, maybe soft delete its items too? Add that logic here if needed.
-            } else {
-              console.warn(`${changeLogPrefix} Soft delete failed (maybe record already deleted?). Treating as success.`);
-              // Idempotent success if already deleted
-            }
-            break;
-          } // end case 'delete'
-        } // end switch
+          await client.query(trackingQuery, [table_name, record_id, operation, JSON.stringify(trackingData)]);
+        } else {
+          console.warn(`${changeLogPrefix} Operation failed (record not found or already deleted).`);
+          results.push({ success: false, operation, record_id, error: 'Operation failed, record potentially missing or deleted' });
+          continue;
+        }
 
         // Only record success if the operation was attempted and didn't throw/continue earlier
         const existingResultIndex = results.findIndex(r => r.record_id === record_id);
@@ -288,22 +310,6 @@ module.exports = (socketService) => {
           // Update existing result if needed (e.g., if a create was skipped but delete succeeded)
           results[existingResultIndex] = { success: true, operation, record_id };
         }
-
-        // Update or insert sync tracking record AFTER successful operation
-        // We track the *original* client data for potential conflict resolution later
-        await client.query(
-          `INSERT INTO sync_tracking
-               (table_name, record_id, operation, data, created_at, user_id) -- Added user_id
-           VALUES ($1, $2::uuid, $3, $4, CURRENT_TIMESTAMP, $5::uuid)
-           ON CONFLICT (table_name, record_id) DO UPDATE SET
-             operation = EXCLUDED.operation,
-             data = EXCLUDED.data,
-             created_at = CURRENT_TIMESTAMP,
-             user_id = EXCLUDED.user_id, -- Ensure user_id is updated too
-             deleted_at = NULL -- IMPORTANT: Undelete tracking record on new push
-             `,
-          [table_name, record_id, operation, JSON.stringify(data || {}), userId] // Store original client data
-        );
 
       } // end for loop over changes
 
