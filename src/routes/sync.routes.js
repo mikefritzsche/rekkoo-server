@@ -104,12 +104,16 @@ module.exports = (socketService) => {
           filteredData = { ...data };
           // Remove potentially problematic fields (adjust based on your actual schema needs)
           delete filteredData.id; // Should use record_id
-          delete filteredData.owner_id; // Should be set server-side based on authenticated user
           delete filteredData.created_at;
           delete filteredData.updated_at;
           delete filteredData.deleted_at;
           delete filteredData.owner_server_id; // Example potentially client-only field
           delete filteredData.sharing_permissions; // Read-only field
+
+          // Ensure owner_id is set correctly for lists
+          if (table_name === 'lists') {
+            filteredData.owner_id = userId; // Always set owner_id to the authenticated user
+          }
 
           // Specific handling for JSON fields, etc.
           if (table_name === 'lists' && filteredData.background && typeof filteredData.background !== 'string') {
@@ -151,9 +155,7 @@ module.exports = (socketService) => {
         } else if (table_name === 'lists') {
           if (operation === 'create') {
             // For create, verify the owner_id matches the authenticated user
-            if (data.owner_id !== userId) {
-              throw new Error(`Cannot create list for another user.`);
-            }
+            filteredData.owner_id = userId; // Always set owner_id to the authenticated user
           } else {
             // For update/delete, check list ownership
             const listCheck = await client.query(

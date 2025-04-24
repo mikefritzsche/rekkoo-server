@@ -22,6 +22,9 @@ const validateListData = (req, res, next) => {
         if (!data.list_type) {
           return res.status(400).json({ error: 'List type is required' });
         }
+        if (!data.owner_id) {
+          return res.status(400).json({ error: 'Owner ID is required' });
+        }
 
         // Validate constraints
         if (data.is_event && !data.event_date) {
@@ -70,6 +73,9 @@ const validateListData = (req, res, next) => {
     }
     if (!data.list_type) {
       return res.status(400).json({ error: 'List type is required' });
+    }
+    if (!data.owner_id) {
+      return res.status(400).json({ error: 'Owner ID is required' });
     }
 
     // ... rest of the validation logic ...
