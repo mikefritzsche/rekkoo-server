@@ -222,6 +222,17 @@ module.exports = (socketService) => {
             console.log(`${changeLogPrefix} With values:`, [record_id, ...insertValues]);
             queryResult = await client.query(insertQuery, [record_id, ...insertValues]);
           }
+        } else if (operation === 'delete') {
+          // For delete operations, set deleted_at timestamp
+          const deleteQuery = `
+            UPDATE ${table_name}
+            SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1::uuid AND deleted_at IS NULL
+            RETURNING id
+          `;
+          console.log(`${changeLogPrefix} Executing delete query:`, deleteQuery);
+          console.log(`${changeLogPrefix} With values:`, [record_id]);
+          queryResult = await client.query(deleteQuery, [record_id]);
         } else {
           // For update operations, use UPDATE
           let updateQuery = `
@@ -267,6 +278,18 @@ module.exports = (socketService) => {
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString()
           };
+
+          // For delete operations, preserve the record's data
+          if (operation === 'delete') {
+            const recordData = await client.query(
+              `SELECT * FROM ${table_name} WHERE id = $1::uuid`,
+              [record_id]
+            );
+            if (recordData.rows.length > 0) {
+              trackingData.deleted_at = new Date().toISOString();
+              Object.assign(trackingData, recordData.rows[0]);
+            }
+          }
 
           // For user_settings, ensure JSON fields are properly stringified
           if (table_name === 'user_settings') {
