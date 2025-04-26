@@ -1,7 +1,7 @@
 -- Core user management tables
 CREATE TABLE users
 (
-    id                SERIAL PRIMARY KEY,
+    id                UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     username          VARCHAR(50) UNIQUE  NOT NULL,
     email             VARCHAR(255) UNIQUE NOT NULL,
     password_hash     VARCHAR(255)        NOT NULL,
@@ -12,7 +12,7 @@ CREATE TABLE users
 
 CREATE TABLE user_settings
 (
-    user_id                  INTEGER PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    user_id                  UUID PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
     theme                    VARCHAR(20)              DEFAULT 'light',
     notification_preferences JSONB                    DEFAULT '{
       "email": true,

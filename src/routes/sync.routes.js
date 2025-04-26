@@ -36,11 +36,20 @@ module.exports = (socketService) => {
                   ELSE NULL
                 END as record_title
          FROM sync_tracking st
-         LEFT JOIN lists l ON st.table_name = 'lists' AND st.record_id::uuid = l.id AND l.owner_id = $2::uuid -- Join owner check
-         LEFT JOIN listItems li ON st.table_name = 'listItems' AND st.record_id::uuid = li.id AND li.list_id IN (SELECT id FROM lists WHERE owner_id = $2::uuid) -- Join owner check via list
+         LEFT JOIN lists l ON st.table_name = 'lists' AND st.record_id::uuid = l.id AND l.owner_id = $2::uuid AND l.deleted_at IS NULL
+         LEFT JOIN "listItems" li ON st.table_name = 'listItems' AND st.record_id::uuid = li.id AND li.deleted_at IS NULL 
+           AND li.list_id IN (SELECT id FROM lists WHERE owner_id = $2::uuid AND deleted_at IS NULL)
          WHERE st.created_at > $1
            AND st.deleted_at IS NULL
-           AND (l.owner_id = $2::uuid OR li.list_id IS NOT NULL) -- Ensure at least one join matched owner
+           AND (
+             (st.table_name = 'lists' AND l.owner_id = $2::uuid)
+             OR
+             (st.table_name = 'listItems' AND li.list_id IS NOT NULL)
+             OR
+             (st.table_name = 'user_settings' AND st.record_id = $2::uuid)
+             OR
+             (st.table_name = 'users' AND st.record_id = $2::uuid)
+           )
          ORDER BY st.created_at ASC`,
         [timestamp, userId]
       );
@@ -87,39 +96,45 @@ module.exports = (socketService) => {
 
       for (const change of changes) {
         const { table_name, record_id, operation, data } = change;
-        const changeLogPrefix = `${logPrefix} Change [${table_name}/${record_id}/${operation}]:`;
+        let originalOperation = operation; // Keep a mutable copy if needed, but maybe not
+        
+        const changeLogPrefix = `${logPrefix} Change [${table_name}/${record_id}/${originalOperation}]:`;
 
-        // Basic validation
-        if (!table_name || !record_id || !operation || !['lists', 'items', 'user_settings', 'users'].includes(table_name) || !['create', 'update', 'delete'].includes(operation)) {
+        // --- Early Validation --- 
+        
+        // Basic structure/type validation
+        if (!table_name || !record_id || !originalOperation || !['lists', 'items', 'user_settings', 'users'].includes(table_name) || !['create', 'update', 'delete'].includes(originalOperation)) {
           console.error(`${changeLogPrefix} Invalid change structure/values.`);
-          throw new Error(`Invalid change structure for record ${record_id || 'MISSING_ID'}. Table: ${table_name}, Op: ${operation}`);
+          results.push({ success: false, operation: originalOperation, record_id, message: `Invalid change structure/values.` });
+          continue; 
         }
-        if ((operation === 'create' || operation === 'update') && !data) {
+        // Data presence validation
+        if ((originalOperation === 'create' || originalOperation === 'update') && !data) {
           console.error(`${changeLogPrefix} Missing data for create/update.`);
-          throw new Error(`Data is required for ${operation} operation on ${table_name}/${record_id}`);
+          results.push({ success: false, operation: originalOperation, record_id, message: `Data is required for ${originalOperation} operation.` });
+          continue;
+        }
+        // UUID Format Validation for record_id (especially important for create)
+        const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+        if (!uuidRegex.test(record_id)) {
+            console.error(`${changeLogPrefix} Invalid UUID format for record_id: ${record_id}`);
+            results.push({ success: false, operation: originalOperation, record_id, message: `Invalid format for record_id. UUID expected.` });
+            continue; // Skip processing this change
         }
 
+        // Prepare filteredData (do this once)
         let filteredData = null;
         if (data) {
           filteredData = { ...data };
-          // Remove potentially problematic fields (adjust based on your actual schema needs)
-          delete filteredData.id; // Should use record_id
+          delete filteredData.id; // Should use record_id or user_id
           delete filteredData.created_at;
           delete filteredData.updated_at;
           delete filteredData.deleted_at;
-          delete filteredData.owner_server_id; // Example potentially client-only field
-          delete filteredData.sharing_permissions; // Read-only field
-
-          // Ensure owner_id is set correctly for lists
-          if (table_name === 'lists') {
-            filteredData.owner_id = userId; // Always set owner_id to the authenticated user
+          // Filter user_id if it's not the primary key for the table
+          if (table_name !== 'user_settings') {
+             delete filteredData.user_id; 
           }
-
-          // Specific handling for JSON fields, etc.
-          if (table_name === 'lists' && filteredData.background && typeof filteredData.background !== 'string') {
-            filteredData.background = JSON.stringify(filteredData.background);
-          }
-          // Add more specific data filtering/validation as needed
+          // Add other fields to filter if necessary
         }
 
         // Verify ownership before update for lists and items
@@ -127,7 +142,7 @@ module.exports = (socketService) => {
         let ownerCheckValue = userId;
         if (table_name === 'items') {
           // For items, check if the user owns the list the item belongs to
-          if (operation === 'create') {
+          if (originalOperation === 'create') {
             // For create, verify the list_id belongs to the user
             const listCheck = await client.query(
               `SELECT owner_id FROM lists WHERE id = $1::uuid AND deleted_at IS NULL`,
@@ -153,7 +168,7 @@ module.exports = (socketService) => {
             }
           }
         } else if (table_name === 'lists') {
-          if (operation === 'create') {
+          if (originalOperation === 'create') {
             // For create, verify the owner_id matches the authenticated user
             filteredData.owner_id = userId; // Always set owner_id to the authenticated user
           } else {
@@ -175,7 +190,7 @@ module.exports = (socketService) => {
         let updateValues = [record_id, ...Object.values(filteredData)];
 
         let queryResult;
-        if (operation === 'create') {
+        if (originalOperation === 'create') {
           // Check if record already exists
           const existingCheck = await client.query(
             `SELECT id, created_at FROM ${table_name} WHERE id = $1::uuid AND deleted_at IS NULL`,
@@ -222,7 +237,7 @@ module.exports = (socketService) => {
             console.log(`${changeLogPrefix} With values:`, [record_id, ...insertValues]);
             queryResult = await client.query(insertQuery, [record_id, ...insertValues]);
           }
-        } else if (operation === 'delete') {
+        } else if (originalOperation === 'delete') {
           // For delete operations, set deleted_at timestamp
           const deleteQuery = `
             UPDATE ${table_name}
@@ -280,7 +295,7 @@ module.exports = (socketService) => {
           };
 
           // For delete operations, preserve the record's data
-          if (operation === 'delete') {
+          if (originalOperation === 'delete') {
             const recordData = await client.query(
               `SELECT * FROM ${table_name} WHERE id = $1::uuid`,
               [record_id]
@@ -318,22 +333,22 @@ module.exports = (socketService) => {
           `;
 
           console.log(`${changeLogPrefix} Executing tracking query:`, trackingQuery);
-          console.log(`${changeLogPrefix} With values:`, [table_name, record_id, operation, JSON.stringify(trackingData)]);
+          console.log(`${changeLogPrefix} With values:`, [table_name, record_id, originalOperation, JSON.stringify(trackingData)]);
 
-          await client.query(trackingQuery, [table_name, record_id, operation, JSON.stringify(trackingData)]);
+          await client.query(trackingQuery, [table_name, record_id, originalOperation, JSON.stringify(trackingData)]);
         } else {
           console.warn(`${changeLogPrefix} Operation failed (record not found or already deleted).`);
-          results.push({ success: false, operation, record_id, error: 'Operation failed, record potentially missing or deleted' });
+          results.push({ success: false, operation: originalOperation, record_id, error: 'Operation failed, record potentially missing or deleted' });
           continue;
         }
 
         // Only record success if the operation was attempted and didn't throw/continue earlier
         const existingResultIndex = results.findIndex(r => r.record_id === record_id);
         if (existingResultIndex === -1) {
-          results.push({ success: true, operation, record_id });
+          results.push({ success: true, operation: originalOperation, record_id });
         } else {
           // Update existing result if needed (e.g., if a create was skipped but delete succeeded)
-          results[existingResultIndex] = { success: true, operation, record_id };
+          results[existingResultIndex] = { success: true, operation: originalOperation, record_id };
         }
 
       } // end for loop over changes
@@ -406,7 +421,7 @@ module.exports = (socketService) => {
           // Consider adding tags join if needed: LEFT JOIN item_tags it ON i.id = it.item_id ... array_agg(it.tag_id)
           const itemsQuery = `
                 SELECT i.*
-                FROM items i
+                FROM "listItems" i -- Use quoted table name
                 WHERE i.list_id = ANY($1::uuid[])
                   AND i.deleted_at IS NULL`;
           items = await client.query(itemsQuery, [listIds]);
