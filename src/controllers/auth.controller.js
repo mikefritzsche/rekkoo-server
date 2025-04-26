@@ -8,6 +8,14 @@ const { v4: uuidv4 } = require('uuid');
 const crypto = require('crypto');
 const saltRounds = 12;
 const { authenticateJWT, checkPermissions } = require('../auth/middleware');
+const Mailjet = require('node-mailjet');
+const emailService = require('../services/emailService');
+const { validationResult } = require('express-validator');
+
+const mailjet = new Mailjet({
+  apiKey: process.env.MJ_APIKEY_PUBLIC,
+  apiSecret: process.env.MJ_APIKEY_PRIVATE
+});
 
 // Helper function to generate a refresh token
 const generateRefreshToken = () => {
@@ -207,7 +215,7 @@ const login = async (req, res) => {
 
       // Generate JWT token (short-lived access token)
       const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
-        expiresIn: '24h' // Token expires in 1 hour
+        expiresIn: '72h' // Token expires in 1 hour
       });
 
       // Generate refresh token
@@ -499,69 +507,65 @@ const getCurrentUser = async (req, res) => {
  * @route POST /auth/forgot-password
  */
 const forgotPassword = async (req, res) => {
-  // Your existing forgotPassword implementation
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ errors: errors.array() });
+  }
+
+  const { email } = req.body;
+
   try {
-    const { email } = req.body;
+    console.log(`Forgot password request received for email: ${email}`);
+    // Find user by email
+    const userResult = await db.query('SELECT id, email FROM users WHERE email = $1', [email]);
 
-    const result = await db.transaction(async (client) => {
-      // Generate reset token
-      const resetToken = uuidv4();
+    let result = {
+      userFound: false,
+      tokenGenerated: false,
+    };
 
-      // Update user with reset token
-      const result = await client.query(
-        `UPDATE users 
-         SET reset_password_token = $1,
-             reset_password_token_expires_at = NOW() + INTERVAL '1 hour',
-             updated_at = NOW()
-         WHERE email = $2 AND account_locked = false
-         RETURNING id`,
-        [resetToken, email]
+    if (userResult.rows.length > 0) {
+      result.userFound = true;
+      const user = userResult.rows[0];
+      console.log(`User found: ${user.id}`);
+
+      // Generate a secure reset token
+      const token = crypto.randomBytes(32).toString('hex');
+      const expires = new Date(Date.now() + 3600000); // Token expires in 1 hour
+      console.log(`Generated reset token (expires ${expires.toISOString()})`);
+
+      // Store token and expiry in the database
+      await db.query(
+        'UPDATE users SET reset_password_token = $1, reset_password_token_expires_at = $2 WHERE id = $3',
+        [token, expires, user.id]
       );
+      result.tokenGenerated = true;
+      console.log(`Stored reset token for user ${user.id}`);
 
-      // Even if user not found, return success to prevent email enumeration
-      // But log the attempt
-      if (result.rows.length === 0) {
-        await client.query(
-          `INSERT INTO auth_logs (user_id, event_type, ip_address, user_agent, details)
-           VALUES (NULL, 'password_reset_request', $1, $2, $3)`,
-          [
-            req.ip,
-            req.headers['user-agent'],
-            JSON.stringify({ email, status: 'user_not_found' })
-          ]
-        );
-
-        return { userFound: false };
+      // Send password reset email with token if user was found
+      if (result.userFound && result.tokenGenerated) {
+        // Send email with reset token
+        try {
+          await emailService.sendPasswordResetEmail(user.email, token);
+          console.log(`Password reset email sent successfully to ${user.email}`);
+        } catch (emailError) {
+          console.error(`Failed to send password reset email to ${user.email}:`, emailError);
+          // Respond with a generic error, but log the specific issue
+          // Don't reveal if the email sending failed vs. user not found
+          return res.status(200).json({ message: 'If an account with that email exists, a password reset link has been sent.' });
+        }
       }
-
-      const userId = result.rows[0].id;
-
-      // Log password reset request
-      await client.query(
-        `INSERT INTO auth_logs (user_id, event_type, ip_address, user_agent, details)
-         VALUES ($1, 'password_reset_request', $2, $3, $4)`,
-        [
-          userId,
-          req.ip,
-          req.headers['user-agent'],
-          JSON.stringify({ email, reset_token: resetToken })
-        ]
-      );
-
-      return { userFound: true, userId, resetToken };
-    });
-
-    // TODO: Send password reset email with token if user was found
-    if (result.userFound) {
-      // Send email with reset token
+    } else {
+      console.log(`User not found for email: ${email}`);
+      // Still return a generic success message even if user not found for security
     }
 
-    return res.status(200).json({
-      message: 'If an account with that email exists, a password reset link has been sent to your email'
-    });
+    // Always return a generic success message to prevent email enumeration attacks
+    res.status(200).json({ message: 'If an account with that email exists, a password reset link has been sent.' });
+
   } catch (error) {
-    console.error('Forgot password error:', error);
-    return res.status(500).json({ message: 'Server error' });
+    console.error('Error in forgot password controller:', error);
+    res.status(500).json({ message: 'Internal server error during password reset process.' });
   }
 };
 
