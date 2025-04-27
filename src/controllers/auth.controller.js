@@ -340,6 +340,20 @@ const refreshToken = async (req, res) => {
         [userId, newRefreshToken, expiresAt]
       );
 
+      // Remove old sessions for this user to prevent clutter/confusion
+      await client.query(
+        `DELETE FROM user_sessions WHERE user_id = $1`,
+        [userId]
+      );
+
+      // Insert new session record with the new access token
+      await client.query(
+        `INSERT INTO user_sessions (user_id, token, ip_address, user_agent, expires_at)
+         VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 days')`,
+        [userId, newToken, req.ip, req.headers['user-agent']]
+      );
+      console.log(`[Auth Controller] Updated user_sessions table with new access token for user ${userId}`);
+
       // Log token refresh
       await client.query(
         `INSERT INTO auth_logs (user_id, event_type, ip_address, user_agent, details)

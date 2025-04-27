@@ -451,6 +451,15 @@ router.post('/users/:id/roles', [
   }
 });
 
+// <<< NEW: Add Auth Check Endpoint >>>
+// Uses authenticateJWT middleware first, then sends 200 OK if successful
+router.get('/check', authenticateJWT, (req, res) => {
+  // If authenticateJWT middleware passes (calls next()), the token is valid.
+  // req.user should be populated by the middleware.
+  console.log(`Auth check successful for user: ${req.user?.id}`);
+  res.status(200).json({ message: 'Session valid', userId: req.user?.id });
+});
+
 module.exports = router;
 
 

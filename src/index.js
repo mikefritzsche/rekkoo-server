@@ -31,7 +31,7 @@ const openlibraryRoutes = require('./routes/openlibrary.routes');
 // --- 2. Initialize Express App and HTTP Server ---
 const app = express();
 const server = http.createServer(app);
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3100;
 
 // --- 3. Initialize Socket.IO Service ---
 const socketService = new SocketService(server);

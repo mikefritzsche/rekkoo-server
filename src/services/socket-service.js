@@ -5,18 +5,18 @@ const db = require('../config/db');
 
 class SocketService {
   constructor(server) {
-    // const io = require('socket.io')(3000, { // or other port
-    //   cors: {
-    //     origin: "*", // Adjust for production
-    //     methods: ["GET", "POST"]
-    //   }
-    // });
-    this.io = socketIo(server, { // <--- Add options object here
+    // Determine allowed origins based on environment
+    const allowedOrigins = process.env.NODE_ENV === 'production'
+      ? (process.env.SOCKET_CORS_ORIGINS || 'https://your-production-app.com').split(',') // Default to a placeholder, split comma-separated string
+      : (process.env.SOCKET_CORS_ORIGINS_DEV || '*').split(','); // Default to '*' for dev, split comma-separated string
+
+    console.log(`SocketService: Allowed CORS Origins: ${allowedOrigins.join(', ')}`);
+
+    this.io = socketIo(server, {
       cors: {
-        // IMPORTANT: Restrict origin in production!
-        origin: "*", // Or ['http://localhost:xxxx', 'exp://...', 'https://your-app-domain.com']
+        origin: allowedOrigins, // Use the dynamic list
         methods: ["GET", "POST"],
-        // credentials: true // If you need cookies/auth headers beyond the handshake auth
+        // credentials: true // Uncomment if needed
       }
     });
 

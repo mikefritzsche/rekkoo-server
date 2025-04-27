@@ -103,8 +103,8 @@ module.exports = (socketService) => {
         // --- Early Validation --- 
         
         // Basic structure/type validation
-        if (!table_name || !record_id || !originalOperation || !['lists', 'items', 'user_settings', 'users'].includes(table_name) || !['create', 'update', 'delete'].includes(originalOperation)) {
-          console.error(`${changeLogPrefix} Invalid change structure/values.`);
+        if (!table_name || !record_id || !originalOperation || !['lists', 'listItems', 'user_settings', 'users'].includes(table_name) || !['create', 'update', 'delete'].includes(originalOperation)) {
+          console.error(`${changeLogPrefix} Invalid change structure/values (table_name: ${table_name}, operation: ${originalOperation}).`);
           results.push({ success: false, operation: originalOperation, record_id, message: `Invalid change structure/values.` });
           continue; 
         }
@@ -126,22 +126,41 @@ module.exports = (socketService) => {
         let filteredData = null;
         if (data) {
           filteredData = { ...data };
-          delete filteredData.id; // Should use record_id or user_id
+          delete filteredData.id; 
           delete filteredData.created_at;
           delete filteredData.updated_at;
           delete filteredData.deleted_at;
-          // Filter user_id if it's not the primary key for the table
-          if (table_name !== 'user_settings') {
-             delete filteredData.user_id; 
+          
+          console.log(`${changeLogPrefix} Received table_name: '${table_name}'`); 
+          
+          // Table-specific filtering
+          if (table_name === 'lists') {
+            if ('type' in filteredData) {
+                delete filteredData.type; 
+                console.log(`${changeLogPrefix} Explicitly removed 'type' field for list operation.`);
+            }
+            if ('items' in filteredData) { 
+                delete filteredData.items;
+                console.log(`${changeLogPrefix} Explicitly removed 'items' field for list operation.`);
+            }
+          } else if (table_name === 'user_settings') {
+             // Keep user_id for user_settings as it might be the key
+          } else if (table_name === 'listItems') {
+            // For listItems, remove user_id if present in data (shouldn't be)
+            delete filteredData.user_id;
+          } else {
+            // Default: remove user_id for other tables unless it's the key
+            delete filteredData.user_id; 
           }
-          // Add other fields to filter if necessary
+          
+          console.log(`${changeLogPrefix} Keys in filteredData before SQL build: ${Object.keys(filteredData).join(', ')}`);
         }
 
-        // Verify ownership before update for lists and items
+        // Verify ownership before update for lists and listItems
         let ownerCheckField = 'owner_id';
         let ownerCheckValue = userId;
-        if (table_name === 'items') {
-          // For items, check if the user owns the list the item belongs to
+        if (table_name === 'listItems') {
+          // For listItems, check if the user owns the list the item belongs to
           if (originalOperation === 'create') {
             // For create, verify the list_id belongs to the user
             const listCheck = await client.query(
@@ -157,7 +176,7 @@ module.exports = (socketService) => {
           } else {
             // For update/delete, check the item's list ownership
             const itemCheck = await client.query(
-              `SELECT l.owner_id FROM items i JOIN lists l ON i.list_id = l.id WHERE i.id = $1::uuid AND i.deleted_at IS NULL`,
+              `SELECT l.owner_id FROM "listItems" li JOIN lists l ON li.list_id = l.id WHERE li.id = $1::uuid AND li.deleted_at IS NULL`,
               [record_id]
             );
             if (itemCheck.rows.length === 0) {
@@ -186,8 +205,9 @@ module.exports = (socketService) => {
           }
         }
 
-        const updateClauses = Object.keys(filteredData).map((key, i) => `${key} = $${i + 2}`);
-        let updateValues = [record_id, ...Object.values(filteredData)];
+        // Build SQL params using the (hopefully) correctly filteredData
+        const updateClauses = filteredData ? Object.keys(filteredData).map((key, i) => `${key} = $${i + 2}`) : [];
+        let updateValues = filteredData ? [record_id, ...Object.values(filteredData)] : [record_id];
 
         let queryResult;
         if (originalOperation === 'create') {
@@ -226,8 +246,14 @@ module.exports = (socketService) => {
             queryResult = await client.query(updateQuery, updateValues);
           } else {
             // Record doesn't exist, proceed with create
-            const insertColumns = Object.keys(filteredData);
-            const insertValues = Object.values(filteredData);
+            const insertColumns = filteredData ? Object.keys(filteredData) : [];
+            const insertValues = filteredData ? Object.values(filteredData) : [];
+            if (insertColumns.length === 0 && originalOperation === 'create') {
+                console.error(`${changeLogPrefix} No valid data columns found for create operation after filtering.`);
+                // Handle error appropriately, maybe push a failure result
+                results.push({ success: false, operation: originalOperation, record_id, message: `No valid data provided for create operation.` });
+                continue; 
+            }
             const insertQuery = `
               INSERT INTO ${table_name} (id, ${insertColumns.join(', ')}, created_at, updated_at)
               VALUES ($1::uuid, ${insertColumns.map((_, i) => `$${i + 2}`).join(', ')}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
