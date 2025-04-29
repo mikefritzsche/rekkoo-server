@@ -27,6 +27,7 @@ const authRoutes = require('./routes/auth');
 const amazonRoutes = require('./routes/amazon.routes');
 const geminiRoutes = require('./routes/gemini.routes');
 const openlibraryRoutes = require('./routes/openlibrary.routes');
+const uploadRoutes = require('./routes/upload.routes');
 
 // --- 2. Initialize Express App and HTTP Server ---
 const app = express();
@@ -62,6 +63,7 @@ app.use('/amazon', amazonRoutes);
 // Routes that DO need socketService
 app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
+app.use('/upload', uploadRoutes);
 
 // --- 6. Basic/Utility Routes ---
 app.get('/api/v1.0/health', (req, res) => {

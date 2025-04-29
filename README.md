@@ -14,4 +14,7 @@
  - Production: docker-compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d 
  - (Ensure all required environment variables like HOST, PORT, ENTRYPOINT, USE_TLS, etc., are set in your production environment or .env file).
 
+ ### Hetzner Volume
+ -  scp /path/to/your/local/file admin@5.78.127.128:/mnt/volume-hil-1
+
  v0.0.1
