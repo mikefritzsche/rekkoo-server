@@ -3,6 +3,10 @@
     const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
     const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
     const { v4: uuidv4 } = require('uuid');
+    const mime = require('mime-types');
+    const multer = require('multer'); // Import multer
+    // Placeholder for your actual authentication middleware
+    const { authenticateJWT } = require('../auth/middleware'); // Use authenticateJWT
 
     const router = express.Router();
 
@@ -30,7 +34,27 @@
     });
     // --- END R2 Configuration ---
 
-    // Endpoint to get a pre-signed URL
+    // --- Multer Configuration ---
+    // Use memory storage for simplicity. For large files, consider disk storage.
+    const storage = multer.memoryStorage(); 
+    const upload = multer({ 
+        storage: storage,
+        limits: { fileSize: 25 * 1024 * 1024 }, // Example: 25MB limit
+        fileFilter: (req, file, cb) => {
+            // Example filter: Accept only common image types
+            if (file.mimetype.startsWith('image/')) {
+                cb(null, true);
+            } else {
+                cb(new Error('Invalid file type, only images are allowed!'), false);
+            }
+        }
+    });
+
+
+    // --- END Multer Configuration ---
+
+    // --- Endpoint for Pre-signed URL (Client-side upload) ---
+    // Keep this for now, maybe useful later or for other upload types
     router.post('/presigned-url', async (req, res) => {
         const { filename, contentType } = req.body;
 
@@ -38,10 +62,17 @@
             return res.status(400).json({ error: 'Missing filename or contentType' });
         }
 
-        const extension = filename.split('.').pop();
-        // Make sure key doesn't start with /
+        // Use mime-types to get the correct extension
+        const extension = mime.extension(contentType);
+        if (!extension) {
+            console.warn(`Could not determine extension for contentType: ${contentType}. Using default.`);
+            // Optionally fallback to a default or reject if extension is critical
+        }
+
+        // Construct the key with the proper extension
         const uniqueKey = `user-uploads/${uuidv4()}${extension ? '.' + extension : ''}`.replace(/^\//, '');
 
+        console.log(`Generating presigned URL for Key: ${uniqueKey}, ContentType: ${contentType}`); // Log generated key
 
         const command = new PutObjectCommand({
             Bucket: BUCKET_NAME,
@@ -54,6 +85,8 @@
         try {
             const signedUrl = await getSignedUrl(s3Client, command, {
                 expiresIn: 300, // 5 minutes
+                // Explicitly sign host, content-type, and x-amz-content-sha256
+                signableHeaders: new Set(['host', 'content-type', 'x-amz-content-sha256']),
             });
 
             console.log(`Generated R2 pre-signed URL for key: ${uniqueKey}`);
@@ -77,6 +110,57 @@
         } catch (error) {
             console.error('Error generating R2 pre-signed URL:', error);
             res.status(500).json({ error: 'Could not generate upload URL' });
+        }
+    });
+
+    // --- NEW Endpoint for Server-Mediated Upload ---
+    // Use the more robust authenticateJWT middleware
+    router.post('/r2/', authenticateJWT, upload.single('file'), async (req, res) => {
+        // 'file' is the field name expected from the client's FormData
+        
+        // Ensure user is authenticated (check added after middleware)
+        if (!req.user || !req.user.id) {
+             console.error('[Server Upload] User not found on request after authentication middleware.');
+             return res.status(401).json({ error: 'Authentication required.' });
+        }
+        const userId = req.user.id; // Get user ID from authenticated request
+
+        if (!req.file) {
+            return res.status(400).json({ error: 'No file uploaded.' });
+        }
+
+        // Use file info provided by multer
+        const fileBuffer = req.file.buffer;
+        const contentType = req.file.mimetype;
+        const originalName = req.file.originalname; // Can be used for naming if desired
+        
+        // Generate a unique key for R2 including the user ID
+        const extension = mime.extension(contentType);
+        const uniqueKey = `user-uploads/${userId}/${uuidv4()}${extension ? '.' + extension : ''}`.replace(/^\//, ''); // Add userId to path
+
+        console.log(`[Server Upload] Attempting to upload for user ${userId}. Key: ${uniqueKey}, ContentType: ${contentType}, Size: ${fileBuffer.length}`);
+
+        const command = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: uniqueKey,
+            Body: fileBuffer, // The file buffer from multer
+            ContentType: contentType,
+        });
+
+        try {
+            await s3Client.send(command);
+            console.log(`[Server Upload] Successfully uploaded ${uniqueKey} to R2 bucket ${BUCKET_NAME}.`);
+            
+            // Return the key to the client
+            res.json({ 
+                key: uniqueKey, 
+                // Optionally construct and return the final URL if needed immediately
+                // finalImageUrl: `${process.env.R2_PUBLIC_URL_BASE || 'YOUR_APP_BASE_URL/r2'}/${uniqueKey}` 
+            });
+
+        } catch (error) {
+            console.error('[Server Upload] Error uploading to R2:', error);
+            res.status(500).json({ error: 'Could not upload file to storage.', details: error.message });
         }
     });
 

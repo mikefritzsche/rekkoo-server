@@ -63,7 +63,7 @@ app.use('/amazon', amazonRoutes);
 // Routes that DO need socketService
 app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
-app.use('/upload', uploadRoutes);
+app.use('/uploads', uploadRoutes);
 
 // --- 6. Basic/Utility Routes ---
 app.get('/api/v1.0/health', (req, res) => {

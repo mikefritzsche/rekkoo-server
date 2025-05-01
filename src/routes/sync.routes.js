@@ -96,7 +96,7 @@ module.exports = (socketService) => {
 
       for (const change of changes) {
         const { table_name, record_id, operation, data } = change;
-        let originalOperation = operation; // Keep a mutable copy if needed, but maybe not
+        let originalOperation = operation; 
         
         const changeLogPrefix = `${logPrefix} Change [${table_name}/${record_id}/${originalOperation}]:`;
 
@@ -133,16 +133,70 @@ module.exports = (socketService) => {
           
           console.log(`${changeLogPrefix} Received table_name: '${table_name}'`); 
           
-          // Table-specific filtering
+          // Table-specific filtering AND R2 URL Construction
           if (table_name === 'lists') {
-            if ('type' in filteredData) {
-                delete filteredData.type; 
-                console.log(`${changeLogPrefix} Explicitly removed 'type' field for list operation.`);
+            const r2Key = filteredData.image_r2_key; // Get the key from incoming data
+            let finalImageUrl = null;
+
+            if (r2Key) {
+              console.log(`${changeLogPrefix} Found R2 key: ${r2Key}`);
+              const r2BaseUrl = process.env.R2_PUBLIC_URL_BASE;
+              if (r2BaseUrl) {
+                finalImageUrl = `${r2BaseUrl.replace(/\/$/, '')}/${r2Key}`; 
+                console.log(`${changeLogPrefix} Constructed final image URL: ${finalImageUrl}`);
+                
+                // <<< Set dedicated columns >>>
+                filteredData.image_url = finalImageUrl; // Store final URL
+                filteredData.local_image_key = r2Key; // Persist the R2 key
+                filteredData.local_image_upload_status = 'completed'; // Mark as completed
+                
+                // <<< Update background object for consistency >>>
+                filteredData.background = { 
+                  type: 'image', 
+                  value: finalImageUrl, // Include URL here too for convenience
+                  imageId: null 
+                }; 
+                console.log(`${changeLogPrefix} Set image_url, local_image_key, status, and background fields`);
+              } else {
+                console.warn(`${changeLogPrefix} R2_PUBLIC_URL_BASE not set! Cannot construct/save final image URL.`);
+                // Decide how to handle - maybe just save the key and status?
+                filteredData.image_url = null;
+                filteredData.local_image_key = r2Key;
+                filteredData.local_image_upload_status = 'failed_url_construction'; // New status?
+                filteredData.background = null; // Clear background if URL fails
+              }
+            } else {
+              // No R2 key provided by client
+              // Ensure fields are cleared if client didn't intend an image upload
+              // or preserve existing image_url if it's just a metadata update without image change
+              if (operation === 'create') {
+                  filteredData.image_url = null;
+                  filteredData.local_image_key = null;
+                  filteredData.local_image_upload_status = null;
+                  // Keep background as sent by client (color/pattern) unless it was erroneously image
+                  if (filteredData.background?.type === 'image') filteredData.background = null;
+              } else { // operation === 'update'
+                  // If client explicitly sends null/different background, clear image fields
+                  if (data.background?.type !== 'image') {
+                      filteredData.image_url = null;
+                      filteredData.local_image_key = null;
+                      filteredData.local_image_upload_status = null;
+                  } 
+                  // Otherwise, don't touch existing image_url/key/status during unrelated updates
+                  // (Unless client explicitly sends image_r2_key = null to clear image? - Add logic if needed)
+              }
             }
-            if ('items' in filteredData) { 
-                delete filteredData.items;
-                console.log(`${changeLogPrefix} Explicitly removed 'items' field for list operation.`);
-            }
+            
+            // <<< Remove temporary/client-only fields BEFORE SQL build >>>
+            delete filteredData.image_r2_key; // Don't save the incoming key directly
+            delete filteredData.local_image_uri; 
+            delete filteredData.local_image_mime_type;
+            // Don't delete local_image_upload_status here, we set it above
+            // Don't delete local_image_key here, we set it above
+            
+            // Existing list-specific filtering
+            if ('type' in filteredData) delete filteredData.type; 
+            if ('items' in filteredData) delete filteredData.items;
           } else if (table_name === 'user_settings') {
              // Keep user_id for user_settings as it might be the key
           } else if (table_name === 'listItems') {
@@ -189,7 +243,7 @@ module.exports = (socketService) => {
         } else if (table_name === 'lists') {
           if (originalOperation === 'create') {
             // For create, verify the owner_id matches the authenticated user
-            filteredData.owner_id = userId; // Always set owner_id to the authenticated user
+            filteredData.owner_id = userId; 
           } else {
             // For update/delete, check list ownership
             const listCheck = await client.query(
@@ -205,8 +259,8 @@ module.exports = (socketService) => {
           }
         }
 
-        // Build SQL params using the (hopefully) correctly filteredData
-        const updateClauses = filteredData ? Object.keys(filteredData).map((key, i) => `${key} = $${i + 2}`) : [];
+        // Build SQL params using the potentially modified filteredData (now includes cover_image_url, excludes R2 key)
+        const updateClauses = filteredData ? Object.keys(filteredData).map((key, i) => `"${key}" = $${i + 2}`) : []; // Ensure keys are quoted
         let updateValues = filteredData ? [record_id, ...Object.values(filteredData)] : [record_id];
 
         let queryResult;
@@ -235,9 +289,12 @@ module.exports = (socketService) => {
 
             // Record exists and is older, proceed with update
             console.log(`${changeLogPrefix} Converting to update operation`);
+            const finalUpdateClauses = [...updateClauses, `"updated_at" = CURRENT_TIMESTAMP`];
+            updateValues = filteredData ? [record_id, ...Object.values(filteredData)] : [record_id]; 
+            
             const updateQuery = `
-              UPDATE ${table_name}
-              SET ${updateClauses.join(', ')}, updated_at = CURRENT_TIMESTAMP
+              UPDATE "${table_name}" 
+              SET ${finalUpdateClauses.join(', ')} 
               WHERE id = $1::uuid AND deleted_at IS NULL
               RETURNING id
             `;
@@ -247,26 +304,24 @@ module.exports = (socketService) => {
           } else {
             // Record doesn't exist, proceed with create
             const insertColumns = filteredData ? Object.keys(filteredData) : [];
-            const insertValues = filteredData ? Object.values(filteredData) : [];
-            if (insertColumns.length === 0 && originalOperation === 'create') {
-                console.error(`${changeLogPrefix} No valid data columns found for create operation after filtering.`);
-                // Handle error appropriately, maybe push a failure result
-                results.push({ success: false, operation: originalOperation, record_id, message: `No valid data provided for create operation.` });
-                continue; 
-            }
+            const finalInsertColumns = ['id', ...insertColumns];
+            const placeholders = finalInsertColumns.map((_, i) => `$${i + 1}`).join(', ');
+            const insertValues = filteredData ? [record_id, ...Object.values(filteredData)] : [record_id];
+            
             const insertQuery = `
-              INSERT INTO ${table_name} (id, ${insertColumns.join(', ')}, created_at, updated_at)
-              VALUES ($1::uuid, ${insertColumns.map((_, i) => `$${i + 2}`).join(', ')}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+              INSERT INTO "${table_name}" (${finalInsertColumns.map(col => `"${col}"`).join(', ')}) 
+              VALUES (${placeholders}) 
+              ON CONFLICT (id) DO NOTHING -- Safely handle race conditions
               RETURNING id
             `;
             console.log(`${changeLogPrefix} Executing insert query:`, insertQuery);
-            console.log(`${changeLogPrefix} With values:`, [record_id, ...insertValues]);
-            queryResult = await client.query(insertQuery, [record_id, ...insertValues]);
+            console.log(`${changeLogPrefix} With values:`, insertValues);
+            queryResult = await client.query(insertQuery, insertValues);
           }
         } else if (originalOperation === 'delete') {
           // For delete operations, set deleted_at timestamp
           const deleteQuery = `
-            UPDATE ${table_name}
+            UPDATE "${table_name}"
             SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
             WHERE id = $1::uuid AND deleted_at IS NULL
             RETURNING id
@@ -277,7 +332,7 @@ module.exports = (socketService) => {
         } else {
           // For update operations, use UPDATE
           let updateQuery = `
-            UPDATE ${table_name}
+            UPDATE "${table_name}"
             SET ${updateClauses.join(', ')}, updated_at = CURRENT_TIMESTAMP
             WHERE id = $1::uuid AND deleted_at IS NULL
             RETURNING id
@@ -287,7 +342,7 @@ module.exports = (socketService) => {
           // Special handling for user_settings table (assuming PK is user_id)
           if (table_name === 'user_settings') {
             updateQuery = `
-              UPDATE ${table_name}
+              UPDATE "${table_name}"
               SET ${updateClauses.join(', ')}, updated_at = CURRENT_TIMESTAMP
               WHERE user_id = $1::uuid AND deleted_at IS NULL
               RETURNING user_id
