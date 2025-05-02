@@ -12,6 +12,6 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.rekkoo-server-api.rule=Host(`api.rekkoo.local`)"
+      - "traefik.http.routers.rekkoo-server-api.rule=Host(`api.rekkoo.local`) || Host(`api-dev.rekkoo.com`)"
       - "traefik.http.routers.rekkoo-server-api.entrypoints=web"
       - "traefik.http.services.rekkoo-server-api.loadbalancer.server.port=3100"

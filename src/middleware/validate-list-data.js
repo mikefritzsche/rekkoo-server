@@ -40,15 +40,23 @@ const validateListData = (req, res, next) => {
 
           if (data.background) {
             try {
-              if (!['color', 'image'].includes(data.background.type)) {
-                return res.status(400).json({ error: 'Invalid background type' });
+              // Allow 'local' type during sync push
+              if (!['color', 'image', 'local', 'pattern', 'stock', 'remote'].includes(data.background.type)) {
+                return res.status(400).json({ error: `Invalid background type: ${data.background.type}` });
               }
-              if (!data.background.value) {
-                return res.status(400).json({ error: 'Background value is required' });
+              // Value is required for color/image, but not necessarily for local (blob uri isn't useful server-side)
+              if (data.background.type !== 'local' && data.background.type !== 'pattern' && !data.background.value) {
+                return res.status(400).json({ error: `Background value is required for type ${data.background.type}` });
               }
+              // Image ID check is only relevant for type 'image' (stock images likely use different field)
               if (data.background.type === 'image' && !data.background.image_id) {
-                return res.status(400).json({ error: 'Image ID is required for image background' });
+                // Potentially relax this if image_id isn't strictly required or comes later
+                // return res.status(400).json({ error: 'Image ID is required for image background' });
               }
+              // Add check for stock type if needed
+              // if (data.background.type === 'stock' && !data.background.imageId) {
+              //   return res.status(400).json({ error: 'Image ID is required for stock background' });
+              // }
             } catch (error) {
               return res.status(400).json({ error: `Invalid background format: ${error.message}` });
             }

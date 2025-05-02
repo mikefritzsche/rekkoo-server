@@ -259,6 +259,7 @@ const login = async (req, res) => {
         }
       };
     });
+    console.log(`[Auth Controller] Login successful for user ${result.user.id}`);
 
     return res.status(200).json({
       message: 'Login successful',
@@ -267,7 +268,7 @@ const login = async (req, res) => {
       user: result.user
     });
   } catch (error) {
-    console.error('Login error:', error);
+    console.log('Login error:', error);
     if (error.status) {
       return res.status(error.status).json({ message: error.message });
     }
