@@ -127,6 +127,11 @@ class SocketService {
   // Emit to specific user room
   emitToUser(userId, event, data) {
     const userRoom = `user_${userId}`;
+    // Log before emitting
+    const roomClients = this.io.sockets.adapter.rooms.get(userRoom);
+    const clientCount = roomClients ? roomClients.size : 0;
+    console.log(`SocketService: Attempting to emit '${event}' to room '${userRoom}' (${clientCount} client(s) expected).`);
+    
     this.io.to(userRoom).emit(event, data);
   }
 

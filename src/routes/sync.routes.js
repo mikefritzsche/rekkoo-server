@@ -32,19 +32,19 @@ module.exports = (socketService) => {
         `SELECT st.*,
                 CASE
                   WHEN st.table_name = 'lists' THEN l.title
-                  WHEN st.table_name = 'listItems' THEN li.title
+                  WHEN st.table_name = 'list_items' THEN li.title
                   ELSE NULL
                 END as record_title
          FROM sync_tracking st
          LEFT JOIN lists l ON st.table_name = 'lists' AND st.record_id::uuid = l.id AND l.owner_id = $2::uuid AND l.deleted_at IS NULL
-         LEFT JOIN "listItems" li ON st.table_name = 'listItems' AND st.record_id::uuid = li.id AND li.deleted_at IS NULL 
+         LEFT JOIN list_items li ON st.table_name = 'list_items' AND st.record_id::uuid = li.id AND li.deleted_at IS NULL 
            AND li.list_id IN (SELECT id FROM lists WHERE owner_id = $2::uuid AND deleted_at IS NULL)
          WHERE st.created_at > $1
            AND st.deleted_at IS NULL
            AND (
              (st.table_name = 'lists' AND l.owner_id = $2::uuid)
              OR
-             (st.table_name = 'listItems' AND li.list_id IS NOT NULL)
+             (st.table_name = 'list_items' AND li.list_id IS NOT NULL)
              OR
              (st.table_name = 'user_settings' AND st.record_id = $2::uuid)
              OR
@@ -103,7 +103,7 @@ module.exports = (socketService) => {
         // --- Early Validation --- 
         
         // Basic structure/type validation
-        if (!table_name || !record_id || !originalOperation || !['lists', 'listItems', 'user_settings', 'users'].includes(table_name) || !['create', 'update', 'delete'].includes(originalOperation)) {
+        if (!table_name || !record_id || !originalOperation || !['lists', 'list_items', 'user_settings', 'users'].includes(table_name) || !['create', 'update', 'delete'].includes(originalOperation)) {
           console.error(`${changeLogPrefix} Invalid change structure/values (table_name: ${table_name}, operation: ${originalOperation}).`);
           results.push({ success: false, operation: originalOperation, record_id, message: `Invalid change structure/values.` });
           continue; 
@@ -199,8 +199,8 @@ module.exports = (socketService) => {
             if ('items' in filteredData) delete filteredData.items;
           } else if (table_name === 'user_settings') {
              // Keep user_id for user_settings as it might be the key
-          } else if (table_name === 'listItems') {
-            // For listItems, remove user_id if present in data (shouldn't be)
+          } else if (table_name === 'list_items') {
+            // For list_items, remove user_id if present in data (shouldn't be)
             delete filteredData.user_id;
           } else {
             // Default: remove user_id for other tables unless it's the key
@@ -210,27 +210,27 @@ module.exports = (socketService) => {
           console.log(`${changeLogPrefix} Keys in filteredData before SQL build: ${Object.keys(filteredData).join(', ')}`);
         }
 
-        // Verify ownership before update for lists and listItems
+        // Verify ownership before update for lists and list_items
         let ownerCheckField = 'owner_id';
         let ownerCheckValue = userId;
-        if (table_name === 'listItems') {
-          // For listItems, check if the user owns the list the item belongs to
+        if (table_name === 'list_items') {
+          // For list_items, check if the user owns the list the item belongs to
           if (originalOperation === 'create') {
             // For create, verify the list_id belongs to the user
             const listCheck = await client.query(
               `SELECT owner_id FROM lists WHERE id = $1::uuid AND deleted_at IS NULL`,
-              [data.list_id]
+              [filteredData.list_id]
             );
             if (listCheck.rows.length === 0) {
-              throw new Error(`List ${data.list_id} not found or already deleted.`);
+              throw new Error(`List ${filteredData.list_id} not found or already deleted.`);
             }
             if (listCheck.rows[0].owner_id !== userId) {
-              throw new Error(`User ${userId} does not own the list ${data.list_id}.`);
+              throw new Error(`User ${userId} does not own the list ${filteredData.list_id}.`);
             }
           } else {
             // For update/delete, check the item's list ownership
             const itemCheck = await client.query(
-              `SELECT l.owner_id FROM "listItems" li JOIN lists l ON li.list_id = l.id WHERE li.id = $1::uuid AND li.deleted_at IS NULL`,
+              `SELECT l.owner_id FROM list_items li JOIN lists l ON li.list_id = l.id WHERE li.id = $1::uuid AND li.deleted_at IS NULL`,
               [record_id]
             );
             if (itemCheck.rows.length === 0) {
@@ -257,6 +257,11 @@ module.exports = (socketService) => {
               throw new Error(`User ${userId} does not own list ${record_id}.`);
             }
           }
+        } else if (table_name === 'user_settings' || table_name === 'users') {
+          // For user_settings and users, the record_id is the user_id
+          if (record_id !== userId) {
+            throw new Error(`User ${userId} cannot modify settings/user data for ${record_id}.`);
+          }
         }
 
         // Build SQL params using the potentially modified filteredData (now includes cover_image_url, excludes R2 key)
@@ -267,7 +272,7 @@ module.exports = (socketService) => {
         if (originalOperation === 'create') {
           // Check if record already exists
           const existingCheck = await client.query(
-            `SELECT id, created_at FROM ${table_name} WHERE id = $1::uuid AND deleted_at IS NULL`,
+            `SELECT "id", "created_at" FROM "${table_name}" WHERE "id" = $1::uuid AND "deleted_at" IS NULL`,
             [record_id]
           );
 
@@ -292,74 +297,75 @@ module.exports = (socketService) => {
             const finalUpdateClauses = [...updateClauses, `"updated_at" = CURRENT_TIMESTAMP`];
             updateValues = filteredData ? [record_id, ...Object.values(filteredData)] : [record_id]; 
             
-            const updateQuery = `
-              UPDATE "${table_name}" 
-              SET ${finalUpdateClauses.join(', ')} 
-              WHERE id = $1::uuid AND deleted_at IS NULL
-              RETURNING id
-            `;
-            console.log(`${changeLogPrefix} Executing update query:`, updateQuery);
+            const updateQueryString = `
+              UPDATE "${table_name}"
+              SET ${finalUpdateClauses.join(', ')}, "updated_at" = CURRENT_TIMESTAMP
+              WHERE "id" = $1::uuid AND "deleted_at" IS NULL
+              RETURNING *`;
+            console.log(`${changeLogPrefix} Executing update query:`, updateQueryString);
             console.log(`${changeLogPrefix} With values:`, updateValues);
-            queryResult = await client.query(updateQuery, updateValues);
+            queryResult = await client.query(updateQueryString, updateValues);
           } else {
             // Record doesn't exist, proceed with create
-            const insertColumns = filteredData ? Object.keys(filteredData) : [];
-            const finalInsertColumns = ['id', ...insertColumns];
-            const placeholders = finalInsertColumns.map((_, i) => `$${i + 1}`).join(', ');
+            const insertColumns = filteredData ? Object.keys(filteredData) : []; // e.g., ["title", "description", ...]
+            
+            // Generate placeholders starting from $2 for data columns
+            const dataPlaceholders = insertColumns.map((_, i) => `$${i + 2}`).join(', '); // $2, $3, ...
+            
+            // Prepare values array: only record_id and data values
             const insertValues = filteredData ? [record_id, ...Object.values(filteredData)] : [record_id];
             
+            // Construct the query using $1::uuid for id, dataPlaceholders for data, and NOW() for timestamps
             const insertQuery = `
-              INSERT INTO "${table_name}" (${finalInsertColumns.map(col => `"${col}"`).join(', ')}) 
-              VALUES (${placeholders}) 
-              ON CONFLICT (id) DO NOTHING -- Safely handle race conditions
-              RETURNING id
-            `;
+              INSERT INTO "${table_name}" 
+                ("id", ${insertColumns.map(col => `"${col}"`).join(', ')}, "created_at", "updated_at") 
+              VALUES 
+                ($1::uuid, ${dataPlaceholders}, NOW(), NOW()) 
+              ON CONFLICT ("id") DO NOTHING RETURNING *`;
+
             console.log(`${changeLogPrefix} Executing insert query:`, insertQuery);
-            console.log(`${changeLogPrefix} With values:`, insertValues);
+            console.log(`${changeLogPrefix} With values:`, insertValues); // Pass only record_id + data values
             queryResult = await client.query(insertQuery, insertValues);
           }
         } else if (originalOperation === 'delete') {
           // For delete operations, set deleted_at timestamp
           const deleteQuery = `
             UPDATE "${table_name}"
-            SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1::uuid AND deleted_at IS NULL
-            RETURNING id
+            SET "deleted_at" = CURRENT_TIMESTAMP, "updated_at" = CURRENT_TIMESTAMP
+            WHERE "id" = $1::uuid AND "deleted_at" IS NULL
+            RETURNING "id", "deleted_at" 
           `;
           console.log(`${changeLogPrefix} Executing delete query:`, deleteQuery);
           console.log(`${changeLogPrefix} With values:`, [record_id]);
           queryResult = await client.query(deleteQuery, [record_id]);
         } else {
           // For update operations, use UPDATE
-          let updateQuery = `
+          let updateQueryString = `
             UPDATE "${table_name}"
-            SET ${updateClauses.join(', ')}, updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1::uuid AND deleted_at IS NULL
-            RETURNING id
-          `;
-          let returningColumn = 'id';
+            SET ${updateClauses.join(', ')}, "updated_at" = CURRENT_TIMESTAMP
+            WHERE "id" = $1::uuid AND "deleted_at" IS NULL
+            RETURNING *`;
 
           // Special handling for user_settings table (assuming PK is user_id)
           if (table_name === 'user_settings') {
-            updateQuery = `
+            updateQueryString = `
               UPDATE "${table_name}"
-              SET ${updateClauses.join(', ')}, updated_at = CURRENT_TIMESTAMP
-              WHERE user_id = $1::uuid AND deleted_at IS NULL
-              RETURNING user_id
+              SET ${updateClauses.join(', ')}, "updated_at" = CURRENT_TIMESTAMP
+              WHERE "user_id" = $1::uuid AND "deleted_at" IS NULL 
+              RETURNING "user_id" 
             `;
-            returningColumn = 'user_id';
             // IMPORTANT: Use the authenticated userId for the WHERE clause value
             updateValues[0] = userId; 
             console.log(`${changeLogPrefix} Using user_id specific update query and ensuring userId ('${userId}') is used for WHERE clause.`);
           }
 
-          console.log(`${changeLogPrefix} Executing update query:`, updateQuery);
+          console.log(`${changeLogPrefix} Executing update query:`, updateQueryString);
           console.log(`${changeLogPrefix} With values:`, updateValues);
-          queryResult = await client.query(updateQuery, updateValues);
+          queryResult = await client.query(updateQueryString, updateValues);
 
           // Use the correct column name from the result
           if (queryResult.rows.length > 0) {
-             console.log(`${changeLogPrefix} Update returned column: ${returningColumn} = ${queryResult.rows[0][returningColumn]}`);
+             console.log(`${changeLogPrefix} Update returned column: ${Object.keys(filteredData)[0]} = ${queryResult.rows[0][Object.keys(filteredData)[0]]}`);
           }
         }
 
@@ -378,7 +384,7 @@ module.exports = (socketService) => {
           // For delete operations, preserve the record's data
           if (originalOperation === 'delete') {
             const recordData = await client.query(
-              `SELECT * FROM ${table_name} WHERE id = $1::uuid`,
+              `SELECT * FROM "${table_name}" WHERE "id" = $1::uuid`,
               [record_id]
             );
             if (recordData.rows.length > 0) {
@@ -488,8 +494,8 @@ module.exports = (socketService) => {
         // Get lists owned or shared with the user
         const listsQuery = `
             SELECT l.*, array_agg(DISTINCT ls.permissions) FILTER (WHERE ls.list_id IS NOT NULL) as sharing_permissions
-            FROM lists l
-            LEFT JOIN list_sharing ls ON l.id = ls.list_id AND ls.shared_with_user_id = $1::uuid
+            FROM "lists" l
+            LEFT JOIN "list_sharing" ls ON l.id = ls.list_id AND ls.shared_with_user_id = $1::uuid
             WHERE (l.owner_id = $1::uuid OR ls.shared_with_user_id = $1::uuid)
               AND l.deleted_at IS NULL
             GROUP BY l.id`;
@@ -502,7 +508,7 @@ module.exports = (socketService) => {
           // Consider adding tags join if needed: LEFT JOIN item_tags it ON i.id = it.item_id ... array_agg(it.tag_id)
           const itemsQuery = `
                 SELECT i.*
-                FROM "listItems" i -- Use quoted table name
+                FROM "list_items" i -- Use quoted table name
                 WHERE i.list_id = ANY($1::uuid[])
                   AND i.deleted_at IS NULL`;
           items = await client.query(itemsQuery, [listIds]);
@@ -547,8 +553,8 @@ module.exports = (socketService) => {
         // Check ownership or sharing
         const listQuery = `
                 SELECT l.*, array_agg(DISTINCT ls.permissions) FILTER (WHERE ls.list_id IS NOT NULL) as sharing_permissions
-                FROM lists l
-                LEFT JOIN list_sharing ls ON l.id = ls.list_id AND ls.shared_with_user_id = $2::uuid
+                FROM "lists" l
+                LEFT JOIN "list_sharing" ls ON l.id = ls.list_id AND ls.shared_with_user_id = $2::uuid
                 WHERE l.id = $1::uuid
                   AND (l.owner_id = $2::uuid OR ls.shared_with_user_id = $2::uuid)
                   AND l.deleted_at IS NULL
@@ -558,9 +564,9 @@ module.exports = (socketService) => {
         // Check if user owns the list the item belongs to or if the list is shared with them
         const itemQuery = `
                  SELECT i.* -- Add tags join if needed
-                 FROM items i
-                 JOIN lists l ON i.list_id = l.id
-                 LEFT JOIN list_sharing ls ON l.id = ls.list_id AND ls.shared_with_user_id = $2::uuid
+                 FROM "list_items" i
+                 JOIN "lists" l ON i.list_id = l.id
+                 LEFT JOIN "list_sharing" ls ON l.id = ls.list_id AND ls.shared_with_user_id = $2::uuid
                  WHERE i.id = $1::uuid
                    AND (l.owner_id = $2::uuid OR ls.shared_with_user_id = $2::uuid)
                    AND i.deleted_at IS NULL
