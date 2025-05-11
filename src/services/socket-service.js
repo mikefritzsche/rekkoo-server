@@ -125,14 +125,16 @@ class SocketService {
   }
 
   // Emit to specific user room
-  emitToUser(userId, event, data) {
+  notifyUser(userId, event, data) {
+    console.log(`SocketService: notifyUser called for userId: ${userId}, event: ${event}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
     const userRoom = `user_${userId}`;
     // Log before emitting
     const roomClients = this.io.sockets.adapter.rooms.get(userRoom);
     const clientCount = roomClients ? roomClients.size : 0;
-    console.log(`SocketService: Attempting to emit '${event}' to room '${userRoom}' (${clientCount} client(s) expected).`);
+    console.log(`SocketService: Attempting to emit (notifyUser) '${event}' to room '${userRoom}' (${clientCount} client(s) expected). Data:`, data, `Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
     
     this.io.to(userRoom).emit(event, data);
+    console.log(`SocketService: Emission for '${event}' to room '${userRoom}' completed. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
   }
 
 }

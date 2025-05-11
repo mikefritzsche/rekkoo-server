@@ -35,243 +35,259 @@ function syncControllerFactory(socketService) {
    * Includes special logic for 'list_items' table to manage associated detail records.
    */
   const handlePush = async (req, res) => {
-    const changes = req.body; // Expected format: { table_name: { created: [], updated: [], deleted: [] } }
-    const userId = req.user?.id; // From authenticateJWT middleware - this is the actual user's ID
+    const clientChangesArray = req.body.changes; // Assuming client sends { "changes": [...] }
+    // If client sends the array directly as body, use: const clientChangesArray = req.body;
+    const userId = req.user?.id;
+    const results = []; // Initialize results array
 
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
+    if (!Array.isArray(clientChangesArray)) {
+      console.error('[SyncController] Push failed: req.body.changes is not an array. Received:', req.body);
+      return res.status(400).json({ error: 'Invalid payload format: "changes" must be an array.' });
+    }
 
-    console.log(`[SyncController] User ${userId} pushing changes. Current time: ${new Date().toISOString()}`);
+    console.log(`[SyncController] User ${userId} pushing ${clientChangesArray.length} changes. Current time: ${new Date().toISOString()}`);
 
     try {
       await db.transaction(async (client) => {
-        for (const table in changes) {
-          if (changes.hasOwnProperty(table)) {
-            const { created, updated, deleted } = changes[table];
-            // Get user identifier for the main table (list_items, lists, user_settings etc.)
-            // For detail tables, user association is via item_id to list_items, and list_items has owner_id.
-            // So, direct operations on detail tables in push should ensure item_id exists and list_item is owned by user.
-            let tableUserIdentifierColumn = getUserIdentifierColumn(table); // This might be null for detail tables here
-            if (DETAIL_TABLES_MAP[table.replace('_details', '')]) {
-                // For detail tables, we don't use a direct userIdentifierColumn for the table itself in primary operations,
-                // but rely on the linked list_item for ownership checks (which uses owner_id).
-                // However, some detail tables MIGHT have a user_id for auditing or direct reference.
-                // For now, if it's a detail table, let's assume its direct operations are fine if list_item ownership is good.
-                // This part is complex for a generic PUSH and relies on client sending correct item_id links.
-                // The critical part for detail tables is that their item_id links to a list_item the user owns.
-                // Let's assume detail tables have user_id for direct data, if not, client must not send user_id for them.
-                // And created/updated/deleted ops should be based on item_id link mostly for details.
-                // For now, if getUserIdentifierColumn returns null, we might need a different approach for detail table auth in push
-                // OR assume they have user_id if client sends it, or owner_id via list_item.
-                 tableUserIdentifierColumn = 'user_id'; // Defaulting to user_id for detail tables if they have it; review this assumption.
-            }
-            if (!tableUserIdentifierColumn && !DETAIL_TABLES_MAP[table.replace('_details', '')]) {
-                // If it's not a detail table and we still don't have an identifier, that is an issue.
-                console.error(`[SyncController] CRITICAL: No user identifier column for non-detail table ${table} in handlePush`);
-                // throw new Error(`No user identifier for table ${table}`); // Or handle more gracefully
-                // For now, let's default to user_id to avoid crashing, but this needs DDL check
-                tableUserIdentifierColumn = 'user_id';
-            }
+        for (const changeItem of clientChangesArray) {
+          const { table_name: tableName, operation, record_id: clientRecordId, data } = changeItem;
 
-            // Handle Created Records
-            if (created && created.length > 0) {
-              for (const record of created) {
-                if (!DETAIL_TABLES_MAP[table.replace('_details', '')]) { // Not a detail table
-                    record[tableUserIdentifierColumn] = userId; 
-                } else { // It IS a detail table
-                    // For detail tables, ensure item_id is present and user_id is set if column exists
-                    // The ownership check for creating a detail record relies on the linked list_item being owned by the user.
-                    // This is typically handled by client logic or needs a join/check here.
-                    // For now, assume if it has user_id column, set it. Otherwise, rely on item_id link.
-                    if (record.hasOwnProperty('user_id')) record.user_id = userId; // if user_id col exists on detail table
-                    else if (record.hasOwnProperty('owner_id')) record.owner_id = userId; // if owner_id col exists on detail table
-                }
-                record.updated_at = new Date(); 
-                if (!record.created_at) record.created_at = new Date(); 
+          if (!tableName || !operation || !data) {
+            console.warn('[SyncController] Skipping invalid change item:', changeItem);
+            continue;
+          }
 
-                console.log(`[SyncController] Creating record in ${table}:`, record);
-                const baseRecord = { ...record };
-                delete baseRecord.details; 
-                const columns = Object.keys(baseRecord).filter(key => key !== '_status' && key !== '_changed');
-                const values = columns.map(col => baseRecord[col]);
-                const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
-                const query = `INSERT INTO ${client.escapeIdentifier(table)} (${columns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${placeholders}) RETURNING id`;
-                await client.query(query, values);
-                const newRecordId = record.id; 
+          console.log(`[SyncController] Processing operation '${operation}' for table '${tableName}', clientRecordId '${clientRecordId}'`);
 
-                if (table === 'list_items' && record.type && record.details) {
-                  const detailTableName = getDetailTableName(record.type);
-                  if (detailTableName) {
-                    // Detail table user_id/owner_id will be set based on its own columns if they exist (handled above)
-                    const detailRecord = { ...record.details, item_id: newRecordId, created_at: new Date(), updated_at: new Date() };
-                    if (detailRecord.hasOwnProperty('user_id')) detailRecord.user_id = userId;
-                    else if (detailRecord.hasOwnProperty('owner_id')) detailRecord.owner_id = userId;
+          let tableUserIdentifierColumn = getUserIdentifierColumn(tableName);
+          
+          // Special handling for user_settings table's identifier for WHERE clause
+          const isUserSettingsTable = tableName === 'user_settings';
 
-                    if (detailRecord.hasOwnProperty('tmdb_id') && typeof detailRecord.tmdb_id === 'string') {
-                        detailRecord.tmdb_id = parseInt(detailRecord.tmdb_id, 10);
-                        if (isNaN(detailRecord.tmdb_id)) delete detailRecord.tmdb_id; 
-                    }
-                    const detailColumns = Object.keys(detailRecord);
-                    const detailValues = detailColumns.map(col => detailRecord[col]);
-                    const detailPlaceholders = detailColumns.map((_, i) => `$${i + 1}`).join(', ');
-                    const detailQuery = `INSERT INTO ${client.escapeIdentifier(detailTableName)} (${detailColumns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${detailPlaceholders})`;
-                    console.log(`[SyncController] Creating detail record in ${detailTableName}:`, detailRecord);
-                    await client.query(detailQuery, detailValues);
-                  }
-                }
-              }
-            }
+          if (!tableUserIdentifierColumn && !DETAIL_TABLES_MAP[tableName.replace('_details', '')]) {
+            console.error(`[SyncController] CRITICAL: No user identifier column defined for non-detail table ${tableName} in getUserIdentifierColumn. Defaulting to user_id but this needs review.`);
+            tableUserIdentifierColumn = 'user_id'; // Fallback, but ideally getUserIdentifierColumn should cover all main tables
+          }
 
-            // Handle Updated Records
-            if (updated && updated.length > 0) {
-              for (const record of updated) {
-                const recordId = record.id;
-                const updateFields = { ...record };
-                delete updateFields.id; delete updateFields._status; delete updateFields._changed; delete updateFields.details; delete updateFields.created_at; 
-                
-                let effectiveUserIdentifierColumn = tableUserIdentifierColumn;
-                // For detail tables, updates are primarily by item_id and their own PK (id), user check is via parent list_item
-                // However, if the detail table itself has a user_id/owner_id, it should be used for the WHERE clause
-                if (DETAIL_TABLES_MAP[table.replace('_details', '')]) {
-                    // This is complex: does the detail table have its OWN user_id/owner_id for filtering?
-                    // Or do we rely on item_id and parent list_item ownership?
-                    // Let's assume if it has user_id, use it, else no direct user filter on detail table for update
-                    // which means we need to be careful about security.
-                    // For now, let's be consistent: if it has user_id or owner_id, set it and use in where
-                    if (record.hasOwnProperty('user_id')) { record.user_id = userId; effectiveUserIdentifierColumn = 'user_id'; }
-                    else if (record.hasOwnProperty('owner_id')) { record.owner_id = userId; effectiveUserIdentifierColumn = 'owner_id'; }
-                    else { effectiveUserIdentifierColumn = null; } // No direct user identifier for WHERE on detail table itself
+          if (operation === 'create') {
+            const recordToCreate = { ...data };
+            if (!DETAIL_TABLES_MAP[tableName.replace('_details', '')]) {
+                if (tableUserIdentifierColumn) { // Ensure main tables get the user identifier
+                    recordToCreate[tableUserIdentifierColumn] = userId;
                 } else {
-                    updateFields[effectiveUserIdentifierColumn] = userId; 
+                     console.error(`[SyncController] Create: Missing user identifier for main table ${tableName}. Aborting create for this record.`);
+                     continue; // Skip this record
                 }
-                updateFields.updated_at = new Date(); 
-                console.log(`[SyncController] Updating record in ${table} (ID: ${recordId}):`, updateFields);
+            } else { 
+                if (recordToCreate.hasOwnProperty('user_id')) recordToCreate.user_id = userId;
+                else if (recordToCreate.hasOwnProperty('owner_id')) recordToCreate.owner_id = userId;
+            }
+            recordToCreate.updated_at = new Date();
+            if (!recordToCreate.created_at) recordToCreate.created_at = new Date();
 
-                if (Object.keys(updateFields).length > 0) {
-                  const setClauses = Object.keys(updateFields).map((key, i) => `${client.escapeIdentifier(key)} = $${i + 1}`).join(', ');
-                  const values = Object.values(updateFields);
-                  values.push(recordId); 
-                  let query;
-                  if (effectiveUserIdentifierColumn) { // For list_items, lists, user_settings, or details with own user/owner id
-                    values.push(userId);   
-                    query = `UPDATE ${client.escapeIdentifier(table)} SET ${setClauses} WHERE id = $${values.length - 1} AND ${client.escapeIdentifier(effectiveUserIdentifierColumn)} = $${values.length}`;
-                  } else { // For detail tables assumed to be updated only by their own id, after parent ownership check (which isn't explicitly here yet)
-                    query = `UPDATE ${client.escapeIdentifier(table)} SET ${setClauses} WHERE id = $${values.length}`;
-                    console.warn(`[SyncController] Updating detail table ${table} without direct user/owner filter. Ensure parent ownership was checked.`);
-                  }
-                  await client.query(query, values);
-                }
+            console.log(`[SyncController] Creating record in ${tableName}:`, recordToCreate);
+            const baseRecord = { ...recordToCreate };
+            delete baseRecord.details; 
+            const columns = Object.keys(baseRecord).filter(key => key !== '_status' && key !== '_changed' && key !== 'id'); // Exclude client-side 'id' for create
+            const values = columns.map(col => baseRecord[col]);
+            const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+            const query = `INSERT INTO ${client.escapeIdentifier(tableName)} (${columns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${placeholders}) RETURNING id`;
+            const result = await client.query(query, values);
+            const newServerId = result.rows[0].id;
+            console.log(`[SyncController] Created record in ${tableName} with server ID: ${newServerId}`);
+            results.push({ operation, tableName, clientRecordId, serverId: newServerId, status: 'created' }); // Add to results
 
-                if (table === 'list_items' && record.type && record.details) {
-                  const detailTableName = getDetailTableName(record.type);
-                  if (detailTableName) {
-                    const detailRecordUpdates = { ...record.details, updated_at: new Date() };
-                    if (detailRecordUpdates.hasOwnProperty('user_id')) detailRecordUpdates.user_id = userId;
-                    else if (detailRecordUpdates.hasOwnProperty('owner_id')) detailRecordUpdates.owner_id = userId;
+            // Add to sync_tracking
+            await client.query(
+              `INSERT INTO sync_tracking (table_name, record_id, operation) 
+               VALUES ($1, $2, $3)
+               ON CONFLICT (table_name, record_id) DO UPDATE SET
+                 operation = EXCLUDED.operation,
+                 created_at = NOW(),
+                 sync_status = 'pending',
+                 last_sync_attempt = NULL,
+                 sync_error = NULL`,
+              [tableName, newServerId, operation]
+            );
+            console.log(`[SyncController] Added/Updated CREATE in sync_tracking for ${tableName}/${newServerId}`);
 
-                    if (detailRecordUpdates.hasOwnProperty('tmdb_id') && typeof detailRecordUpdates.tmdb_id === 'string') {
-                        detailRecordUpdates.tmdb_id = parseInt(detailRecordUpdates.tmdb_id, 10);
-                         if (isNaN(detailRecordUpdates.tmdb_id)) delete detailRecordUpdates.tmdb_id;
-                    }
-                    // Check if detail record exists, using item_id and potentially its own user/owner id if it has one
-                    let checkQueryUserIdentifier = 'user_id'; // Default for checking detail table, assumes it has user_id
-                    // This is tricky - what is the detail table's user identifier if any?
-                    // For now, let's assume we try user_id on detail table for check.
-                    // This needs to align with the actual schema of detail tables.
-                    const checkQuery = `SELECT id FROM ${client.escapeIdentifier(detailTableName)} WHERE item_id = $1 AND user_id = $2`; // FIXME: user_id may not exist here!
-                    // const existingDetail = await client.query(checkQuery, [recordId, userId]); // This is problematic if detail table has no user_id
-                    // Let's assume for now we just update/insert based on item_id, and trust client logic and parent ownership
-                    // This simplification might be insecure if details can be reparented or client sends arbitrary item_ids.
+            // TODO: Handle list_items with details creation if necessary (simplified for now)
 
-                    // Attempt to update if exists by item_id (more robust would be item_id + its own PK if known)
-                    // For simplicity now, we UPSERT logic: try update, if no rows, insert.
-                    const detailSetClauses = Object.keys(detailRecordUpdates).map((key, i) => `${client.escapeIdentifier(key)} = $${i + 1}`).join(', ');
-                    const detailUpdateValues = [...Object.values(detailRecordUpdates), recordId]; // item_id for WHERE clause
-                    const detailUpdateQuery = `UPDATE ${client.escapeIdentifier(detailTableName)} SET ${detailSetClauses} WHERE item_id = $${detailUpdateValues.length}`;
-                    console.log(`[SyncController] Attempting to update detail record in ${detailTableName} for item_id ${recordId}:`, detailRecordUpdates);
-                    const updateResult = await client.query(detailUpdateQuery, detailUpdateValues);
+          } else if (operation === 'update') {
+            const recordToUpdate = { ...data };
+            delete recordToUpdate.id; // Remove 'id' if it's the client's local ID from the data payload
+            delete recordToUpdate._status; delete recordToUpdate._changed; delete recordToUpdate.details; delete recordToUpdate.created_at;
+            
+            recordToUpdate.updated_at = new Date();
+            console.log(`[SyncController] Updating record in ${tableName} (Client ID: ${clientRecordId}, User PK: ${data.user_id || clientRecordId}): Payload:`, recordToUpdate);
 
-                    if (updateResult.rowCount === 0) { // Detail record does not exist (or item_id didn't match), create it
-                      const newDetailRecord = { ...record.details, item_id: recordId, created_at: new Date(), updated_at: new Date() };
-                      if (newDetailRecord.hasOwnProperty('user_id')) newDetailRecord.user_id = userId;
-                      else if (newDetailRecord.hasOwnProperty('owner_id')) newDetailRecord.owner_id = userId;
-
-                      if (newDetailRecord.hasOwnProperty('tmdb_id') && typeof newDetailRecord.tmdb_id === 'string') {
-                          newDetailRecord.tmdb_id = parseInt(newDetailRecord.tmdb_id, 10);
-                          if (isNaN(newDetailRecord.tmdb_id)) delete newDetailRecord.tmdb_id;
-                      }
-                      const detailColumns = Object.keys(newDetailRecord);
-                      const detailValues = detailColumns.map(col => newDetailRecord[col]);
-                      const detailPlaceholders = detailColumns.map((_, i) => `$${i + 1}`).join(', ');
-                      const detailInsertQuery = `INSERT INTO ${client.escapeIdentifier(detailTableName)} (${detailColumns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${detailPlaceholders})`;
-                      console.log(`[SyncController] Detail record not found for update, creating in ${detailTableName}:`, newDetailRecord);
-                      await client.query(detailInsertQuery, detailValues);
-                    }
-                  }
-                }
-              }
+            if (Object.keys(recordToUpdate).length === 0) {
+                console.warn(`[SyncController] No fields to update for ${tableName} (Client ID: ${clientRecordId}). Skipping.`);
+                continue;
             }
 
-            // Handle Deleted Records
-            if (deleted && deleted.length > 0) {
-              for (const recordId of deleted) {
-                console.log(`[SyncController] Deleting record from ${table} (ID: ${recordId})`);
-                let effectiveUserIdentifierColumnForDelete = tableUserIdentifierColumn;
-                if (DETAIL_TABLES_MAP[table.replace('_details', '')]) {
-                    // What is the user identifier for detail tables for deletion? Or do we rely on parent check?
-                    // Let's assume if it has user_id or owner_id, use it for safety.
-                    // This part needs schema knowledge of detail tables.
-                     if (await columnExists(client, table, 'user_id')) effectiveUserIdentifierColumnForDelete = 'user_id';
-                     else if (await columnExists(client, table, 'owner_id')) effectiveUserIdentifierColumnForDelete = 'owner_id';
-                     else effectiveUserIdentifierColumnForDelete = null; // No direct user id on detail table to check for delete safety
-                }
+            const setClauses = Object.keys(recordToUpdate).map((key, i) => `${client.escapeIdentifier(key)} = $${i + 1}`).join(', ');
+            const values = Object.values(recordToUpdate);
+            let query;
 
-                if (table === 'list_items') {
-                  const itemResult = await client.query(`SELECT type FROM list_items WHERE id = $1 AND ${client.escapeIdentifier(effectiveUserIdentifierColumnForDelete || 'owner_id')} = $2`, [recordId, userId]);
-                  if (itemResult.rows.length > 0) {
-                    const itemType = itemResult.rows[0].type;
-                    const detailTableName = getDetailTableName(itemType);
-                    if (detailTableName) {
-                      // When deleting a list_item, delete its details. No separate user check on detail needed if parent is owned.
-                      const detailDeleteQuery = `DELETE FROM ${client.escapeIdentifier(detailTableName)} WHERE item_id = $1`;
-                      console.log(`[SyncController] Deleting detail record from ${detailTableName} for item_id ${recordId}`);
-                      await client.query(detailDeleteQuery, [recordId]);
-                    }
-                  }
-                }
-                // For main tables or detail tables with own user id for safety check
-                if (effectiveUserIdentifierColumnForDelete) {
-                    const query = `DELETE FROM ${client.escapeIdentifier(table)} WHERE id = $1 AND ${client.escapeIdentifier(effectiveUserIdentifierColumnForDelete)} = $2`;
-                    await client.query(query, [recordId, userId]);
-                } else if (!DETAIL_TABLES_MAP[table.replace('_details', '')]) { // Not a detail table, but no identifier? Issue.
-                    console.error(`[SyncController] CRITICAL: Attempting to delete from ${table} without user identifier and it is not a detail table.`);
-                    // As a fallback, try with id only, but this is risky without user check
-                    // const query = `DELETE FROM ${client.escapeIdentifier(table)} WHERE id = $1`;
-                    // await client.query(query, [recordId]);
-                } else {
-                    // For detail tables without their own user_id/owner_id, we assume deletion is cascaded or handled by item_id if needed
-                    // If a detail table is deleted directly by its ID, this implies client knows what it is doing,
-                    // but server should ideally check parent list_item ownership first.
-                    // For now, if no effectiveUserIdentifierColumnForDelete, we don't delete the detail record here unless it was handled by list_items parent.
-                    console.warn(`[SyncController] Skipped direct delete for detail table ${table} due to no direct user identifier. Assumed handled by parent list_item deletion.`);
-                }
+            if (isUserSettingsTable) {
+              if (!data.user_id) {
+                console.error(`[SyncController] Update for user_settings failed: data.user_id is missing. Client ID: ${clientRecordId}`);
+                continue;
+              }
+              values.push(data.user_id); // Use data.user_id for the WHERE clause
+              query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE ${client.escapeIdentifier('user_id')} = $${values.length}`;
+              console.log(`[SyncController] UserSettings Update Query: ${query}, Values: `, values);
+            } else {
+              // Generic update logic for other tables (using clientRecordId which should be the server's actual ID for updates)
+              if (!clientRecordId) {
+                  console.error(`[SyncController] Update for ${tableName} failed: clientRecordId is missing.`);
+                  continue;
+              }
+              values.push(clientRecordId); 
+              if (tableUserIdentifierColumn) {
+                values.push(userId);
+                query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE id = $${values.length - 1} AND ${client.escapeIdentifier(tableUserIdentifierColumn)} = $${values.length}`;
+              } else { // For detail tables assumed to be updated only by their own id, after parent ownership check
+                query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE id = $${values.length}`;
+                console.warn(`[SyncController] Updating detail table ${tableName} without direct user/owner filter by its ID. Ensure parent ownership was checked.`);
               }
             }
+            
+            console.log(`[SyncController] Executing Update for ${tableName}: Query: ${query.substring(0, 200)}..., Values Count: ${values.length}`);
+            const updateResult = await client.query(query, values);
+            console.log(`[SyncController] Update result for ${tableName} (Client ID: ${clientRecordId}): ${updateResult.rowCount} row(s) affected.`);
+            if (updateResult.rowCount > 0) {
+              results.push({ operation, tableName, clientRecordId, status: 'updated', affectedRows: updateResult.rowCount }); // Add to results
+              // Add to sync_tracking
+              const recordIdForSync = isUserSettingsTable ? data.user_id : clientRecordId;
+              if (recordIdForSync) { // Ensure we have an ID to track
+                await client.query(
+                  `INSERT INTO sync_tracking (table_name, record_id, operation) 
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (table_name, record_id) DO UPDATE SET
+                     operation = EXCLUDED.operation,
+                     created_at = NOW(),
+                     sync_status = 'pending',
+                     last_sync_attempt = NULL,
+                     sync_error = NULL`,
+                  [tableName, recordIdForSync, operation]
+                );
+                console.log(`[SyncController] Added/Updated UPDATE in sync_tracking for ${tableName}/${recordIdForSync}`);
+
+                // WebSocket notification for user_settings
+                if (isUserSettingsTable && socketService && recordIdForSync === data.user_id) { 
+                  try {
+                    console.log(`[SyncController DEBUG] About to notify user ${data.user_id}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
+                    await socketService.notifyUser(data.user_id, 'sync_update_available', {
+                      message: `User settings updated for user ${data.user_id}`,
+                      source: 'push', 
+                      changes: [{ 
+                          table: 'user_settings', 
+                          id: data.user_id,     
+                          operation: operation
+                      }]
+                    });
+                    console.log(`[SyncController] Sent 'sync_update_available' (user_settings) to user ${data.user_id}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
+                  } catch (wsError) {
+                    console.error(`[SyncController] Error sending WebSocket notification for user_settings update to user ${data.user_id}:`, wsError);
+                  }
+                }
+              } else {
+                console.warn(`[SyncController] Could not add UPDATE to sync_tracking for ${tableName} due to missing record_id. Client ID: ${clientRecordId}`);
+              }
+            } else if (isUserSettingsTable) {
+                console.warn(`[SyncController] WARN: User settings update for user_id ${data.user_id} affected 0 rows. Does the record exist?`);
+                // Even if 0 rows affected, consider it 'processed' from client's perspective if no error thrown
+                results.push({ operation, tableName, clientRecordId, status: 'noop_or_not_found', affectedRows: 0 });
+            } else {
+                 console.warn(`[SyncController] WARN: Update for ${tableName} ID ${clientRecordId} (User ${userId}) affected 0 rows. Does the record exist and belong to user?`);
+                 results.push({ operation, tableName, clientRecordId, status: 'noop_or_not_found', affectedRows: 0 });
+            }
+
+            // TODO: Handle list_items with details update if necessary (simplified for now)
+
+          } else if (operation === 'delete') {
+            if (!clientRecordId) {
+                console.error(`[SyncController] Delete for ${tableName} failed: clientRecordId is missing.`);
+                continue;
+            }
+            console.log(`[SyncController] Deleting record from ${tableName} (ID: ${clientRecordId})`);
+            
+            // TODO: Handle list_items with details deletion if necessary (simplified for now)
+            let query;
+            let deleteResult;
+            let recordIdForDeleteSync = clientRecordId; // Default for most tables
+
+            if (isUserSettingsTable) { // user_settings are deleted by user_id, which should match the authenticated userId
+                query = `DELETE FROM ${client.escapeIdentifier(tableName)} WHERE ${client.escapeIdentifier('user_id')} = $1`;
+                deleteResult = await client.query(query, [userId]); // Use authenticated userId for deletion safety
+                recordIdForDeleteSync = userId; // For user_settings, the record_id in sync_tracking should be user_id
+            } else {
+                if (tableUserIdentifierColumn) {
+                    query = `DELETE FROM ${client.escapeIdentifier(tableName)} WHERE id = $1 AND ${client.escapeIdentifier(tableUserIdentifierColumn)} = $2`;
+                    deleteResult = await client.query(query, [clientRecordId, userId]);
+                } else { // Detail tables without direct user identifier, deletion should be based on parent.
+                    query = `DELETE FROM ${client.escapeIdentifier(tableName)} WHERE id = $1`;
+                    console.warn(`[SyncController] Deleting from detail table ${tableName} by ID only. Ensure parent ownership was checked.`);
+                    deleteResult = await client.query(query, [clientRecordId]);
+                }
+            }
+            console.log(`[SyncController] Delete result for ${tableName} (Client ID: ${clientRecordId}): ${deleteResult.rowCount} row(s) affected.`);
+            results.push({ operation, tableName, clientRecordId, status: 'deleted', affectedRows: deleteResult.rowCount }); // Add to results
+
+            if (deleteResult.rowCount > 0) {
+              // Add to sync_tracking
+              if (recordIdForDeleteSync) { // Ensure we have an ID to track
+                  await client.query(
+                    `INSERT INTO sync_tracking (table_name, record_id, operation) 
+                     VALUES ($1, $2, $3)
+                     ON CONFLICT (table_name, record_id) DO UPDATE SET
+                       operation = EXCLUDED.operation,
+                       created_at = NOW(),
+                       sync_status = 'pending',
+                       last_sync_attempt = NULL,
+                       sync_error = NULL`,
+                    [tableName, recordIdForDeleteSync, operation]
+                  );
+                  console.log(`[SyncController] Added/Updated DELETE in sync_tracking for ${tableName}/${recordIdForDeleteSync}`);
+
+                  // WebSocket notification for user_settings deletion
+                  if (isUserSettingsTable && socketService && recordIdForDeleteSync === userId) { 
+                     try {
+                        console.log(`[SyncController DEBUG] About to notify user (delete) ${userId}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
+                        await socketService.notifyUser(userId, 'sync_update_available', {
+                            message: `User settings deleted for user ${userId}`,
+                            source: 'push',
+                            changes: [{
+                                table: 'user_settings',
+                                id: userId,
+                                operation: operation // 'delete'
+                            }]
+                        });
+                        console.log(`[SyncController] Sent 'sync_update_available' (user_settings delete) to user ${userId}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
+                    } catch (wsError) {
+                        console.error(`[SyncController] Error sending WebSocket notification for user_settings delete to user ${userId}:`, wsError);
+                    }
+                  }
+              } else {
+                  console.warn(`[SyncController] Could not add DELETE to sync_tracking for ${tableName} due to missing record_id. Client ID was: ${clientRecordId}`);
+              }
+            }
+          } else {
+            console.warn(`[SyncController] Unknown operation '${operation}' for table '${tableName}'. Skipping.`);
+            results.push({ operation, tableName, clientRecordId, status: 'skipped_unknown_operation' });
           }
         }
       });
-
-      if (socketService && socketService.broadcastUserChanges) {
-         socketService.broadcastUserChanges(userId, { type: 'sync_push_success', pushedAt: new Date().toISOString() });
-      }
-      res.status(200).json({ message: 'Changes pushed successfully' });
+      // If transaction is successful
+      res.status(200).json({ success: true, message: 'Changes pushed and processed successfully.', results });
     } catch (error) {
-      console.error('[SyncController] Error pushing changes:', error);
-      if (error.code) { 
-         console.error(`DB Error Code: ${error.code}, Detail: ${error.detail}, Constraint: ${error.constraint}, Hint: ${error.hint}`);
-      }
-      res.status(500).json({ error: 'Server error processing changes', details: error.message, code: error.code, hint: error.hint });
+      console.error('[SyncController] Push error:', error);
+      res.status(500).json({ success: false, error: 'Failed to process changes', details: error.message, results }); // Include results even on error if partially processed
     }
   };
 
@@ -292,6 +308,7 @@ function syncControllerFactory(socketService) {
    */
   const handleGetChanges = async (req, res) => {
     const lastPulledAtString = req.query.last_pulled_at; // Prioritize last_pulled_at
+    console.log(`[SyncController] Received req.query.last_pulled_at: '${lastPulledAtString}' (type: ${typeof lastPulledAtString})`);
     let lastPulledAt = 0; // Default to 0 if not provided or unparseable
 
     if (lastPulledAtString) {
@@ -299,16 +316,23 @@ function syncControllerFactory(socketService) {
       const parsedDate = Date.parse(lastPulledAtString);
       if (!isNaN(parsedDate)) {
         lastPulledAt = parsedDate;
+        console.log(`[SyncController] Parsed last_pulled_at via Date.parse: ${lastPulledAt}`);
       } else {
         // If not a valid ISO string, try parsing as an integer (epoch ms)
         const parsedInt = parseInt(lastPulledAtString, 10);
         if (!isNaN(parsedInt)) {
           lastPulledAt = parsedInt;
+          console.log(`[SyncController] Parsed last_pulled_at via parseInt: ${lastPulledAt}`);
         } else {
           console.warn(`[SyncController] Could not parse last_pulled_at value: "${lastPulledAtString}". Defaulting to 0.`);
         }
       }
+    } else {
+      console.log(`[SyncController] req.query.last_pulled_at was not provided or was empty. Defaulting to 0.`);
     }
+    // Ensure final parsed value is logged before use
+    console.log(`[SyncController] Final parsed lastPulledAt timestamp before use: ${lastPulledAt}`);
+
     const userId = req.user?.id;
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
