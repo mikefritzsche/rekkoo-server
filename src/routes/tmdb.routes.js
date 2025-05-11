@@ -51,7 +51,9 @@ router.get('/search', async (req, res) => {
 router.get('/movie/:id', async (req, res) => {
     const { id } = req.params
 
-    const searchUrl = `${TMDB_CONFIG.baseUrl}/movie/${id}?api_key=${TMDB_CONFIG.apiKey}&append_to_response=recommendations,similar,videos,external_ids,people,images,credits&language=en-US`;
+    const appendToResponseString = 'append_to_response'
+    const appendToResponse = 'recommendations,similar,videos,external_ids,people,images,credits'
+    const searchUrl = `${TMDB_CONFIG.baseUrl}/movie/${id}?api_key=${TMDB_CONFIG.apiKey}&language=en-US`;
     try {
         const response = await fetch(searchUrl);
         const data = await response.json();

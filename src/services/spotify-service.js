@@ -46,7 +46,6 @@ class SpotifyService {
   async search(query, offset = 0, limit = 24) {
     try {
       const token = await this.getToken();
-      console.log('spotify token :>> ', token);
       const types = ['album', 'artist', 'playlist', 'track', 'show', 'episode', 'audiobook'];
       
       const response = await axios.get(`${this.baseUrl}/search`, {

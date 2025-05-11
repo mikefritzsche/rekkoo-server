@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const spotifyController = require('../controllers/spotify.controller');
+const spotifyController = require('../controllers/SpotifyController');
 
 // Token endpoint
 router.post('/token', spotifyController.getToken);

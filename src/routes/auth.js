@@ -5,20 +5,8 @@ const crypto = require('crypto');
 const axios = require('axios');
 const qs = require('querystring');
 const { body, validationResult } = require('express-validator');
-const {
-  register,
-  verifyEmail,
-  login,
-  logout,
-  getCurrentUser,
-  forgotPassword,
-  resetPassword,
-  changePassword,
-  oauthCallback,
-  authenticateJWT,
-  checkPermissions,
-  refreshToken
-} = require('../controllers/auth.controller');
+const AuthController = require('../controllers/AuthController');
+const { authenticateJWT, checkPermissions } = require('../auth/middleware');
 
 const {
   AMAZON_SELLER_ID,
@@ -303,14 +291,14 @@ router.post('/register', [
   .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
   .withMessage('Password must contain at least one uppercase letter, one lowercase letter, and one number'),
   validateRequest
-], register);
+], AuthController.register);
 
 /**
  * @route GET /auth/verify-email/:token
  * @desc Verify user email with token
  * @access Public
  */
-router.get('/verify-email/:token', verifyEmail);
+router.get('/verify-email/:token', AuthController.verifyEmail);
 
 /**
  * @route POST /auth/login
@@ -322,21 +310,21 @@ router.post('/login', [
   body('email').optional().isEmail().normalizeEmail(),
   body('password').isString(),
   validateRequest
-], login);
+], AuthController.login);
 
 /**
  * @route POST /auth/logout
  * @desc Logout user and invalidate token
  * @access Private
  */
-router.post('/logout', authenticateJWT, logout);
+router.post('/logout', authenticateJWT, AuthController.logout);
 
 /**
  * @route GET /auth/me
  * @desc Get current user profile
  * @access Private
  */
-router.get('/me', authenticateJWT, getCurrentUser);
+router.get('/me', authenticateJWT, AuthController.getCurrentUser);
 
 /**
  * @route POST /auth/forgot-password
@@ -346,7 +334,7 @@ router.get('/me', authenticateJWT, getCurrentUser);
 router.post('/forgot-password', [
   body('email').isEmail().normalizeEmail(),
   validateRequest
-], forgotPassword);
+], AuthController.forgotPassword);
 
 /**
  * @route POST /auth/reset-password
@@ -362,7 +350,7 @@ router.post('/reset-password', [
   .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
   .withMessage('Password must contain at least one uppercase letter, one lowercase letter, and one number'),
   validateRequest
-], resetPassword);
+], AuthController.resetPassword);
 
 /**
  * @route POST /auth/change-password
@@ -379,7 +367,7 @@ router.post('/change-password', [
   .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
   .withMessage('Password must contain at least one uppercase letter, one lowercase letter, and one number'),
   validateRequest
-], changePassword);
+], AuthController.changePassword);
 
 /**
  * @route POST /auth/oauth/:provider
@@ -395,7 +383,7 @@ router.post('/oauth/:provider', [
   body('expiresIn').isNumeric(),
   body('profileData').optional(),
   validateRequest
-], oauthCallback);
+], AuthController.oauthCallback);
 
 // Updated refresh token endpoint for auth.js routes file
 
@@ -407,7 +395,7 @@ router.post('/oauth/:provider', [
 router.post('/refresh', [
   body('refreshToken').isString().withMessage('Refresh token is required'),
   validateRequest
-], refreshToken);
+], AuthController.refreshToken);
 
 // =============================================
 // Admin Routes (Example)

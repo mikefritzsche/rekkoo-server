@@ -1,40 +1,34 @@
-const r2Service = require('../services/r2Service');
+const { generatePresignedPutUrl, generateUniqueKey } = require('../services/r2Service'); // Assuming r2Service is in ../services/
 
-/**
- * Controller method to handle requests for a presigned PUT URL for R2.
- */
 const getPresignedUploadUrl = async (req, res) => {
-  // Assuming authentication middleware adds user info to req.user
-  const userId = req.user?.id;
-  const { contentType } = req.body; // Expecting client to send { contentType: 'image/jpeg' }
+  const userId = req.user?.id; // From authenticateJWT middleware
+  const { fileName, contentType } = req.body; // Expect fileName and contentType from client
 
   if (!userId) {
-    return res.status(401).json({ error: 'Unauthorized. User ID not found.' });
+    return res.status(401).json({ error: 'User not authenticated' });
   }
 
-  if (!contentType) {
-    return res.status(400).json({ error: 'Bad Request. ContentType is required in the request body.' });
+  if (!fileName || !contentType) {
+    return res.status(400).json({ error: 'Missing fileName or contentType in request body' });
   }
-
-  console.log(`[Upload Controller] Received request for presigned URL from user ${userId} for type ${contentType}`);
 
   try {
-    // Specify desired expiry time in seconds (e.g., 5 minutes)
-    const expiresIn = 300; 
-    const { presignedUrl, key } = await r2Service.generatePresignedPutUrl(userId, contentType, expiresIn);
-    
-    console.log(`[Upload Controller] Sending presigned URL and key back to client.`);
-    res.status(200).json({ 
-      presignedUrl,
-      key, 
-      // Optionally, return the public URL if your bucket is configured for public access 
-      // and you want the client to know it immediately.
-      // publicUrl: `https://YOUR_R2_PUBLIC_BUCKET_URL/${key}` 
-    });
+    // Generate a unique key for the object in R2
+    // The key might include userId to namespace files or use the original fileName if appropriate and sanitized
+    const key = generateUniqueKey(userId, contentType, fileName);
 
+    const presignedUrl = await generatePresignedPutUrl(key, contentType);
+
+    res.status(200).json({
+      presignedUrl,
+      key, // Send the key back so client knows where the file will be stored
+      method: 'PUT', // Client should use PUT request
+      // You might also want to send back the public URL if it's predictable
+      // publicUrl: `https://your-r2-public-url/${key}` 
+    });
   } catch (error) {
-    console.error("[Upload Controller] Error getting presigned URL:", error.message);
-    res.status(500).json({ error: 'Failed to generate upload URL.', details: error.message });
+    console.error('[UploadController] Error generating pre-signed URL:', error);
+    res.status(500).json({ error: 'Could not generate pre-signed URL', details: error.message });
   }
 };
 

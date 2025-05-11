@@ -6,7 +6,7 @@
     const { authenticateJWT } = require('../auth/middleware'); // Use authenticateJWT
 
     // Import the new controller
-    const uploadController = require('../controllers/uploadController');
+    const uploadController = require('../controllers/UploadController');
     // Import the r2Service ONLY if needed for the server-mediated upload (it likely is)
     const { s3Client, generatePresignedPutUrl, generateUniqueKey } = require('../services/r2Service');
 
