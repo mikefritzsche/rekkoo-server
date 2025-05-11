@@ -413,15 +413,21 @@ const getCurrentUser = async (req, res) => {
     const userId = req.user.id; // from authenticateJWT middleware
 
     const result = await db.query(
-      `SELECT u.id, u.username, u.email, u.email_verified, u.created_at, u.updated_at, 
+      `SELECT u.id, u.username, u.email, u.email_verified, u.created_at, u.updated_at,
               u.profile_image_url, u.bio, u.last_login_at,
-              array_agg(r.name) as roles
+              array_agg(r.name) as roles,
+              us.theme AS user_theme,
+              us.notification_preferences AS user_notification_preferences,
+              us.privacy_settings AS user_privacy_settings,
+              us.lists_header_image_url AS user_lists_header_image_url,
+              us.lists_header_background_type AS user_lists_header_background_type,
+              us.lists_header_background_value AS user_lists_header_background_value
        FROM users u
        LEFT JOIN user_roles ur ON u.id = ur.user_id
        LEFT JOIN roles r ON ur.role_id = r.id
        LEFT JOIN user_settings us ON u.id = us.user_id
        WHERE u.id = $1 AND u.deleted_at IS NULL
-       GROUP BY u.id, us.id`,
+       GROUP BY u.id, us.user_id, us.theme, us.notification_preferences, us.privacy_settings, us.lists_header_image_url, us.lists_header_background_type, us.lists_header_background_value`,
       [userId]
     );
 
@@ -429,28 +435,31 @@ const getCurrentUser = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    const user = result.rows[0];
+    const dbUser = result.rows[0];
 
     // Optionally, fetch other related data like active sessions, recent activity etc.
 
     return res.status(200).json({
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      email_verified: user.email_verified,
-      roles: user.roles || [],
-      profile_image_url: user.profile_image_url,
-      bio: user.bio,
-      last_login_at: user.last_login_at,
-      settings: {
-        // preferences: user.user_settings_preferences,
-        // theme: user.user_settings_theme,
-        // language: user.user_settings_language,
-        // notification_preferences: user.user_settings_notification_preferences,
-        // privacy_settings: user.user_settings_privacy_settings,
-      },
-      created_at: user.created_at,
-      updated_at: user.updated_at
+      user: {
+        id: dbUser.id,
+        username: dbUser.username,
+        email: dbUser.email,
+        email_verified: dbUser.email_verified,
+        roles: dbUser.roles || [],
+        profile_image_url: dbUser.profile_image_url,
+        bio: dbUser.bio,
+        last_login_at: dbUser.last_login_at,
+        settings: {
+          theme: dbUser.user_theme,
+          notification_preferences: dbUser.user_notification_preferences,
+          privacy_settings: dbUser.user_privacy_settings,
+          lists_header_image_url: dbUser.user_lists_header_image_url,
+          lists_header_background_type: dbUser.user_lists_header_background_type,
+          lists_header_background_value: dbUser.user_lists_header_background_value
+        },
+        created_at: dbUser.created_at,
+        updated_at: dbUser.updated_at
+      }
     });
   } catch (error) {
     console.error('Get current user error:', error);
