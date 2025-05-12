@@ -23,6 +23,9 @@ function syncControllerFactory(socketService) {
     if (tableName === 'user_settings') {
       return 'user_id';
     }
+    if (tableName === 'users') {
+      return 'id'; // Users table uses 'id' as its identifier
+    }
     // For any other table, including detail tables, we are saying there is no direct user identifier for the generic pull.
     // This means they won't be processed in the main loop of handleGetChanges for direct user-filtered updates/deletes.
     console.warn(`[SyncController] Table '${tableName}' will not be processed by user-identifier in handleGetChanges main loop.`);
@@ -180,7 +183,10 @@ function syncControllerFactory(socketService) {
                   continue;
               }
               values.push(clientRecordId); 
-              if (tableUserIdentifierColumn) {
+              if (tableName === 'users') {
+                // For users table, we only allow users to update their own record
+                query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE id = $${values.length} AND id = '${userId}'`;
+              } else if (tableUserIdentifierColumn) {
                 values.push(userId);
                 query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE id = $${values.length - 1} AND ${client.escapeIdentifier(tableUserIdentifierColumn)} = $${values.length}`;
               } else { // For detail tables assumed to be updated only by their own id, after parent ownership check
@@ -383,7 +389,7 @@ function syncControllerFactory(socketService) {
       const changes = {};
       const serverNow = Date.now();
       // Only sync tables that can be directly filtered by a user identifier in this generic pull
-      const allSyncableTables = ['list_items', 'lists', 'user_settings']; 
+      const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users'];
       // Detail tables (movie_details, etc.) are implicitly synced via their parent list_items in WatermelonDB
       // or would need a more specific pull mechanism if their changes are independent of parent list_item updated_at.
       console.log('[SyncController] Syncing main tables for changes:', allSyncableTables);

@@ -414,7 +414,7 @@ const getCurrentUser = async (req, res) => {
 
     const result = await db.query(
       `SELECT u.id, u.username, u.email, u.email_verified, u.created_at, u.updated_at,
-              u.profile_image_url, u.bio, u.last_login_at,
+              u.profile_image_url, u.bio, u.last_login_at, u.full_name,
               array_agg(r.name) as roles,
               us.theme AS user_theme,
               us.notification_preferences AS user_notification_preferences,
@@ -448,6 +448,7 @@ const getCurrentUser = async (req, res) => {
         roles: dbUser.roles || [],
         profile_image_url: dbUser.profile_image_url,
         bio: dbUser.bio,
+        full_name: dbUser.full_name,
         last_login_at: dbUser.last_login_at,
         settings: {
           theme: dbUser.user_theme,
