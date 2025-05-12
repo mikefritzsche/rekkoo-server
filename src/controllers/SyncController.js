@@ -74,46 +74,78 @@ function syncControllerFactory(socketService) {
 
           if (operation === 'create') {
             const recordToCreate = { ...data };
-            if (!DETAIL_TABLES_MAP[tableName.replace('_details', '')]) {
-                if (tableUserIdentifierColumn) { // Ensure main tables get the user identifier
+            // Ensure the client-provided ID is part of the record to be created
+            if (!recordToCreate.id) {
+              console.error(`[SyncController] Create operation for ${tableName} is missing an 'id' in the data payload. ClientRecordId was: ${clientRecordId}. Payload:`, data);
+              results.push({ operation, tableName, clientRecordId, status: 'error_missing_id_payload', error: "Missing 'id' in data payload for create operation." });
+              continue; // Skip this item
+            }
+            
+            // Ensure owner_id is set correctly based on the authenticated user
+            if (!DETAIL_TABLES_MAP[tableName.replace('_details', '')]) { // Not a detail table
+                if (tableUserIdentifierColumn) {
                     recordToCreate[tableUserIdentifierColumn] = userId;
                 } else {
-                     console.error(`[SyncController] Create: Missing user identifier for main table ${tableName}. Aborting create for this record.`);
-                     continue; // Skip this record
+                     console.error(`[SyncController] Create: Missing user identifier column for main table ${tableName}. Aborting create for this record.`);
+                     results.push({ operation, tableName, clientRecordId, status: 'error_missing_user_column', error: `Missing user identifier column for table ${tableName}` });
+                     continue; 
                 }
-            } else { 
+            } else { // Is a detail table, ensure user_id/owner_id if present is set
                 if (recordToCreate.hasOwnProperty('user_id')) recordToCreate.user_id = userId;
                 else if (recordToCreate.hasOwnProperty('owner_id')) recordToCreate.owner_id = userId;
             }
+
             recordToCreate.updated_at = new Date();
             if (!recordToCreate.created_at) recordToCreate.created_at = new Date();
 
-            console.log(`[SyncController] Creating record in ${tableName}:`, recordToCreate);
+            if (tableName === 'list_items') {
+                console.log(`[SyncController handlePush CREATE list_items] User ${userId} creating list_item. Full recordToCreate (using client ID ${recordToCreate.id}):`, JSON.stringify(recordToCreate));
+            } else {
+                console.log(`[SyncController] Creating record in ${tableName} (using client ID ${recordToCreate.id}):`, recordToCreate);
+            }
+            
             const baseRecord = { ...recordToCreate };
-            delete baseRecord.details; 
-            const columns = Object.keys(baseRecord).filter(key => key !== '_status' && key !== '_changed' && key !== 'id'); // Exclude client-side 'id' for create
+            delete baseRecord.details; // Example of a field not directly in the table
+            
+            // MODIFIED: Include 'id' from baseRecord (which is from client's data)
+            const columns = Object.keys(baseRecord).filter(key => key !== '_status' && key !== '_changed'); 
             const values = columns.map(col => baseRecord[col]);
             const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+            
             const query = `INSERT INTO ${client.escapeIdentifier(tableName)} (${columns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${placeholders}) RETURNING id`;
-            const result = await client.query(query, values);
-            const newServerId = result.rows[0].id;
-            console.log(`[SyncController] Created record in ${tableName} with server ID: ${newServerId}`);
-            results.push({ operation, tableName, clientRecordId, serverId: newServerId, status: 'created' }); // Add to results
+            
+            let newServerId = recordToCreate.id; // Assume client's ID will be used and returned
 
-            // Add to sync_tracking
-            await client.query(
-              `INSERT INTO sync_tracking (table_name, record_id, operation) 
-               VALUES ($1, $2, $3)
-               ON CONFLICT (table_name, record_id) DO UPDATE SET
-                 operation = EXCLUDED.operation,
-                 created_at = NOW(),
-                 sync_status = 'pending',
-                 last_sync_attempt = NULL,
-                 sync_error = NULL`,
-              [tableName, newServerId, operation]
-            );
-            console.log(`[SyncController] Added/Updated CREATE in sync_tracking for ${tableName}/${newServerId}`);
+            try {
+                const result = await client.query(query, values);
+                // If RETURNING id gives back something different, log it, but we intend to use client's.
+                // For most UUID setups where client provides ID, DB won't generate a new one if column default isn't overriding.
+                if (result.rows[0] && result.rows[0].id !== newServerId) {
+                    console.warn(`[SyncController CREATE ${tableName}] DB returned ID ${result.rows[0].id} which differs from client-provided ID ${newServerId}. Using client's ID as source of truth.`);
+                }
+                console.log(`[SyncController] Created record in ${tableName} with actual ID used: ${newServerId}`);
+                results.push({ operation, tableName, clientRecordId: newServerId, serverId: newServerId, status: 'created' });
 
+                // Add to sync_tracking using the client-provided (and now server-used) ID
+                await client.query(
+                  `INSERT INTO sync_tracking (table_name, record_id, operation) 
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (table_name, record_id) DO UPDATE SET
+                     operation = EXCLUDED.operation,
+                     created_at = NOW(),
+                     sync_status = 'pending',
+                     last_sync_attempt = NULL,
+                     sync_error = NULL`,
+                  [tableName, newServerId, operation]
+                );
+                console.log(`[SyncController] Added/Updated CREATE in sync_tracking for ${tableName}/${newServerId}`);
+
+            } catch (insertError) {
+                console.error(`[SyncController CREATE ${tableName}] Error inserting record with client-provided ID ${newServerId}:`, insertError);
+                results.push({ operation, tableName, clientRecordId, serverId: null, status: 'error_insert_failed', error: insertError.message, detail: insertError.detail });
+                // Do not add to sync_tracking if insert failed
+                continue; // move to next change item
+            }
             // TODO: Handle list_items with details creation if necessary (simplified for now)
 
           } else if (operation === 'update') {
