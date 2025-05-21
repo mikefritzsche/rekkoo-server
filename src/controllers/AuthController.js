@@ -68,10 +68,18 @@ const register = async (req, res) => {
         [userId]
       );
 
-      return { userId, verificationToken };
+      return { userId, verificationToken, username, email };
     });
 
-    // TODO: Send verification email with the token
+    // Send verification email
+    try {
+      await emailService.sendVerificationEmail(email, username, result.verificationToken);
+      console.log(`Verification email sent to ${email}`);
+    } catch (emailError) {
+      console.error('Failed to send verification email:', emailError);
+      // Continue with registration even if email fails
+      // We could log this to a monitoring system or queue for retry
+    }
 
     return res.status(201).json({
       message: 'User registered successfully. Please check your email to verify your account.',
@@ -115,6 +123,73 @@ const verifyEmail = async (req, res) => {
   } catch (error) {
     console.error('Email verification error:', error);
     return res.status(500).json({ message: 'Server error during email verification' });
+  }
+};
+
+/**
+ * Resend verification email
+ * @route POST /auth/resend-verification
+ */
+const resendVerification = async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+    }
+
+    // Check if user exists and needs verification
+    const userResult = await db.query(
+      `SELECT id, username, email, email_verified, verification_token, verification_token_expires_at
+       FROM users 
+       WHERE email = $1`,
+      [email]
+    );
+
+    if (userResult.rows.length === 0) {
+      // For security reasons, always return a generic success message
+      // to prevent user enumeration attacks
+      return res.status(200).json({ 
+        message: 'If the email exists in our system, a verification link has been sent.' 
+      });
+    }
+
+    const user = userResult.rows[0];
+
+    // If email is already verified, no need to resend
+    if (user.email_verified) {
+      return res.status(200).json({ 
+        message: 'Your email is already verified. You can log in to your account.'
+      });
+    }
+
+    // Generate a new verification token and update expiration
+    const verificationToken = uuidv4();
+    
+    await db.query(
+      `UPDATE users 
+       SET verification_token = $1,
+           verification_token_expires_at = NOW() + INTERVAL '24 hours',
+           updated_at = NOW()
+       WHERE id = $2`,
+      [verificationToken, user.id]
+    );
+
+    // Send new verification email
+    try {
+      await emailService.sendVerificationEmail(user.email, user.username, verificationToken);
+      console.log(`New verification email sent to ${user.email}`);
+    } catch (emailError) {
+      console.error('Failed to send verification email:', emailError);
+      return res.status(500).json({ message: 'Failed to send verification email' });
+    }
+
+    return res.status(200).json({ 
+      message: 'A new verification link has been sent to your email address.'
+    });
+  } catch (error) {
+    console.error('Resend verification error:', error);
+    return res.status(500).json({ message: 'Server error during verification email resend' });
   }
 };
 
@@ -813,6 +888,7 @@ const getAllUsers = [ // Array for multiple middleware + handler
 module.exports = {
   register,
   verifyEmail,
+  resendVerification,
   login,
   refreshToken,
   logout,

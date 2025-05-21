@@ -301,6 +301,16 @@ router.post('/register', [
 router.get('/verify-email/:token', AuthController.verifyEmail);
 
 /**
+ * @route POST /auth/resend-verification
+ * @desc Resend verification email
+ * @access Public
+ */
+router.post('/resend-verification', [
+  body('email').isEmail().withMessage('Valid email is required').normalizeEmail(),
+  validateRequest
+], AuthController.resendVerification);
+
+/**
  * @route POST /auth/login
  * @desc Login user and get token
  * @access Public

@@ -101,35 +101,104 @@ function syncControllerFactory(socketService) {
             recordToCreate.updated_at = new Date();
             if (!recordToCreate.created_at) recordToCreate.created_at = new Date();
 
-            if (tableName === 'list_items') {
-                console.log(`[SyncController handlePush CREATE list_items] User ${userId} creating list_item. Full recordToCreate (using client ID ${recordToCreate.id}):`, JSON.stringify(recordToCreate));
-            } else {
-                console.log(`[SyncController] Creating record in ${tableName} (using client ID ${recordToCreate.id}):`, recordToCreate);
-            }
-            
+            // Prepare baseRecord for insertion, excluding api_metadata for the main list_items insert
             const baseRecord = { ...recordToCreate };
-            delete baseRecord.details; // Example of a field not directly in the table
+            // Only delete api_metadata and custom_fields if they are NOT actual columns 
+            // in the target table. Assuming list_items might have these as JSON/JSONB columns.
+            // If they are processed into other fields entirely and not stored as blobs, then delete.
+            // For now, let's assume they *could* be columns and avoid deleting if present in data.
+            // The specific INSERT query will only use keys present in baseRecord that match table columns.
             
-            // MODIFIED: Include 'id' from baseRecord (which is from client's data)
+            // delete baseRecord.api_metadata; // Conditional deletion or let DB handle unknown columns
+            // delete baseRecord.custom_fields; // Conditional deletion
+            delete baseRecord.details; // This was an example, ensure it's not a real field or handle appropriately
+            
             const columns = Object.keys(baseRecord).filter(key => key !== '_status' && key !== '_changed'); 
             const values = columns.map(col => baseRecord[col]);
             const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
             
             const query = `INSERT INTO ${client.escapeIdentifier(tableName)} (${columns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${placeholders}) RETURNING id`;
             
-            let newServerId = recordToCreate.id; // Assume client's ID will be used and returned
+            let newServerId = recordToCreate.id; 
 
             try {
                 const result = await client.query(query, values);
-                // If RETURNING id gives back something different, log it, but we intend to use client's.
-                // For most UUID setups where client provides ID, DB won't generate a new one if column default isn't overriding.
                 if (result.rows[0] && result.rows[0].id !== newServerId) {
                     console.warn(`[SyncController CREATE ${tableName}] DB returned ID ${result.rows[0].id} which differs from client-provided ID ${newServerId}. Using client's ID as source of truth.`);
                 }
                 console.log(`[SyncController] Created record in ${tableName} with actual ID used: ${newServerId}`);
                 results.push({ operation, tableName, clientRecordId: newServerId, serverId: newServerId, status: 'created' });
 
-                // Add to sync_tracking using the client-provided (and now server-used) ID
+                // --- BEGIN MOVIE DETAILS LOGIC ---
+                if (tableName === 'list_items' && data.api_metadata) {
+                    const apiMetadata = data.api_metadata;
+                    const itemType = apiMetadata.type?.toLowerCase(); // e.g., 'movie', 'book'
+                    const rawDetails = apiMetadata.raw_details;
+
+                    console.log(`[SyncController CREATE list_items] Item type: ${itemType}, Raw details found: ${!!rawDetails}`);
+
+                    if (itemType === 'movie' && rawDetails && typeof rawDetails === 'object') {
+                        const detailTableName = getDetailTableName(itemType); // Should be 'movie_details'
+                        if (detailTableName) {
+                            const movieDetailData = {
+                                list_item_id: newServerId, // Link to the list_item
+                                tmdb_id: rawDetails.tmdb_id || rawDetails.id || apiMetadata.source_id,
+                                title: rawDetails.title || rawDetails.tmdb_title || apiMetadata.title, // Prioritize details, fallback to apiMetadata top level
+                                overview: rawDetails.overview || rawDetails.tmdb_overview || apiMetadata.description,
+                                tagline: rawDetails.tagline || rawDetails.tmdb_tagline,
+                                release_date: rawDetails.release_date || rawDetails.tmdb_release_date || apiMetadata.release_date,
+                                genres: rawDetails.genres || rawDetails.tmdb_genres, // Assuming array of strings
+                                rating: parseFloat(rawDetails.rating || rawDetails.tmdb_vote_average) || null,
+                                vote_count: parseInt(rawDetails.vote_count || rawDetails.tmdb_vote_count) || null,
+                                runtime_minutes: parseInt(rawDetails.runtime || rawDetails.tmdb_runtime) || null,
+                                original_language: rawDetails.original_language || rawDetails.tmdb_original_language,
+                                original_title: rawDetails.original_title || rawDetails.tmdb_original_title,
+                                popularity: parseFloat(rawDetails.popularity || rawDetails.tmdb_popularity) || null,
+                                poster_path: rawDetails.poster_path || rawDetails.tmdb_poster_path,
+                                backdrop_path: rawDetails.backdrop_path || rawDetails.tmdb_backdrop_path,
+                                // budget, revenue, status, production_companies, etc. can be added if available in rawDetails
+                                // Ensure data types match the movie_details DDL (e.g., date, numeric, integer, text[])
+                            };
+                            
+                            // Filter out undefined values to avoid inserting NULL for non-existent keys
+                            Object.keys(movieDetailData).forEach(key => movieDetailData[key] === undefined && delete movieDetailData[key]);
+
+                            if (movieDetailData.release_date && isNaN(new Date(movieDetailData.release_date).getTime())) {
+                                console.warn(`[SyncController CREATE movie_details] Invalid release_date format: ${movieDetailData.release_date}. Setting to null.`);
+                                movieDetailData.release_date = null;
+                            }
+
+
+                            const detailColumns = Object.keys(movieDetailData);
+                            const detailValues = detailColumns.map(col => movieDetailData[col]);
+                            const detailPlaceholders = detailColumns.map((_, i) => `$${i + 1}`).join(', ');
+
+                            const detailQuery = `INSERT INTO ${client.escapeIdentifier(detailTableName)} (${detailColumns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${detailPlaceholders}) RETURNING id`;
+                            
+                            console.log(`[SyncController CREATE movie_details] Query: ${detailQuery}, Values:`, detailValues);
+                            try {
+                                const detailResult = await client.query(detailQuery, detailValues);
+                                const movieDetailId = detailResult.rows[0]?.id;
+                                if (movieDetailId) {
+                                    console.log(`[SyncController] Created record in ${detailTableName} with ID ${movieDetailId}`);
+                                    // Now, update the list_items record with the movie_detail_id
+                                    const updateListItemQuery = `UPDATE ${client.escapeIdentifier(tableName)} SET movie_detail_id = $1 WHERE id = $2`;
+                                    await client.query(updateListItemQuery, [movieDetailId, newServerId]);
+                                    console.log(`[SyncController] Updated list_items ${newServerId} with movie_detail_id ${movieDetailId}`);
+                                } else {
+                                    console.error(`[SyncController CREATE movie_details] Failed to get ID from ${detailTableName} insert.`);
+                                }
+                            } catch (detailInsertError) {
+                                console.error(`[SyncController CREATE movie_details] Error inserting into ${detailTableName} for list_item_id ${newServerId}:`, detailInsertError);
+                                // Decide on error handling: rethrow, log, or mark main item?
+                                // For now, it logs, and the transaction might proceed without the detail link.
+                            }
+                        }
+                    }
+                }
+                // --- END MOVIE DETAILS LOGIC ---
+
+
                 await client.query(
                   `INSERT INTO sync_tracking (table_name, record_id, operation) 
                    VALUES ($1, $2, $3)
@@ -247,6 +316,11 @@ function syncControllerFactory(socketService) {
             }
 
             // TODO: Handle list_items with details update if necessary (simplified for now)
+            if (tableName === 'list_items' && data.api_metadata) {
+                // Logic to find existing movie_detail_id
+                // Decide to UPDATE existing movie_detail or INSERT new if not found (and maybe delete old)
+                // This is more complex than create.
+            }
 
           } else if (operation === 'delete') {
             if (!clientRecordId) {
@@ -315,6 +389,13 @@ function syncControllerFactory(socketService) {
                   console.warn(`[SyncController] Could not add DELETE to sync_tracking for ${tableName} due to missing record_id. Client ID was: ${clientRecordId}`);
               }
             }
+
+            // TODO: Handle list_items with details deletion if necessary (simplified for now)
+            if (tableName === 'list_items' && data.api_metadata) {
+                // Logic to find existing movie_detail_id
+                // Decide to DELETE existing movie_detail or UPDATE old if not found (and maybe insert new)
+                // This is more complex than create.
+            }
           } else {
             console.warn(`[SyncController] Unknown operation '${operation}' for table '${tableName}'. Skipping.`);
             results.push({ operation, tableName, clientRecordId, status: 'skipped_unknown_operation' });
@@ -350,13 +431,11 @@ function syncControllerFactory(socketService) {
     let lastPulledAt = 0; // Default to 0 if not provided or unparseable
 
     if (lastPulledAtString) {
-      // Try parsing as an ISO date string first (Date.parse returns epoch ms)
       const parsedDate = Date.parse(lastPulledAtString);
       if (!isNaN(parsedDate)) {
         lastPulledAt = parsedDate;
         console.log(`[SyncController] Parsed last_pulled_at via Date.parse: ${lastPulledAt}`);
       } else {
-        // If not a valid ISO string, try parsing as an integer (epoch ms)
         const parsedInt = parseInt(lastPulledAtString, 10);
         if (!isNaN(parsedInt)) {
           lastPulledAt = parsedInt;
@@ -368,7 +447,6 @@ function syncControllerFactory(socketService) {
     } else {
       console.log(`[SyncController] req.query.last_pulled_at was not provided or was empty. Defaulting to 0.`);
     }
-    // Ensure final parsed value is logged before use
     console.log(`[SyncController] Final parsed lastPulledAt timestamp before use: ${lastPulledAt}`);
 
     const userId = req.user?.id;
@@ -378,76 +456,81 @@ function syncControllerFactory(socketService) {
     console.log(`[SyncController] User ${userId} pulling changes since: ${new Date(lastPulledAt).toISOString()} (timestamp: ${lastPulledAt})`);
 
     try {
-      const diagnosticQueryResult = await db.query(
-        "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema');"
-      );
-    } catch (diagError) {
-      console.error('[SyncController DIAGNOSTIC] Error querying information_schema.tables:', diagError);
-    }
-
-    try {
       const changes = {};
       const serverNow = Date.now();
-      // Only sync tables that can be directly filtered by a user identifier in this generic pull
-      const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users'];
-      // Detail tables (movie_details, etc.) are implicitly synced via their parent list_items in WatermelonDB
-      // or would need a more specific pull mechanism if their changes are independent of parent list_item updated_at.
-      console.log('[SyncController] Syncing main tables for changes:', allSyncableTables);
+      // Add 'movie_details' and other detail tables as needed
+      const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users', 'movie_details']; 
+      
+      console.log('[SyncController] Syncing tables for changes:', allSyncableTables);
       await db.transaction(async (client) => {
         for (const table of allSyncableTables) {
           const userIdentifierColumn = getUserIdentifierColumn(table);
-
-          if (userIdentifierColumn === null) {
-            // This case should not be hit if allSyncableTables is correctly filtered
-            console.warn(`[SyncController] Skipping table ${table} as it has no direct user identifier for pull.`);
-            changes[table] = { created: [], updated: [], deleted: [] };
-            continue;
-          } 
-          
-          console.log(`[SyncController] Processing table: ${table}, Using identifier column: ${userIdentifierColumn}`);
-          const updatedQuery = `
-            SELECT * FROM ${client.escapeIdentifier(table)} 
-            WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND updated_at >= to_timestamp($2 / 1000.0)
-          `;
-          const updatedResult = await client.query(updatedQuery, [userId, lastPulledAt]);
-          const createdRecords = [];
-          const updatedRecords = [];
-          updatedResult.rows.forEach(record => {
-            record.updated_at = new Date(record.updated_at).getTime();
-            record.created_at = new Date(record.created_at).getTime();
-            if (record.created_at >= lastPulledAt) {
-              createdRecords.push(record);
-            } else {
-              updatedRecords.push(record);
-            }
-          });
-          
+          let createdRecords = [];
+          let updatedRecords = [];
           let deletedRecordIds = [];
-          // Only attempt soft delete query if the table is supposed to have a user identifier and deleted_at
-          // And we have a valid column to SELECT as the ID for deleted records
-          if (userIdentifierColumn) { 
-            try {
+
+          if (table === 'movie_details') {
+            console.log(`[SyncController] Processing table: ${table} (special handling for detail table)`);
+            const updatedQuery = `
+              SELECT md.* FROM ${client.escapeIdentifier(table)} md
+              JOIN list_items li ON md.list_item_id = li.id
+              WHERE li.owner_id = $1 AND md.updated_at >= to_timestamp($2 / 1000.0)
+            `;
+            const updatedResult = await client.query(updatedQuery, [userId, lastPulledAt]);
+            updatedResult.rows.forEach(record => {
+              record.updated_at = new Date(record.updated_at).getTime();
+              record.created_at = new Date(record.created_at).getTime();
+              if (record.created_at >= lastPulledAt) {
+                createdRecords.push(record);
+              } else {
+                updatedRecords.push(record);
+              }
+            });
+            // Deletion of movie_details is assumed to be handled by client when parent list_item is deleted,
+            // as movie_details table does not have its own deleted_at column in the provided DDL.
+            deletedRecordIds = []; 
+
+          } else if (userIdentifierColumn) { 
+            console.log(`[SyncController] Processing table: ${table}, Using identifier column: ${userIdentifierColumn}`);
+            const updatedQuery = `
+              SELECT * FROM ${client.escapeIdentifier(table)} 
+              WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND updated_at >= to_timestamp($2 / 1000.0)
+            `;
+            const updatedResult = await client.query(updatedQuery, [userId, lastPulledAt]);
+            updatedResult.rows.forEach(record => {
+              record.updated_at = new Date(record.updated_at).getTime();
+              record.created_at = new Date(record.created_at).getTime();
+              if (record.created_at >= lastPulledAt) {
+                createdRecords.push(record);
+              } else {
+                updatedRecords.push(record);
+              }
+            });
+            
+            if (await columnExists(client, table, 'deleted_at')) {
               let selectIdColumnForDeleted = 'id'; 
-              if (table === 'user_settings') {
-                selectIdColumnForDeleted = `${client.escapeIdentifier('user_id')} AS id`; 
-              } else if (userIdentifierColumn === 'owner_id') { 
-                selectIdColumnForDeleted = `${client.escapeIdentifier('owner_id')} AS id`;
-              } 
-              // Ensure the table actually has a deleted_at column before trying to query it.
-              if (await columnExists(client, table, 'deleted_at')) {
-                const deletedQuery = `
-                  SELECT ${selectIdColumnForDeleted} FROM ${client.escapeIdentifier(table)} 
-                  WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND deleted_at IS NOT NULL AND deleted_at >= to_timestamp($2 / 1000.0)
-                `;
+              // Adjustments for specific tables if their primary ID isn't 'id' or if deleted records are identified differently.
+              if (table === 'user_settings') { selectIdColumnForDeleted = `${client.escapeIdentifier('user_id')} AS id`; }
+              // Example if 'lists' or 'list_items' used a different column for their ID in a specific context for deletion tracking (unlikely here)
+
+              const deletedQuery = `
+                SELECT ${selectIdColumnForDeleted} FROM ${client.escapeIdentifier(table)} 
+                WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND deleted_at IS NOT NULL AND deleted_at >= to_timestamp($2 / 1000.0)
+              `;
+              try {
                 const deletedResult = await client.query(deletedQuery, [userId, lastPulledAt]);
                 deletedRecordIds = deletedResult.rows.map(r => r.id); 
-              } else {
-                console.warn(`[SyncController] Table ${table} does not have a deleted_at column. Skipping soft delete check.`);
+              } catch (e) {
+                 console.warn(`[SyncController] Could not query deleted records for table ${table}. Error: ${e.message}`);
+                 // Potentially rethrow or handle if this is critical: throw e;
               }
-            } catch (e) {
-               console.warn(`[SyncController] Could not query deleted records for table ${table}. Error: ${e.message}`);
-               throw e; 
+            } else {
+              console.warn(`[SyncController] Table ${table} does not have a deleted_at column. Skipping soft delete check for this table.`);
             }
+          } else {
+            console.warn(`[SyncController] Skipping table ${table} in pull changes as it has no direct user identifier column and no special handling defined.`);
+            changes[table] = { created: [], updated: [], deleted: [] };
+            continue;
           }
           changes[table] = {
             created: createdRecords,
