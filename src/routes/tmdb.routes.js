@@ -48,12 +48,13 @@ router.get('/search', async (req, res) => {
     }
 });
 
-router.get('/movie/:id', async (req, res) => {
-    const { id } = req.params
+// Get tv/movie details
+router.get('/details/:mediaType/:id', async (req, res) => {
+    const { mediaType, id } = req.params
 
     const appendToResponseString = 'append_to_response'
     const appendToResponse = 'recommendations,similar,videos,external_ids,people,images,credits'
-    const searchUrl = `${TMDB_CONFIG.baseUrl}/movie/${id}?api_key=${TMDB_CONFIG.apiKey}&language=en-US`;
+    const searchUrl = `${TMDB_CONFIG.baseUrl}/${mediaType}/${id}?api_key=${TMDB_CONFIG.apiKey}&language=en-US&${appendToResponseString}=${appendToResponse}`;
     try {
         const response = await fetch(searchUrl);
         const data = await response.json();
@@ -62,7 +63,6 @@ router.get('/movie/:id', async (req, res) => {
     } catch (error) {
         res.status(500).json({error, searchUrl})
     }
-
 })
 
 // Search multiple movies endpoint

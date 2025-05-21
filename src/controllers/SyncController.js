@@ -7,6 +7,7 @@ const DETAIL_TABLES_MAP = {
   book: 'book_details',
   place: 'place_details',
   spotify_item: 'spotify_item_details', // Assuming 'spotify_item' is the type used in 'list_items' table
+  tv: 'tv_details', // Add TV details mapping
 };
 
 function syncControllerFactory(socketService) {
@@ -132,7 +133,7 @@ function syncControllerFactory(socketService) {
                 // --- BEGIN MOVIE DETAILS LOGIC ---
                 if (tableName === 'list_items' && data.api_metadata) {
                     const apiMetadata = data.api_metadata;
-                    const itemType = apiMetadata.type?.toLowerCase(); // e.g., 'movie', 'book'
+                    const itemType = apiMetadata.type?.toLowerCase(); // e.g., 'movie', 'book', 'tv'
                     const rawDetails = apiMetadata.raw_details;
 
                     console.log(`[SyncController CREATE list_items] Item type: ${itemType}, Raw details found: ${!!rawDetails}`);
@@ -195,6 +196,77 @@ function syncControllerFactory(socketService) {
                             }
                         }
                     }
+                    // --- BEGIN TV DETAILS LOGIC ---
+                    else if (itemType === 'tv' && rawDetails && typeof rawDetails === 'object') {
+                        const detailTableName = getDetailTableName(itemType); // Should be 'tv_details'
+                        if (detailTableName) {
+                            const tvDetailData = {
+                                list_item_id: newServerId, // Link to the list_item
+                                tmdb_id: rawDetails.tmdb_id || rawDetails.id || apiMetadata.source_id,
+                                name: rawDetails.name || rawDetails.tmdb_name || apiMetadata.title,
+                                overview: rawDetails.overview || rawDetails.tmdb_overview || apiMetadata.description,
+                                tagline: rawDetails.tagline || rawDetails.tmdb_tagline,
+                                first_air_date: rawDetails.first_air_date || rawDetails.tmdb_first_air_date || apiMetadata.release_date,
+                                last_air_date: rawDetails.last_air_date || rawDetails.tmdb_last_air_date,
+                                genres: rawDetails.genres || rawDetails.tmdb_genres, // Assuming array of strings
+                                rating: parseFloat(rawDetails.rating || rawDetails.tmdb_vote_average) || null,
+                                vote_count: parseInt(rawDetails.vote_count || rawDetails.tmdb_vote_count) || null,
+                                episode_run_time: rawDetails.episode_run_time || rawDetails.tmdb_episode_run_time,
+                                number_of_episodes: parseInt(rawDetails.number_of_episodes || rawDetails.tmdb_number_of_episodes) || null,
+                                number_of_seasons: parseInt(rawDetails.number_of_seasons || rawDetails.tmdb_number_of_seasons) || null,
+                                status: rawDetails.status || rawDetails.tmdb_status,
+                                type: rawDetails.type || rawDetails.tmdb_type,
+                                original_language: rawDetails.original_language || rawDetails.tmdb_original_language,
+                                original_name: rawDetails.original_name || rawDetails.tmdb_original_name,
+                                popularity: parseFloat(rawDetails.popularity || rawDetails.tmdb_popularity) || null,
+                                poster_path: rawDetails.poster_path || rawDetails.tmdb_poster_path,
+                                backdrop_path: rawDetails.backdrop_path || rawDetails.tmdb_backdrop_path,
+                                production_companies: rawDetails.production_companies || rawDetails.tmdb_production_companies,
+                                production_countries: rawDetails.production_countries || rawDetails.tmdb_production_countries,
+                                spoken_languages: rawDetails.spoken_languages || rawDetails.tmdb_spoken_languages,
+                                in_production: rawDetails.in_production || rawDetails.tmdb_in_production,
+                            };
+                            
+                            // Filter out undefined values to avoid inserting NULL for non-existent keys
+                            Object.keys(tvDetailData).forEach(key => tvDetailData[key] === undefined && delete tvDetailData[key]);
+
+                            if (tvDetailData.first_air_date && isNaN(new Date(tvDetailData.first_air_date).getTime())) {
+                                console.warn(`[SyncController CREATE tv_details] Invalid first_air_date format: ${tvDetailData.first_air_date}. Setting to null.`);
+                                tvDetailData.first_air_date = null;
+                            }
+
+                            if (tvDetailData.last_air_date && isNaN(new Date(tvDetailData.last_air_date).getTime())) {
+                                console.warn(`[SyncController CREATE tv_details] Invalid last_air_date format: ${tvDetailData.last_air_date}. Setting to null.`);
+                                tvDetailData.last_air_date = null;
+                            }
+
+                            const detailColumns = Object.keys(tvDetailData);
+                            const detailValues = detailColumns.map(col => tvDetailData[col]);
+                            const detailPlaceholders = detailColumns.map((_, i) => `$${i + 1}`).join(', ');
+
+                            const detailQuery = `INSERT INTO ${client.escapeIdentifier(detailTableName)} (${detailColumns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${detailPlaceholders}) RETURNING id`;
+                            
+                            console.log(`[SyncController CREATE tv_details] Query: ${detailQuery}, Values:`, detailValues);
+                            try {
+                                const detailResult = await client.query(detailQuery, detailValues);
+                                const tvDetailId = detailResult.rows[0]?.id;
+                                if (tvDetailId) {
+                                    console.log(`[SyncController] Created record in ${detailTableName} with ID ${tvDetailId}`);
+                                    // Now, update the list_items record with the tv_detail_id
+                                    const updateListItemQuery = `UPDATE ${client.escapeIdentifier(tableName)} SET tv_detail_id = $1 WHERE id = $2`;
+                                    await client.query(updateListItemQuery, [tvDetailId, newServerId]);
+                                    console.log(`[SyncController] Updated list_items ${newServerId} with tv_detail_id ${tvDetailId}`);
+                                } else {
+                                    console.error(`[SyncController CREATE tv_details] Failed to get ID from ${detailTableName} insert.`);
+                                }
+                            } catch (detailInsertError) {
+                                console.error(`[SyncController CREATE tv_details] Error inserting into ${detailTableName} for list_item_id ${newServerId}:`, detailInsertError);
+                                // Decide on error handling: rethrow, log, or mark main item?
+                                // For now, it logs, and the transaction might proceed without the detail link.
+                            }
+                        }
+                    }
+                    // --- END TV DETAILS LOGIC ---
                 }
                 // --- END MOVIE DETAILS LOGIC ---
 
@@ -459,7 +531,7 @@ function syncControllerFactory(socketService) {
       const changes = {};
       const serverNow = Date.now();
       // Add 'movie_details' and other detail tables as needed
-      const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users', 'movie_details']; 
+      const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users', 'movie_details', 'tv_details']; 
       
       console.log('[SyncController] Syncing tables for changes:', allSyncableTables);
       await db.transaction(async (client) => {
