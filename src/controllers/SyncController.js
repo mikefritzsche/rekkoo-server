@@ -27,6 +27,12 @@ function syncControllerFactory(socketService) {
     if (tableName === 'users') {
       return 'id'; // Users table uses 'id' as its identifier
     }
+    if (tableName === 'favorites' || tableName === 'favorite_categories' || tableName === 'favorite_notification_preferences') {
+      return 'user_id'; // Favorites tables use 'user_id' as their identifier
+    }
+    if (tableName === 'favorite_sharing') {
+      return 'shared_by_user_id'; // Favorite sharing uses 'shared_by_user_id' as its identifier
+    }
     // For any other table, including detail tables, we are saying there is no direct user identifier for the generic pull.
     // This means they won't be processed in the main loop of handleGetChanges for direct user-filtered updates/deletes.
     console.warn(`[SyncController] Table '${tableName}' will not be processed by user-identifier in handleGetChanges main loop.`);
@@ -52,7 +58,7 @@ function syncControllerFactory(socketService) {
       return res.status(400).json({ error: 'Invalid payload format: "changes" must be an array.' });
     }
 
-    console.log(`[SyncController] User ${userId} pushing ${clientChangesArray.length} changes. Current time: ${new Date().toISOString()}`);
+    // console.log(`[SyncController] User ${userId} pushing ${clientChangesArray.length} changes. Current time: ${new Date().toISOString()}`);
 
     try {
       await db.transaction(async (client) => {
@@ -64,7 +70,7 @@ function syncControllerFactory(socketService) {
             continue;
           }
 
-          console.log(`[SyncController] Processing operation '${operation}' for table '${tableName}', clientRecordId '${clientRecordId}'`);
+          // console.log(`[SyncController] Processing operation '${operation}' for table '${tableName}', clientRecordId '${clientRecordId}'`);
 
           let tableUserIdentifierColumn = getUserIdentifierColumn(tableName);
           
@@ -533,7 +539,7 @@ function syncControllerFactory(socketService) {
       // Add 'movie_details' and other detail tables as needed
       const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users', 'movie_details', 'tv_details']; 
       
-      console.log('[SyncController] Syncing tables for changes:', allSyncableTables);
+      // console.log('[SyncController] Syncing tables for changes:', allSyncableTables);
       await db.transaction(async (client) => {
         for (const table of allSyncableTables) {
           const userIdentifierColumn = getUserIdentifierColumn(table);
@@ -542,7 +548,7 @@ function syncControllerFactory(socketService) {
           let deletedRecordIds = [];
 
           if (table === 'movie_details') {
-            console.log(`[SyncController] Processing table: ${table} (special handling for detail table)`);
+            // console.log(`[SyncController] Processing table: ${table} (special handling for detail table)`);
             const updatedQuery = `
               SELECT md.* FROM ${client.escapeIdentifier(table)} md
               JOIN list_items li ON md.list_item_id = li.id
@@ -563,7 +569,7 @@ function syncControllerFactory(socketService) {
             deletedRecordIds = []; 
 
           } else if (userIdentifierColumn) { 
-            console.log(`[SyncController] Processing table: ${table}, Using identifier column: ${userIdentifierColumn}`);
+            // console.log(`[SyncController] Processing table: ${table}, Using identifier column: ${userIdentifierColumn}`);
             const updatedQuery = `
               SELECT * FROM ${client.escapeIdentifier(table)} 
               WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND updated_at >= to_timestamp($2 / 1000.0)

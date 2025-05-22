@@ -12,6 +12,10 @@ const SocketService = require('./services/socket-service');
 // Import route *initializer functions* where needed
 const initializeChatRoutes = require('./routes/chat.routes');
 const initializeSyncRoutes = require('./routes/sync.routes');
+const createFavoritesRouter = require('./routes/favorites.routes');
+
+// Import controllers that need initialization
+const favoritesControllerFactory = require('./controllers/FavoritesController');
 
 // Import standard routes
 const userRoutes = require('./routes/user.routes');
@@ -37,7 +41,10 @@ const PORT = process.env.PORT || 3100;
 // --- 3. Initialize Socket.IO Service ---
 const socketService = new SocketService(server);
 
-// --- 4. Middleware ---
+// --- 4. Initialize Controllers that need dependencies ---
+const favoritesController = favoritesControllerFactory(socketService);
+
+// --- 5. Middleware ---
 app.use(cors({
   origin: process.env.CORS_ORIGIN || ['http://localhost:3000', 'http://localhost:8081'],
   credentials: true
@@ -45,7 +52,7 @@ app.use(cors({
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
-// --- 5. Mount Routes ---
+// --- 6. Mount Routes ---
 // Routes that DON'T need socketService
 app.use('/api/v1.0/users', userRoutes);
 app.use('/api/v1.0/claude', claudeRoutes);
@@ -61,12 +68,15 @@ app.use('/v1.0/spotify', spotifyRoutes);
 app.use('/v1.0/auth', authRoutes);
 app.use('/amazon', amazonRoutes);
 
-// Routes that DO need socketService
+// Initialize and mount routes that need socket service
+const favoritesRouter = createFavoritesRouter(favoritesController);
+app.use('/v1.0/favorites', favoritesRouter);
+app.use('/api/favorites', favoritesRouter);
 app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
 app.use('/uploads', uploadRoutes);
 
-// --- 6. Basic/Utility Routes ---
+// --- 7. Basic/Utility Routes ---
 app.get('/api/v1.0/health', (req, res) => {
   res.json({ status: 'ok', message: 'Rekko Health Check Successful' });
 });
@@ -79,13 +89,13 @@ app.get('/api/v1.0', (req, res) => {
   res.json({ message: 'Welcome to Rekkoo API' });
 });
 
-// --- 7. Error Handling Middleware (Keep this last) ---
+// --- 8. Error Handling Middleware (Keep this last) ---
 app.use((err, req, res, next) => {
   logger.error('Unhandled error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// --- 8. Start Server ---
+// --- 9. Start Server ---
 server.listen(PORT, () => {
   console.log(`env: `, process.env)
   console.log(`DB_SSL: `, process.env.DB_SSL);
