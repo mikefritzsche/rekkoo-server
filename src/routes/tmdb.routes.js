@@ -29,6 +29,8 @@ function createTMDBRouter(tmdbController) {
    */
   router.post('/search/multiple', tmdbController.searchMultipleMedia);
 
+  router.get('/configuration', tmdbController.getConfiguration);
+
   return router;
 }
 

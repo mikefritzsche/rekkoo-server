@@ -17,6 +17,17 @@ function tmdbControllerFactory(socketService = null) {
     emitToUser: () => {} // No-op function
   };
 
+  async function getConfiguration(req, res) {
+    try {
+      const response = await fetch(`${TMDB_CONFIG.baseUrl}/configuration?api_key=${TMDB_CONFIG.apiKey}`);
+      const data = await response.json();
+      
+      res.json({...data});
+    } catch (error) {
+      res.status(500).json({error});
+    }
+  }
+
   /**
    * Utility function for movie search
    */
@@ -121,6 +132,7 @@ function tmdbControllerFactory(socketService = null) {
 
   // Return all controller methods
   return {
+    getConfiguration,
     searchMedia,
     getMediaDetails,
     searchMultipleMedia
