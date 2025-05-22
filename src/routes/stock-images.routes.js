@@ -1,44 +1,31 @@
 const express = require('express');
-const router = express.Router();
-const fetch = require('node-fetch');
-const querystring = require('node:querystring');
 
-router.get('/', async (req, res) => {
-  const {query, pagingQuery = '', perPage} = req.query
-  const queryParams = {
-    query,
-    orientation: 'landscape',
-    per_page: perPage || 18
-  }
+/**
+ * Creates and returns a router with stock images routes
+ * @param {Object} stockImagesController - Controller with stock images API methods
+ * @returns {express.Router} Express router
+ */
+function createStockImagesRouter(stockImagesController) {
+  const router = express.Router();
 
-  let baseUrl = 'https://api.pexels.com/v1/search'
-  let url
+  /**
+   * @route GET /
+   * @desc Search for stock images from Pexels API
+   * @access Public
+   */
+  router.get('/', stockImagesController.searchImages);
 
-  if (!pagingQuery) {
-    url = `${baseUrl}?${querystring.stringify(queryParams)}`
-  } else {
-    console.log(`has pagingQuery: `, pagingQuery)
-    url = pagingQuery
-  }
-// console.log(`url: `, url)
-//   res.json({url, pagingQuery, searchParams: querystring.stringify(queryParams)})
-  try {
-    const resp = await fetch(url, {
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'DDqhmYvwX1pBgj94rdHSgsJn1j44rYt5on69A4VnRDDu0hXLO47CH5Cy'
-      }
-    })
-    const data = await resp.json()
-    res.json(data)
-  } catch (e) {
-    console.log(`error: `, e)
-    return {status: 500, error: e}
-  }
+  /**
+   * @route GET /:id
+   * @desc Get a specific image by ID from Pexels API
+   * @access Public
+   */
+  router.get('/:id', stockImagesController.getImageById);
 
-});
+  return router;
+}
 
-module.exports = router;
+module.exports = createStockImagesRouter;
 
 function debounce(func, wait) {
   let timeout;

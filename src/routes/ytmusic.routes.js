@@ -1,5 +1,4 @@
 const express = require('express');
-const router = express.Router();
 const YTMusic = require("ytmusic-api");
 
 // Define action requirements
@@ -40,82 +39,22 @@ const allowedActions = [
   ...actionRequirements.standardActions
 ];
 
-router.get('/:action', async (req, res) => {
-  try {
-    // Extract parameters
-    const { action } = req.params;
-    const { q: query, resource, limit, options } = req.query;
+/**
+ * Creates and returns a router with YouTube Music routes
+ * @param {Object} ytMusicController - Controller with YouTube Music API methods
+ * @returns {express.Router} Express router
+ */
+function createYTMusicRouter(ytMusicController) {
+  const router = express.Router();
 
-    // Validate action
-    if (!allowedActions.includes(action)) {
-      return res.status(400).json({
-        error: "Invalid action",
-        allowedActions
-      });
-    }
+  /**
+   * @route GET /:action
+   * @desc Dynamic handler for YouTube Music API actions
+   * @access Public
+   */
+  router.get('/:action', ytMusicController.handleAction);
 
-    // Initialize YTMusic
-    const ytmusic = new YTMusic();
-    await ytmusic.initialize(/* Optional: Custom cookies */);
+  return router;
+}
 
-    // Validate required parameters based on action type
-    if (actionRequirements.queryActions.includes(action) && !query) {
-      return res.status(400).json({ error: "Query parameter 'q' is required for this action" });
-    }
-
-    if (actionRequirements.resourceActions.includes(action) && !resource) {
-      return res.status(400).json({ error: "Resource parameter is required for this action" });
-    }
-
-    // Parse options if provided
-    let parsedOptions = {};
-    if (options) {
-      try {
-        parsedOptions = JSON.parse(options);
-      } catch (e) {
-        return res.status(400).json({ error: "Invalid options format. Must be valid JSON" });
-      }
-    }
-
-    // Execute the appropriate action with the correct parameters
-    let results;
-
-    if (actionRequirements.queryActions.includes(action)) {
-      // Handle query-based actions
-      results = await ytmusic[action](query, parsedOptions);
-    } else if (actionRequirements.resourceActions.includes(action)) {
-      // Handle resource-based actions
-      results = await ytmusic[action](resource, parsedOptions);
-    } else {
-      // Handle standard actions with no required parameters
-      results = await ytmusic[action](parsedOptions);
-    }
-
-    // Apply limit if provided
-    if (limit && !isNaN(parseInt(limit)) && results) {
-      // Handle different result structures
-      if (Array.isArray(results)) {
-        results = results.slice(0, parseInt(limit));
-      } else if (results.content && Array.isArray(results.content)) {
-        results.content = results.content.slice(0, parseInt(limit));
-      } else if (results.items && Array.isArray(results.items)) {
-        results.items = results.items.slice(0, parseInt(limit));
-      } else if (results.results && Array.isArray(results.results)) {
-        results.results = results.results.slice(0, parseInt(limit));
-      }
-    }
-
-    // Return results
-    return res.json(results);
-
-  } catch (error) {
-    console.error('Error with YouTube Music API:', error);
-    res.status(500).json({
-      error: 'API request failed',
-      message: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
-  }
-});
-
-module.exports = router;
+module.exports = createYTMusicRouter;

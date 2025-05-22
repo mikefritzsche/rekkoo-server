@@ -1,8 +1,21 @@
 const { spotifyService } = require('../services/spotify-service');
 const { logger } = require('../utils/logger');
 
-class SpotifyController {
-  async getToken(req, res) {
+/**
+ * Factory function that creates a SpotifyController
+ * @param {Object} socketService - Optional socket service for real-time updates
+ * @returns {Object} Controller object with Spotify API methods
+ */
+function spotifyControllerFactory(socketService = null) {
+  // Create a dummy socket service if none is provided
+  const safeSocketService = socketService || {
+    emitToUser: () => {} // No-op function
+  };
+  
+  /**
+   * Get Spotify access token
+   */
+  const getToken = async (req, res) => {
     try {
       const token = await spotifyService.getToken();
       res.json({ access_token: token });
@@ -10,9 +23,12 @@ class SpotifyController {
       logger.error('Spotify authentication error:', error);
       res.status(500).json({ error: 'Failed to authenticate with Spotify' });
     }
-  }
+  };
 
-  async search(req, res) {
+  /**
+   * Search Spotify for artists, tracks, albums, etc.
+   */
+  const search = async (req, res) => {
     try {
       const { q: query, offset = 0, limit = 24 } = req.query;
       
@@ -31,12 +47,22 @@ class SpotifyController {
       logger.error('Spotify search error:', error);
       res.status(500).json({ error: 'Failed to search Spotify' });
     }
-  }
+  };
 
   // Add more controller methods as needed
-  // async getTrack(req, res) { ... }
-  // async getArtist(req, res) { ... }
-  // async getPlaylist(req, res) { ... }
+  // const getTrack = async (req, res) => { ... }
+  // const getArtist = async (req, res) => { ... }
+  // const getPlaylist = async (req, res) => { ... }
+
+  // Return all controller methods
+  return {
+    getToken,
+    search
+    // Add additional methods here when implemented
+    // getTrack,
+    // getArtist,
+    // getPlaylist
+  };
 }
 
-module.exports = new SpotifyController(); 
+module.exports = spotifyControllerFactory; 
