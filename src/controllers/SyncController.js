@@ -1,5 +1,7 @@
 // server/src/controllers/SyncController.js
 const db = require('../config/db'); // Ensure this path is correct
+const ListService = require('../services/ListService'); // Import ListService
+const { logger } = require('../utils/logger'); // Assuming logger is in utils
 
 // Define detail tables that are associated with records in the 'list_items' table
 const DETAIL_TABLES_MAP = {
@@ -35,7 +37,7 @@ function syncControllerFactory(socketService) {
     }
     // For any other table, including detail tables, we are saying there is no direct user identifier for the generic pull.
     // This means they won't be processed in the main loop of handleGetChanges for direct user-filtered updates/deletes.
-    console.warn(`[SyncController] Table '${tableName}' will not be processed by user-identifier in handleGetChanges main loop.`);
+    logger.warn(`[SyncController] Table '${tableName}' will not be processed by user-identifier in handleGetChanges main loop.`);
     return null;
   };
 
@@ -54,7 +56,7 @@ function syncControllerFactory(socketService) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
     if (!Array.isArray(clientChangesArray)) {
-      console.error('[SyncController] Push failed: req.body.changes is not an array. Received:', req.body);
+      logger.error('[SyncController] Push failed: req.body.changes is not an array. Received:', req.body);
       return res.status(400).json({ error: 'Invalid payload format: "changes" must be an array.' });
     }
 
@@ -65,12 +67,62 @@ function syncControllerFactory(socketService) {
         for (const changeItem of clientChangesArray) {
           const { table_name: tableName, operation, record_id: clientRecordId, data } = changeItem;
 
-          if (!tableName || !operation || !data) {
-            console.warn('[SyncController] Skipping invalid change item:', changeItem);
+          if (!operation || !data) { // table_name might be implicit in BATCH_LIST_ORDER_UPDATE
+            logger.warn('[SyncController] Skipping invalid change item (missing operation or data):', changeItem);
+            continue;
+          }
+          
+          // Handle BATCH_LIST_ORDER_UPDATE specifically
+          if (operation === 'BATCH_LIST_ORDER_UPDATE') {
+            if (tableName !== 'lists' && data.targetTable !== 'lists') { // Allow data.targetTable for flexibility
+                 logger.warn(`[SyncController] BATCH_LIST_ORDER_UPDATE received for unexpected table: ${tableName || data.targetTable}. Skipping.`);
+                 results.push({
+                    operation,
+                    clientRecordId: data.operationId || 'N/A', // Client might send an operationId for the batch
+                    status: 'error_invalid_batch_table',
+                    error: `Batch list order update is only for 'lists' table.`
+                });
+                continue;
+            }
+            const listOrders = Array.isArray(data.items) ? data.items : (Array.isArray(data) ? data : null);
+            if (!listOrders) {
+                logger.error('[SyncController] BATCH_LIST_ORDER_UPDATE missing or invalid items array in data:', data);
+                results.push({
+                    operation,
+                    clientRecordId: data.operationId || 'N/A',
+                    status: 'error_missing_batch_items',
+                    error: 'BATCH_LIST_ORDER_UPDATE payload must contain an array of list orders in data.items or directly in data.'
+                });
+                continue;
+            }
+            try {
+                logger.info(`[SyncController] Processing BATCH_LIST_ORDER_UPDATE for ${listOrders.length} lists.`);
+                await ListService.batchUpdateListOrder(listOrders); // Assumes ListService is imported and available
+                results.push({
+                    operation,
+                    clientRecordId: data.operationId || 'batch_success', // Use a general success ID or one from client
+                    status: 'batch_updated',
+                    message: `Successfully processed batch order update for ${listOrders.length} lists.`
+                });
+            } catch (batchError) {
+                logger.error('[SyncController] Error processing BATCH_LIST_ORDER_UPDATE:', batchError);
+                results.push({
+                    operation,
+                    clientRecordId: data.operationId || 'batch_error',
+                    status: 'error_batch_processing',
+                    error: batchError.message || 'Failed to process batch list order update.'
+                });
+            }
+            continue; // Move to next change item
+          }
+          
+          // Existing logic for other operations (create, update, delete)
+          if (!tableName) {
+            logger.warn('[SyncController] Skipping invalid change item (missing tableName for non-batch op):', changeItem);
             continue;
           }
 
-          // console.log(`[SyncController] Processing operation '${operation}' for table '${tableName}', clientRecordId '${clientRecordId}'`);
+          logger.debug(`[SyncController] Processing operation '${operation}' for table '${tableName}', clientRecordId '${clientRecordId}'`);
 
           let tableUserIdentifierColumn = getUserIdentifierColumn(tableName);
           
@@ -78,7 +130,7 @@ function syncControllerFactory(socketService) {
           const isUserSettingsTable = tableName === 'user_settings';
 
           if (!tableUserIdentifierColumn && !DETAIL_TABLES_MAP[tableName.replace('_details', '')]) {
-            console.error(`[SyncController] CRITICAL: No user identifier column defined for non-detail table ${tableName} in getUserIdentifierColumn. Defaulting to user_id but this needs review.`);
+            logger.error(`[SyncController] CRITICAL: No user identifier column defined for non-detail table ${tableName} in getUserIdentifierColumn. Defaulting to user_id but this needs review.`);
             tableUserIdentifierColumn = 'user_id'; // Fallback, but ideally getUserIdentifierColumn should cover all main tables
           }
 
@@ -86,7 +138,7 @@ function syncControllerFactory(socketService) {
             const recordToCreate = { ...data };
             // Ensure the client-provided ID is part of the record to be created
             if (!recordToCreate.id) {
-              console.error(`[SyncController] Create operation for ${tableName} is missing an 'id' in the data payload. ClientRecordId was: ${clientRecordId}. Payload:`, data);
+              logger.error(`[SyncController] Create operation for ${tableName} is missing an 'id' in the data payload. ClientRecordId was: ${clientRecordId}. Payload:`, data);
               results.push({ operation, tableName, clientRecordId, status: 'error_missing_id_payload', error: "Missing 'id' in data payload for create operation." });
               continue; // Skip this item
             }
@@ -96,7 +148,7 @@ function syncControllerFactory(socketService) {
                 if (tableUserIdentifierColumn) {
                     recordToCreate[tableUserIdentifierColumn] = userId;
                 } else {
-                     console.error(`[SyncController] Create: Missing user identifier column for main table ${tableName}. Aborting create for this record.`);
+                     logger.error(`[SyncController] Create: Missing user identifier column for main table ${tableName}. Aborting create for this record.`);
                      results.push({ operation, tableName, clientRecordId, status: 'error_missing_user_column', error: `Missing user identifier column for table ${tableName}` });
                      continue; 
                 }
@@ -131,9 +183,9 @@ function syncControllerFactory(socketService) {
             try {
                 const result = await client.query(query, values);
                 if (result.rows[0] && result.rows[0].id !== newServerId) {
-                    console.warn(`[SyncController CREATE ${tableName}] DB returned ID ${result.rows[0].id} which differs from client-provided ID ${newServerId}. Using client's ID as source of truth.`);
+                    logger.warn(`[SyncController CREATE ${tableName}] DB returned ID ${result.rows[0].id} which differs from client-provided ID ${newServerId}. Using client's ID as source of truth.`);
                 }
-                console.log(`[SyncController] Created record in ${tableName} with actual ID used: ${newServerId}`);
+                logger.info(`[SyncController] Created record in ${tableName} with actual ID used: ${newServerId}`);
                 results.push({ operation, tableName, clientRecordId: newServerId, serverId: newServerId, status: 'created' });
 
                 // --- BEGIN MOVIE DETAILS LOGIC ---
@@ -142,7 +194,7 @@ function syncControllerFactory(socketService) {
                     const itemType = apiMetadata.type?.toLowerCase(); // e.g., 'movie', 'book', 'tv'
                     const rawDetails = apiMetadata.raw_details;
 
-                    console.log(`[SyncController CREATE list_items] Item type: ${itemType}, Raw details found: ${!!rawDetails}`);
+                    logger.info(`[SyncController CREATE list_items] Item type: ${itemType}, Raw details found: ${!!rawDetails}`);
 
                     if (itemType === 'movie' && rawDetails && typeof rawDetails === 'object') {
                         const detailTableName = getDetailTableName(itemType); // Should be 'movie_details'
@@ -171,7 +223,7 @@ function syncControllerFactory(socketService) {
                             Object.keys(movieDetailData).forEach(key => movieDetailData[key] === undefined && delete movieDetailData[key]);
 
                             if (movieDetailData.release_date && isNaN(new Date(movieDetailData.release_date).getTime())) {
-                                console.warn(`[SyncController CREATE movie_details] Invalid release_date format: ${movieDetailData.release_date}. Setting to null.`);
+                                logger.warn(`[SyncController CREATE movie_details] Invalid release_date format: ${movieDetailData.release_date}. Setting to null.`);
                                 movieDetailData.release_date = null;
                             }
 
@@ -182,21 +234,21 @@ function syncControllerFactory(socketService) {
 
                             const detailQuery = `INSERT INTO ${client.escapeIdentifier(detailTableName)} (${detailColumns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${detailPlaceholders}) RETURNING id`;
                             
-                            console.log(`[SyncController CREATE movie_details] Query: ${detailQuery}, Values:`, detailValues);
+                            logger.info(`[SyncController CREATE movie_details] Query: ${detailQuery}, Values:`, detailValues);
                             try {
                                 const detailResult = await client.query(detailQuery, detailValues);
                                 const movieDetailId = detailResult.rows[0]?.id;
                                 if (movieDetailId) {
-                                    console.log(`[SyncController] Created record in ${detailTableName} with ID ${movieDetailId}`);
+                                    logger.info(`[SyncController] Created record in ${detailTableName} with ID ${movieDetailId}`);
                                     // Now, update the list_items record with the movie_detail_id
                                     const updateListItemQuery = `UPDATE ${client.escapeIdentifier(tableName)} SET movie_detail_id = $1 WHERE id = $2`;
                                     await client.query(updateListItemQuery, [movieDetailId, newServerId]);
-                                    console.log(`[SyncController] Updated list_items ${newServerId} with movie_detail_id ${movieDetailId}`);
+                                    logger.info(`[SyncController] Updated list_items ${newServerId} with movie_detail_id ${movieDetailId}`);
                                 } else {
-                                    console.error(`[SyncController CREATE movie_details] Failed to get ID from ${detailTableName} insert.`);
+                                    logger.error(`[SyncController CREATE movie_details] Failed to get ID from ${detailTableName} insert.`);
                                 }
                             } catch (detailInsertError) {
-                                console.error(`[SyncController CREATE movie_details] Error inserting into ${detailTableName} for list_item_id ${newServerId}:`, detailInsertError);
+                                logger.error(`[SyncController CREATE movie_details] Error inserting into ${detailTableName} for list_item_id ${newServerId}:`, detailInsertError);
                                 // Decide on error handling: rethrow, log, or mark main item?
                                 // For now, it logs, and the transaction might proceed without the detail link.
                             }
@@ -237,12 +289,12 @@ function syncControllerFactory(socketService) {
                             Object.keys(tvDetailData).forEach(key => tvDetailData[key] === undefined && delete tvDetailData[key]);
 
                             if (tvDetailData.first_air_date && isNaN(new Date(tvDetailData.first_air_date).getTime())) {
-                                console.warn(`[SyncController CREATE tv_details] Invalid first_air_date format: ${tvDetailData.first_air_date}. Setting to null.`);
+                                logger.warn(`[SyncController CREATE tv_details] Invalid first_air_date format: ${tvDetailData.first_air_date}. Setting to null.`);
                                 tvDetailData.first_air_date = null;
                             }
 
                             if (tvDetailData.last_air_date && isNaN(new Date(tvDetailData.last_air_date).getTime())) {
-                                console.warn(`[SyncController CREATE tv_details] Invalid last_air_date format: ${tvDetailData.last_air_date}. Setting to null.`);
+                                logger.warn(`[SyncController CREATE tv_details] Invalid last_air_date format: ${tvDetailData.last_air_date}. Setting to null.`);
                                 tvDetailData.last_air_date = null;
                             }
 
@@ -252,21 +304,21 @@ function syncControllerFactory(socketService) {
 
                             const detailQuery = `INSERT INTO ${client.escapeIdentifier(detailTableName)} (${detailColumns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${detailPlaceholders}) RETURNING id`;
                             
-                            console.log(`[SyncController CREATE tv_details] Query: ${detailQuery}, Values:`, detailValues);
+                            logger.info(`[SyncController CREATE tv_details] Query: ${detailQuery}, Values:`, detailValues);
                             try {
                                 const detailResult = await client.query(detailQuery, detailValues);
                                 const tvDetailId = detailResult.rows[0]?.id;
                                 if (tvDetailId) {
-                                    console.log(`[SyncController] Created record in ${detailTableName} with ID ${tvDetailId}`);
+                                    logger.info(`[SyncController] Created record in ${detailTableName} with ID ${tvDetailId}`);
                                     // Now, update the list_items record with the tv_detail_id
                                     const updateListItemQuery = `UPDATE ${client.escapeIdentifier(tableName)} SET tv_detail_id = $1 WHERE id = $2`;
                                     await client.query(updateListItemQuery, [tvDetailId, newServerId]);
-                                    console.log(`[SyncController] Updated list_items ${newServerId} with tv_detail_id ${tvDetailId}`);
+                                    logger.info(`[SyncController] Updated list_items ${newServerId} with tv_detail_id ${tvDetailId}`);
                                 } else {
-                                    console.error(`[SyncController CREATE tv_details] Failed to get ID from ${detailTableName} insert.`);
+                                    logger.error(`[SyncController CREATE tv_details] Failed to get ID from ${detailTableName} insert.`);
                                 }
                             } catch (detailInsertError) {
-                                console.error(`[SyncController CREATE tv_details] Error inserting into ${detailTableName} for list_item_id ${newServerId}:`, detailInsertError);
+                                logger.error(`[SyncController CREATE tv_details] Error inserting into ${detailTableName} for list_item_id ${newServerId}:`, detailInsertError);
                                 // Decide on error handling: rethrow, log, or mark main item?
                                 // For now, it logs, and the transaction might proceed without the detail link.
                             }
@@ -288,10 +340,10 @@ function syncControllerFactory(socketService) {
                      sync_error = NULL`,
                   [tableName, newServerId, operation]
                 );
-                console.log(`[SyncController] Added/Updated CREATE in sync_tracking for ${tableName}/${newServerId}`);
+                logger.info(`[SyncController] Added/Updated CREATE in sync_tracking for ${tableName}/${newServerId}`);
 
             } catch (insertError) {
-                console.error(`[SyncController CREATE ${tableName}] Error inserting record with client-provided ID ${newServerId}:`, insertError);
+                logger.error(`[SyncController CREATE ${tableName}] Error inserting record with client-provided ID ${newServerId}:`, insertError);
                 results.push({ operation, tableName, clientRecordId, serverId: null, status: 'error_insert_failed', error: insertError.message, detail: insertError.detail });
                 // Do not add to sync_tracking if insert failed
                 continue; // move to next change item
@@ -304,10 +356,10 @@ function syncControllerFactory(socketService) {
             delete recordToUpdate._status; delete recordToUpdate._changed; delete recordToUpdate.details; delete recordToUpdate.created_at;
             
             recordToUpdate.updated_at = new Date();
-            console.log(`[SyncController] Updating record in ${tableName} (Client ID: ${clientRecordId}, User PK: ${data.user_id || clientRecordId}): Payload:`, recordToUpdate);
+            logger.info(`[SyncController] Updating record in ${tableName} (Client ID: ${clientRecordId}, User PK: ${data.user_id || clientRecordId}): Payload:`, recordToUpdate);
 
             if (Object.keys(recordToUpdate).length === 0) {
-                console.warn(`[SyncController] No fields to update for ${tableName} (Client ID: ${clientRecordId}). Skipping.`);
+                logger.warn(`[SyncController] No fields to update for ${tableName} (Client ID: ${clientRecordId}). Skipping.`);
                 continue;
             }
 
@@ -317,16 +369,16 @@ function syncControllerFactory(socketService) {
 
             if (isUserSettingsTable) {
               if (!data.user_id) {
-                console.error(`[SyncController] Update for user_settings failed: data.user_id is missing. Client ID: ${clientRecordId}`);
+                logger.error(`[SyncController] Update for user_settings failed: data.user_id is missing. Client ID: ${clientRecordId}`);
                 continue;
               }
               values.push(data.user_id); // Use data.user_id for the WHERE clause
               query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE ${client.escapeIdentifier('user_id')} = $${values.length}`;
-              console.log(`[SyncController] UserSettings Update Query: ${query}, Values: `, values);
+              logger.info(`[SyncController] UserSettings Update Query: ${query}, Values: `, values);
             } else {
               // Generic update logic for other tables (using clientRecordId which should be the server's actual ID for updates)
               if (!clientRecordId) {
-                  console.error(`[SyncController] Update for ${tableName} failed: clientRecordId is missing.`);
+                  logger.error(`[SyncController] Update for ${tableName} failed: clientRecordId is missing.`);
                   continue;
               }
               values.push(clientRecordId); 
@@ -338,13 +390,13 @@ function syncControllerFactory(socketService) {
                 query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE id = $${values.length - 1} AND ${client.escapeIdentifier(tableUserIdentifierColumn)} = $${values.length}`;
               } else { // For detail tables assumed to be updated only by their own id, after parent ownership check
                 query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE id = $${values.length}`;
-                console.warn(`[SyncController] Updating detail table ${tableName} without direct user/owner filter by its ID. Ensure parent ownership was checked.`);
+                logger.warn(`[SyncController] Updating detail table ${tableName} without direct user/owner filter by its ID. Ensure parent ownership was checked.`);
               }
             }
             
-            console.log(`[SyncController] Executing Update for ${tableName}: Query: ${query.substring(0, 200)}..., Values Count: ${values.length}`);
+            logger.info(`[SyncController] Executing Update for ${tableName}: Query: ${query.substring(0, 200)}..., Values Count: ${values.length}`);
             const updateResult = await client.query(query, values);
-            console.log(`[SyncController] Update result for ${tableName} (Client ID: ${clientRecordId}): ${updateResult.rowCount} row(s) affected.`);
+            logger.info(`[SyncController] Update result for ${tableName} (Client ID: ${clientRecordId}): ${updateResult.rowCount} row(s) affected.`);
             if (updateResult.rowCount > 0) {
               results.push({ operation, tableName, clientRecordId, status: 'updated', affectedRows: updateResult.rowCount }); // Add to results
               // Add to sync_tracking
@@ -361,12 +413,12 @@ function syncControllerFactory(socketService) {
                      sync_error = NULL`,
                   [tableName, recordIdForSync, operation]
                 );
-                console.log(`[SyncController] Added/Updated UPDATE in sync_tracking for ${tableName}/${recordIdForSync}`);
+                logger.info(`[SyncController] Added/Updated UPDATE in sync_tracking for ${tableName}/${recordIdForSync}`);
 
                 // WebSocket notification for user_settings
                 if (isUserSettingsTable && socketService && recordIdForSync === data.user_id) { 
                   try {
-                    console.log(`[SyncController DEBUG] About to notify user ${data.user_id}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
+                    logger.info(`[SyncController DEBUG] About to notify user ${data.user_id}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
                     await socketService.notifyUser(data.user_id, 'sync_update_available', {
                       message: `User settings updated for user ${data.user_id}`,
                       source: 'push', 
@@ -376,20 +428,20 @@ function syncControllerFactory(socketService) {
                           operation: operation
                       }]
                     });
-                    console.log(`[SyncController] Sent 'sync_update_available' (user_settings) to user ${data.user_id}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
+                    logger.info(`[SyncController] Sent 'sync_update_available' (user_settings) to user ${data.user_id}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
                   } catch (wsError) {
-                    console.error(`[SyncController] Error sending WebSocket notification for user_settings update to user ${data.user_id}:`, wsError);
+                    logger.error(`[SyncController] Error sending WebSocket notification for user_settings update to user ${data.user_id}:`, wsError);
                   }
                 }
               } else {
-                console.warn(`[SyncController] Could not add UPDATE to sync_tracking for ${tableName} due to missing record_id. Client ID: ${clientRecordId}`);
+                logger.warn(`[SyncController] Could not add UPDATE to sync_tracking for ${tableName} due to missing record_id. Client ID: ${clientRecordId}`);
               }
             } else if (isUserSettingsTable) {
-                console.warn(`[SyncController] WARN: User settings update for user_id ${data.user_id} affected 0 rows. Does the record exist?`);
+                logger.warn(`[SyncController] WARN: User settings update for user_id ${data.user_id} affected 0 rows. Does the record exist?`);
                 // Even if 0 rows affected, consider it 'processed' from client's perspective if no error thrown
                 results.push({ operation, tableName, clientRecordId, status: 'noop_or_not_found', affectedRows: 0 });
             } else {
-                 console.warn(`[SyncController] WARN: Update for ${tableName} ID ${clientRecordId} (User ${userId}) affected 0 rows. Does the record exist and belong to user?`);
+                 logger.warn(`[SyncController] WARN: Update for ${tableName} ID ${clientRecordId} (User ${userId}) affected 0 rows. Does the record exist and belong to user?`);
                  results.push({ operation, tableName, clientRecordId, status: 'noop_or_not_found', affectedRows: 0 });
             }
 
@@ -402,10 +454,10 @@ function syncControllerFactory(socketService) {
 
           } else if (operation === 'delete') {
             if (!clientRecordId) {
-                console.error(`[SyncController] Delete for ${tableName} failed: clientRecordId is missing.`);
+                logger.error(`[SyncController] Delete for ${tableName} failed: clientRecordId is missing.`);
                 continue;
             }
-            console.log(`[SyncController] Deleting record from ${tableName} (ID: ${clientRecordId})`);
+            logger.info(`[SyncController] Deleting record from ${tableName} (ID: ${clientRecordId})`);
             
             // TODO: Handle list_items with details deletion if necessary (simplified for now)
             let query;
@@ -422,11 +474,11 @@ function syncControllerFactory(socketService) {
                     deleteResult = await client.query(query, [clientRecordId, userId]);
                 } else { // Detail tables without direct user identifier, deletion should be based on parent.
                     query = `DELETE FROM ${client.escapeIdentifier(tableName)} WHERE id = $1`;
-                    console.warn(`[SyncController] Deleting from detail table ${tableName} by ID only. Ensure parent ownership was checked.`);
+                    logger.warn(`[SyncController] Deleting from detail table ${tableName} by ID only. Ensure parent ownership was checked.`);
                     deleteResult = await client.query(query, [clientRecordId]);
                 }
             }
-            console.log(`[SyncController] Delete result for ${tableName} (Client ID: ${clientRecordId}): ${deleteResult.rowCount} row(s) affected.`);
+            logger.info(`[SyncController] Delete result for ${tableName} (Client ID: ${clientRecordId}): ${deleteResult.rowCount} row(s) affected.`);
             results.push({ operation, tableName, clientRecordId, status: 'deleted', affectedRows: deleteResult.rowCount }); // Add to results
 
             if (deleteResult.rowCount > 0) {
@@ -443,12 +495,12 @@ function syncControllerFactory(socketService) {
                        sync_error = NULL`,
                     [tableName, recordIdForDeleteSync, operation]
                   );
-                  console.log(`[SyncController] Added/Updated DELETE in sync_tracking for ${tableName}/${recordIdForDeleteSync}`);
+                  logger.info(`[SyncController] Added/Updated DELETE in sync_tracking for ${tableName}/${recordIdForDeleteSync}`);
 
                   // WebSocket notification for user_settings deletion
                   if (isUserSettingsTable && socketService && recordIdForDeleteSync === userId) { 
                      try {
-                        console.log(`[SyncController DEBUG] About to notify user (delete) ${userId}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
+                        logger.info(`[SyncController DEBUG] About to notify user (delete) ${userId}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
                         await socketService.notifyUser(userId, 'sync_update_available', {
                             message: `User settings deleted for user ${userId}`,
                             source: 'push',
@@ -458,13 +510,13 @@ function syncControllerFactory(socketService) {
                                 operation: operation // 'delete'
                             }]
                         });
-                        console.log(`[SyncController] Sent 'sync_update_available' (user_settings delete) to user ${userId}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
+                        logger.info(`[SyncController] Sent 'sync_update_available' (user_settings delete) to user ${userId}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
                     } catch (wsError) {
-                        console.error(`[SyncController] Error sending WebSocket notification for user_settings delete to user ${userId}:`, wsError);
+                        logger.error(`[SyncController] Error sending WebSocket notification for user_settings delete to user ${userId}:`, wsError);
                     }
                   }
               } else {
-                  console.warn(`[SyncController] Could not add DELETE to sync_tracking for ${tableName} due to missing record_id. Client ID was: ${clientRecordId}`);
+                  logger.warn(`[SyncController] Could not add DELETE to sync_tracking for ${tableName} due to missing record_id. Client ID was: ${clientRecordId}`);
               }
             }
 
@@ -475,7 +527,7 @@ function syncControllerFactory(socketService) {
                 // This is more complex than create.
             }
           } else {
-            console.warn(`[SyncController] Unknown operation '${operation}' for table '${tableName}'. Skipping.`);
+            logger.warn(`[SyncController] Unknown operation '${operation}' for table '${tableName}'. Skipping.`);
             results.push({ operation, tableName, clientRecordId, status: 'skipped_unknown_operation' });
           }
         }
@@ -483,7 +535,7 @@ function syncControllerFactory(socketService) {
       // If transaction is successful
       res.status(200).json({ success: true, message: 'Changes pushed and processed successfully.', results });
     } catch (error) {
-      console.error('[SyncController] Push error:', error);
+      logger.error('[SyncController] Push error:', error);
       res.status(500).json({ success: false, error: 'Failed to process changes', details: error.message, results }); // Include results even on error if partially processed
     }
   };
@@ -505,33 +557,33 @@ function syncControllerFactory(socketService) {
    */
   const handleGetChanges = async (req, res) => {
     const lastPulledAtString = req.query.last_pulled_at; // Prioritize last_pulled_at
-    console.log(`[SyncController] Received req.query.last_pulled_at: '${lastPulledAtString}' (type: ${typeof lastPulledAtString})`);
+    logger.info(`[SyncController] Received req.query.last_pulled_at: '${lastPulledAtString}' (type: ${typeof lastPulledAtString})`);
     let lastPulledAt = 0; // Default to 0 if not provided or unparseable
 
     if (lastPulledAtString) {
       const parsedDate = Date.parse(lastPulledAtString);
       if (!isNaN(parsedDate)) {
         lastPulledAt = parsedDate;
-        console.log(`[SyncController] Parsed last_pulled_at via Date.parse: ${lastPulledAt}`);
+        logger.info(`[SyncController] Parsed last_pulled_at via Date.parse: ${lastPulledAt}`);
       } else {
         const parsedInt = parseInt(lastPulledAtString, 10);
         if (!isNaN(parsedInt)) {
           lastPulledAt = parsedInt;
-          console.log(`[SyncController] Parsed last_pulled_at via parseInt: ${lastPulledAt}`);
+          logger.info(`[SyncController] Parsed last_pulled_at via parseInt: ${lastPulledAt}`);
         } else {
-          console.warn(`[SyncController] Could not parse last_pulled_at value: "${lastPulledAtString}". Defaulting to 0.`);
+          logger.warn(`[SyncController] Could not parse last_pulled_at value: "${lastPulledAtString}". Defaulting to 0.`);
         }
       }
     } else {
-      console.log(`[SyncController] req.query.last_pulled_at was not provided or was empty. Defaulting to 0.`);
+      logger.info(`[SyncController] req.query.last_pulled_at was not provided or was empty. Defaulting to 0.`);
     }
-    console.log(`[SyncController] Final parsed lastPulledAt timestamp before use: ${lastPulledAt}`);
+    logger.info(`[SyncController] Final parsed lastPulledAt timestamp before use: ${lastPulledAt}`);
 
     const userId = req.user?.id;
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    console.log(`[SyncController] User ${userId} pulling changes since: ${new Date(lastPulledAt).toISOString()} (timestamp: ${lastPulledAt})`);
+    logger.info(`[SyncController] User ${userId} pulling changes since: ${new Date(lastPulledAt).toISOString()} (timestamp: ${lastPulledAt})`);
 
     try {
       const changes = {};
@@ -599,14 +651,14 @@ function syncControllerFactory(socketService) {
                 const deletedResult = await client.query(deletedQuery, [userId, lastPulledAt]);
                 deletedRecordIds = deletedResult.rows.map(r => r.id); 
               } catch (e) {
-                 console.warn(`[SyncController] Could not query deleted records for table ${table}. Error: ${e.message}`);
+                 logger.warn(`[SyncController] Could not query deleted records for table ${table}. Error: ${e.message}`);
                  // Potentially rethrow or handle if this is critical: throw e;
               }
             } else {
-              console.warn(`[SyncController] Table ${table} does not have a deleted_at column. Skipping soft delete check for this table.`);
+              logger.warn(`[SyncController] Table ${table} does not have a deleted_at column. Skipping soft delete check for this table.`);
             }
           } else {
-            console.warn(`[SyncController] Skipping table ${table} in pull changes as it has no direct user identifier column and no special handling defined.`);
+            logger.warn(`[SyncController] Skipping table ${table} in pull changes as it has no direct user identifier column and no special handling defined.`);
             changes[table] = { created: [], updated: [], deleted: [] };
             continue;
           }
@@ -624,7 +676,7 @@ function syncControllerFactory(socketService) {
       });
 
     } catch (error) {
-      console.error('[SyncController] Error pulling changes:', error);
+      logger.error('[SyncController] Error pulling changes:', error);
       res.status(500).json({ error: 'Server error pulling changes', details: error.message, code: error.code, hint: error.hint });
     }
   };
@@ -632,7 +684,7 @@ function syncControllerFactory(socketService) {
   const handleGetState = async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'User not authenticated' });
-    console.log(`[SyncController] User ${userId} requesting full initial state.`);
+    logger.info(`[SyncController] User ${userId} requesting full initial state.`);
     // Implement fetching all necessary data for the user for an initial sync.
     // This is usually a larger payload than pullChanges.
     res.status(501).json({ message: 'Not implemented: Full state retrieval' });
@@ -643,7 +695,7 @@ function syncControllerFactory(socketService) {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'User not authenticated' });
 
-    console.log(`[SyncController] User ${userId} requesting record: ${table}/${id}`);
+    logger.info(`[SyncController] User ${userId} requesting record: ${table}/${id}`);
     // Renamed 'items' to 'list_items' in allowedTables
     const allowedTables = ['list_items', 'lists', ...Object.values(DETAIL_TABLES_MAP), 'user_settings'];
     if (!allowedTables.includes(table)) {
@@ -661,7 +713,7 @@ function syncControllerFactory(socketService) {
       }
       res.status(200).json(result.rows[0]);
     } catch (error) {
-      console.error(`[SyncController] Error getting record ${table}/${id}:`, error);
+      logger.error(`[SyncController] Error getting record ${table}/${id}:`, error);
       res.status(500).json({ error: 'Server error getting record', details: error.message, code: error.code, hint: error.hint });
     }
   };
@@ -669,7 +721,7 @@ function syncControllerFactory(socketService) {
   const handleGetConflicts = async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'User not authenticated' });
-    console.log(`[SyncController] User ${userId} requesting sync conflicts.`);
+    logger.info(`[SyncController] User ${userId} requesting sync conflicts.`);
     // Conflict resolution logic would typically involve comparing client and server versions
     // and potentially storing conflicts for manual resolution.
     res.status(200).json({ conflicts: [] }); // Placeholder
@@ -678,7 +730,7 @@ function syncControllerFactory(socketService) {
   const handleGetQueue = async (req, res) => {
     const userId = req.user?.id;
     if (!userId) return res.status(401).json({ error: 'User not authenticated' });
-    console.log(`[SyncController] User ${userId} requesting sync queue status.`);
+    logger.info(`[SyncController] User ${userId} requesting sync queue status.`);
     // This could report the number of pending changes or background sync jobs.
     res.status(200).json({ queue_status: 'idle', pending_changes: 0 }); // Placeholder
   };

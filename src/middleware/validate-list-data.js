@@ -12,13 +12,14 @@ const validateListData = (req, res, next) => {
       if (change.table_name === 'lists') {
         const { data, operation } = change;
         
-        // Only validate data for create and update operations
-        if (operation !== 'delete' && !data) {
+        // Only validate data for create and update operations (and not batch order update for data presence)
+        if (operation !== 'delete' && operation !== 'BATCH_LIST_ORDER_UPDATE' && !data) {
           return res.status(400).json({ error: 'Data is required for list changes' });
         }
 
-        // Validate required fields only for create and update operations
-        if (operation !== 'delete') {
+        // Validate required fields only for create and update operations,
+        // and skip for BATCH_LIST_ORDER_UPDATE as it only needs id and sort_order from the main data payload.
+        if (operation !== 'delete' && operation !== 'BATCH_LIST_ORDER_UPDATE') {
           if (!data.title) {
             return res.status(400).json({ error: 'Title is required' });
           }
@@ -69,6 +70,23 @@ const validateListData = (req, res, next) => {
               return res.status(400).json({ error: 'Invalid image URL format' });
             }
           }
+        }
+
+        // For BATCH_LIST_ORDER_UPDATE, the 'data' field itself contains an 'items' array.
+        // We can add a basic check here if needed, e.g., ensuring 'items' is an array.
+        // However, the core validation of individual list items within the batch
+        // (like ensuring each has an 'id' and 'sort_order') would ideally be in the ListService.
+        // For now, we'll assume the ListService handles the specifics of the batch payload.
+        if (operation === 'BATCH_LIST_ORDER_UPDATE') {
+            if (!data || !Array.isArray(data.items) || data.items.length === 0) {
+                return res.status(400).json({ error: 'Data for BATCH_LIST_ORDER_UPDATE must contain a non-empty "items" array.' });
+            }
+            // Optional: iterate through data.items to ensure each has id and sort_order if desired here.
+            // for (const item of data.items) {
+            //   if (item.id === undefined || item.sort_order === undefined) {
+            //     return res.status(400).json({ error: 'Each item in BATCH_LIST_ORDER_UPDATE must have an id and sort_order.' });
+            //   }
+            // }
         }
       }
     }
