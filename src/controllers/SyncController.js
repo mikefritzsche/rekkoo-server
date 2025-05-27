@@ -115,6 +115,145 @@ function syncControllerFactory(socketService) {
             }
             continue; // Move to next change item
           }
+          // Handle BATCH_FAVORITES_UPDATE
+          else if (operation === 'BATCH_FAVORITES_UPDATE') {
+            const favoriteItems = Array.isArray(data.items) ? data.items : null;
+            if (!favoriteItems) {
+              logger.error('[SyncController] BATCH_FAVORITES_UPDATE missing or invalid items array in data:', data);
+              results.push({
+                operation,
+                clientRecordId: data.operationId || 'N/A',
+                status: 'error_missing_batch_items',
+                error: 'BATCH_FAVORITES_UPDATE payload must contain an array of favorite items in data.items.'
+              });
+              continue;
+            }
+
+            logger.info(`[SyncController] Processing BATCH_FAVORITES_UPDATE for ${favoriteItems.length} favorites.`);
+            const batchResults = [];
+
+            for (const favItem of favoriteItems) {
+              const { action, ...favoriteData } = favItem;
+              const { id: clientFavId, list_id, list_item_id, category_id, is_public, notes, sort_order } = favoriteData;
+
+              if (!action || !clientFavId || (!list_id && !list_item_id)) {
+                logger.warn('[SyncController] BATCH_FAVORITES_UPDATE: Skipping invalid favorite item (missing action, id, or target):', favItem);
+                batchResults.push({ clientRecordId: clientFavId, status: 'error_invalid_favorite_item', error: 'Missing action, id, or target' });
+                continue;
+              }
+
+              try {
+                if (action === 'add') {
+                  // Check if favorite already exists (handle soft-deleted favorites)
+                  const existingQuery = `
+                    SELECT id, deleted_at FROM public.favorites
+                    WHERE user_id = $1
+                    AND ${list_id ? 'list_id = $2' : 'list_item_id = $2'}
+                  `;
+                  const existingParams = [userId, list_id || list_item_id];
+                  const existingResult = await client.query(existingQuery, existingParams);
+
+                  let favoriteId;
+                  let recordStatus = 'created';
+
+                  if (existingResult.rows.length > 0) {
+                    const existing = existingResult.rows[0];
+                    if (existing.deleted_at) {
+                      // Restore soft-deleted favorite
+                      const restoreQuery = `
+                        UPDATE public.favorites
+                        SET deleted_at = NULL, category_id = $3, is_public = $4, notes = $5, sort_order = $6, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = $1 AND user_id = $2
+                        RETURNING id
+                      `;
+                      const restoreParams = [existing.id, userId, category_id || null, is_public || false, notes || null, sort_order || 0];
+                      const restoreResult = await client.query(restoreQuery, restoreParams);
+                      favoriteId = restoreResult.rows[0].id;
+                      recordStatus = 'restored'; // Or 'updated'
+                    } else {
+                      // Already exists and not deleted - update it
+                      const updateQuery = `
+                        UPDATE public.favorites
+                        SET category_id = $3, is_public = $4, notes = $5, sort_order = $6, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = $1 AND user_id = $2
+                        RETURNING id
+                      `;
+                      const updateParams = [existing.id, userId, category_id || null, is_public || false, notes || null, sort_order || 0];
+                      const updateResult = await client.query(updateQuery, updateParams);
+                      favoriteId = updateResult.rows[0].id;
+                      recordStatus = 'updated';
+                    }
+                  } else {
+                    // Create new favorite
+                    const insertQuery = `
+                      INSERT INTO public.favorites (id, user_id, ${list_id ? 'list_id' : 'list_item_id'}, category_id, is_public, notes, sort_order, created_at, updated_at)
+                      VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                      RETURNING id
+                    `;
+                    // Use clientFavId for the ID to maintain consistency if client generates UUIDs
+                    const insertParams = [clientFavId, userId, list_id || list_item_id, category_id || null, is_public || false, notes || null, sort_order || 0];
+                    const insertResult = await client.query(insertQuery, insertParams);
+                    favoriteId = insertResult.rows[0].id;
+                  }
+                  batchResults.push({ clientRecordId: clientFavId, serverId: favoriteId, status: recordStatus });
+                  // Add to sync tracking
+                  await client.query(
+                    `INSERT INTO public.sync_tracking (table_name, record_id, operation, user_id)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (table_name, record_id) DO UPDATE SET
+                       operation = EXCLUDED.operation,
+                       user_id = EXCLUDED.user_id,
+                       created_at = NOW(),
+                       sync_status = 'pending',
+                       last_sync_attempt = NULL,
+                       sync_error = NULL`,
+                    ['favorites', favoriteId, recordStatus === 'created' ? 'create' : 'update', userId]
+                  );
+
+                } else if (action === 'remove') {
+                  // Soft delete
+                  const deleteQuery = `
+                    UPDATE public.favorites
+                    SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1 AND user_id = $2
+                    RETURNING id
+                  `;
+                  const deleteResult = await client.query(deleteQuery, [clientFavId, userId]);
+                  if (deleteResult.rows.length > 0) {
+                    batchResults.push({ clientRecordId: clientFavId, serverId: deleteResult.rows[0].id, status: 'deleted' });
+                    // Add to sync tracking
+                    await client.query(
+                      `INSERT INTO public.sync_tracking (table_name, record_id, operation, user_id)
+                       VALUES ($1, $2, $3, $4)
+                       ON CONFLICT (table_name, record_id) DO UPDATE SET
+                         operation = EXCLUDED.operation,
+                         user_id = EXCLUDED.user_id,
+                         created_at = NOW(),
+                         sync_status = 'pending',
+                         last_sync_attempt = NULL,
+                         sync_error = NULL`,
+                      ['favorites', deleteResult.rows[0].id, 'delete', userId]
+                    );
+                  } else {
+                    batchResults.push({ clientRecordId: clientFavId, status: 'error_not_found_or_not_owner' });
+                  }
+                } else {
+                  logger.warn(`[SyncController] BATCH_FAVORITES_UPDATE: Unknown action '${action}' for favorite item:`, favItem);
+                  batchResults.push({ clientRecordId: clientFavId, status: 'error_unknown_action', error: `Unknown action: ${action}` });
+                }
+              } catch (favError) {
+                logger.error(`[SyncController] BATCH_FAVORITES_UPDATE: Error processing favorite item ${clientFavId}:`, favError);
+                batchResults.push({ clientRecordId: clientFavId, status: 'error_processing_item', error: favError.message });
+              }
+            }
+            results.push({
+              operation,
+              clientRecordId: data.operationId || 'batch_favorites_processed',
+              status: 'batch_processed',
+              itemResults: batchResults
+            });
+            continue; // Move to next change item
+          }
           
           // Existing logic for other operations (create, update, delete)
           if (!tableName) {
@@ -589,7 +728,7 @@ function syncControllerFactory(socketService) {
       const changes = {};
       const serverNow = Date.now();
       // Add 'movie_details' and other detail tables as needed
-      const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users', 'movie_details', 'tv_details']; 
+      const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users', 'movie_details', 'tv_details', 'favorites']; 
       
       // console.log('[SyncController] Syncing tables for changes:', allSyncableTables);
       await db.transaction(async (client) => {
