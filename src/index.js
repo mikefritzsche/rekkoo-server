@@ -20,6 +20,7 @@ const createSpotifyRouter = require('./routes/spotify.routes');
 const createStockImagesRouter = require('./routes/stock-images.routes');
 const createYTMusicRouter = require('./routes/ytmusic.routes');
 const createUploadRouter = require('./routes/upload.routes');
+const createEmbeddingsRouter = require('./routes/embeddings.routes');
 
 // Import controllers that need initialization
 const favoritesControllerFactory = require('./controllers/FavoritesController');
@@ -30,6 +31,7 @@ const spotifyControllerFactory = require('./controllers/SpotifyController');
 const stockImagesControllerFactory = require('./controllers/StockImagesController');
 const ytMusicControllerFactory = require('./controllers/YTMusicController');
 const uploadControllerFactory = require('./controllers/UploadController');
+const embeddingsControllerFactory = require('./controllers/EmbeddingsController');
 
 // Import standard routes
 const claudeRoutes = require('./routes/claude');
@@ -57,6 +59,7 @@ const spotifyController = spotifyControllerFactory(socketService);
 const stockImagesController = stockImagesControllerFactory(socketService);
 const ytMusicController = ytMusicControllerFactory(socketService);
 const uploadController = uploadControllerFactory(socketService);
+const embeddingsController = embeddingsControllerFactory(socketService);
 
 // --- 5. Middleware ---
 app.use(cors({
@@ -101,6 +104,9 @@ app.use('/v1.0/ytmusic', ytMusicRouter);
 
 const uploadRouter = createUploadRouter(uploadController);
 app.use('/uploads', uploadRouter);
+
+const embeddingsRouter = createEmbeddingsRouter(embeddingsController);
+app.use('/v1.0/embeddings', embeddingsRouter);
 
 app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
