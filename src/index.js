@@ -71,7 +71,7 @@ app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
 // --- 6. Mount Routes ---
 // Routes that DON'T need socketService
-app.use('/api/v1.0/claude', claudeRoutes);
+app.use('/v1.0/claude', claudeRoutes);
 app.use('/v1.0/places', placesRoutes);
 app.use('/v1.0/recommendations', openlibraryRoutes);
 app.use('/v1.0/suggestions', geminiRoutes);
@@ -82,10 +82,9 @@ app.use('/amazon', amazonRoutes);
 // Initialize and mount routes that need socket service or use the factory pattern
 const favoritesRouter = createFavoritesRouter(favoritesController);
 app.use('/v1.0/favorites', favoritesRouter);
-app.use('/api/favorites', favoritesRouter);
 
 const userRouter = createUserRouter(userController);
-app.use('/api/v1.0/users', userRouter);
+app.use('/v1.0/users', userRouter);
 
 const booksRouter = createBooksRouter(booksController);
 app.use('/v1.0/books', booksRouter);

@@ -35,6 +35,14 @@ function syncControllerFactory(socketService) {
     if (tableName === 'favorite_sharing') {
       return 'shared_by_user_id'; // Favorite sharing uses 'shared_by_user_id' as its identifier
     }
+    // Add 'followers' table
+    if (tableName === 'followers') {
+      return 'follower_id'; // The user performing the follow/unfollow action
+    }
+    // Add 'notifications' table
+    if (tableName === 'notifications') {
+      return 'user_id'; // The user receiving the notification
+    }
     // For any other table, including detail tables, we are saying there is no direct user identifier for the generic pull.
     // This means they won't be processed in the main loop of handleGetChanges for direct user-filtered updates/deletes.
     logger.warn(`[SyncController] Table '${tableName}' will not be processed by user-identifier in handleGetChanges main loop.`);
@@ -469,6 +477,55 @@ function syncControllerFactory(socketService) {
                 logger.info(`[SyncController] Created record in ${tableName} with actual ID used: ${newServerId}`);
                 results.push({ operation, tableName, clientRecordId: newServerId, serverId: newServerId, status: 'created' });
 
+                // --- Create notification for new follower ---
+                if (tableName === 'followers' && operation === 'create') {
+                    const followerId = data.follower_id; // User A (actor)
+                    const followedId = data.followed_id; // User B (recipient)
+
+                    if (followerId && followedId) {
+                        try {
+                            // Fetch follower's username to make the message more informative
+                            const userResult = await client.query('SELECT username FROM users WHERE id = $1', [followerId]);
+                            const followerUsername = userResult.rows.length > 0 ? userResult.rows[0].username : 'Someone';
+
+                            const notificationQuery = `
+                                INSERT INTO public.notifications 
+                                (user_id, actor_id, notification_type, title, body, entity_type, entity_id)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id;
+                            `; 
+                            const notificationValues = [
+                                followedId,        // user_id (recipient)
+                                followerId,        // actor_id (who performed the action)
+                                'new_follower',    // notification_type
+                                'New Follower',    // title
+                                `${followerUsername} started following you.`, // body
+                                'user',            // entity_type (indicating the main entity is the actor/user)
+                                followerId         // entity_id (the ID of the actor/user who followed)
+                            ];
+                            const notificationResult = await client.query(notificationQuery, notificationValues);
+                            logger.info(`[SyncController] Created 'new_follower' notification ${notificationResult.rows[0].id} for user ${followedId} (actor: ${followerId})`);
+                            
+                            // Add the new notification to sync_tracking so the recipient (followedId) gets it
+                            await client.query(
+                                `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
+                                 VALUES ($1, $2, $3)
+                                 ON CONFLICT (table_name, record_id) DO UPDATE SET
+                                   operation = EXCLUDED.operation,
+                                   created_at = NOW(),
+                                   sync_status = 'pending', 
+                                   last_sync_attempt = NULL, 
+                                   sync_error = NULL`,
+                                ['notifications', notificationResult.rows[0].id, 'create']
+                            );
+                            logger.info(`[SyncController] Added CREATE in sync_tracking for notifications/${notificationResult.rows[0].id}`);
+
+                        } catch (notificationError) {
+                            logger.error(`[SyncController] Failed to create 'new_follower' notification for user ${followedId}:`, notificationError);
+                        }
+                    }
+                }
+                // --- END Create notification for new follower ---
+
                 // --- BEGIN MOVIE DETAILS LOGIC ---
                 if (tableName === 'list_items' && data.api_metadata) {
                     const apiMetadata = data.api_metadata;
@@ -754,6 +811,18 @@ function syncControllerFactory(socketService) {
                 `;
                 deleteResult = await client.query(query, [clientRecordId, userId]);
             } 
+            // Special case: Followers should be soft-deleted (identified by 'follower_id' and 'followed_id' ideally, but client sends one ID)
+            // For deletion, the client will send the 'id' of the followers record.
+            // The ownership check is that the 'follower_id' in that record matches the current userId.
+            else if (tableName === 'followers') {
+                query = `
+                  UPDATE ${client.escapeIdentifier(tableName)}
+                  SET deleted_at = CURRENT_TIMESTAMP
+                  WHERE id = $1 AND ${client.escapeIdentifier('follower_id')} = $2
+                  RETURNING id
+                `;
+                deleteResult = await client.query(query, [clientRecordId, userId]);
+            }
             // Other tables use hard delete (or their own soft delete logic)
             else if (isUserSettingsTable) {
                 query = `DELETE FROM ${client.escapeIdentifier(tableName)} WHERE ${client.escapeIdentifier('user_id')} = $1`;
@@ -881,7 +950,7 @@ function syncControllerFactory(socketService) {
       const changes = {};
       const serverNow = Date.now();
       // Add 'movie_details' and other detail tables as needed
-      const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users', 'movie_details', 'tv_details', 'favorites']; 
+      const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users', 'movie_details', 'tv_details', 'favorites', 'followers', 'notifications']; 
       
       // console.log('[SyncController] Syncing tables for changes:', allSyncableTables);
       await db.transaction(async (client) => {
@@ -914,20 +983,61 @@ function syncControllerFactory(socketService) {
 
           } else if (userIdentifierColumn) { 
             // console.log(`[SyncController] Processing table: ${table}, Using identifier column: ${userIdentifierColumn}`);
-            const updatedQuery = `
-              SELECT * FROM ${client.escapeIdentifier(table)} 
-              WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND updated_at >= to_timestamp($2 / 1000.0)
-            `;
-            const updatedResult = await client.query(updatedQuery, [userId, lastPulledAt]);
-            updatedResult.rows.forEach(record => {
-              record.updated_at = new Date(record.updated_at).getTime();
-              record.created_at = new Date(record.created_at).getTime();
-              if (record.created_at >= lastPulledAt) {
-                createdRecords.push(record);
-              } else {
-                updatedRecords.push(record);
-              }
-            });
+            
+            if (table === 'followers') {
+                // Handle 'followers' table specifically: new follows are identified by created_at
+                const createdQuery = `
+                    SELECT * FROM ${client.escapeIdentifier(table)}
+                    WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 
+                      AND created_at >= to_timestamp($2 / 1000.0) 
+                      AND deleted_at IS NULL`;
+                const createdResult = await client.query(createdQuery, [userId, lastPulledAt]);
+                createdResult.rows.forEach(record => {
+                    record.created_at = new Date(record.created_at).getTime();
+                    // No record.updated_at processing here as 'followers' table may not have it
+                    createdRecords.push(record);
+                });
+                // For followers, updatedRecords remains empty as we assume they are not "updated" in place, only created or soft-deleted.
+            } else if (table === 'notifications') {
+                // Handle 'notifications' table specifically: new notifications are identified by created_at
+                const createdQuery = `
+                    SELECT * FROM ${client.escapeIdentifier(table)}
+                    WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 
+                      AND created_at >= to_timestamp($2 / 1000.0)
+                      AND deleted_at IS NULL`; // Assuming notifications can also be soft-deleted
+                const createdResult = await client.query(createdQuery, [userId, lastPulledAt]);
+                createdResult.rows.forEach(record => {
+                    record.created_at = new Date(record.created_at).getTime();
+                    // No record.updated_at processing here as 'notifications' table may not have it
+                    createdRecords.push(record);
+                });
+                // For notifications, updatedRecords remains empty for the same reason as followers
+            } else {
+                // Original logic for other tables that are expected to have an updated_at column
+                const updatedQuery = `
+                  SELECT * FROM ${client.escapeIdentifier(table)} 
+                  WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND updated_at >= to_timestamp($2 / 1000.0)
+                `;
+                const updatedResult = await client.query(updatedQuery, [userId, lastPulledAt]);
+                updatedResult.rows.forEach(record => {
+                  // Ensure record.updated_at exists before trying to convert it
+                  if (record.updated_at) {
+                      record.updated_at = new Date(record.updated_at).getTime();
+                  } else {
+                      logger.warn(`[SyncController] PullChanges: Record ${record.id} from table ${table} is missing 'updated_at' field.`);
+                  }
+                  record.created_at = new Date(record.created_at).getTime();
+
+                  if (record.created_at >= lastPulledAt) {
+                    createdRecords.push(record);
+                  } else if (record.updated_at && record.updated_at >= lastPulledAt) { 
+                    // Only add to updatedRecords if updated_at exists and meets criteria
+                    updatedRecords.push(record);
+                  } else if (!record.updated_at && record.created_at < lastPulledAt) {
+                        logger.info(`[SyncController] PullChanges: Record ${record.id} from table ${table} (created before last pull, no recent update/no update field) not classified as new or updated.`);
+                  }
+                });
+            }
             
             if (await columnExists(client, table, 'deleted_at')) {
               let selectIdColumnForDeleted = 'id'; 
