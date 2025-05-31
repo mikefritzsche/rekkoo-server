@@ -91,6 +91,7 @@ ALTER TABLE public.auth_logs OWNER TO admin;
 
 CREATE TABLE public.followers (
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     deleted_at timestamp with time zone,
     follower_id uuid,
@@ -297,16 +298,19 @@ COMMENT ON COLUMN public.lists.local_image_key IS 'Storage key (e.g., S3 key) of
 --
 
 CREATE TABLE public.notifications (
+    user_id uuid NOT NULL,
+    actor_id uuid,
     notification_type character varying(50) NOT NULL,
-    title character varying(100) NOT NULL,
-    message text NOT NULL,
-    reference_id integer,
-    reference_type character varying(50),
+    title character varying(255),
+    body text,
     is_read boolean DEFAULT false,
+    read_at timestamp with time zone,
+    entity_type character varying(50),
+    entity_id character varying(255), -- Can be UUID or other string IDs
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
-    deleted_at timestamp with time zone,
-    user_id uuid
+    deleted_at timestamp with time zone
 );
 
 
@@ -1637,6 +1641,27 @@ ALTER TABLE ONLY public.user_sessions
 
 ALTER TABLE ONLY public.user_settings
     ADD CONSTRAINT user_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: TRIGGER update_followers_updated_at ON followers; Type: TRIGGER; Schema: public; Owner: admin
+--
+
+CREATE TRIGGER update_followers_updated_at BEFORE UPDATE ON public.followers FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- Name: TRIGGER update_notifications_updated_at ON notifications; Type: TRIGGER; Schema: public; Owner: admin
+--
+
+CREATE TRIGGER update_notifications_updated_at BEFORE UPDATE ON public.notifications FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- Name: TRIGGER update_oauth_providers_updated_at ON oauth_providers; Type: TRIGGER; Schema: public; Owner: admin
+--
+
+CREATE TRIGGER update_oauth_providers_updated_at BEFORE UPDATE ON public.oauth_providers FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
 --

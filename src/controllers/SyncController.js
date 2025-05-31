@@ -917,20 +917,18 @@ function syncControllerFactory(socketService) {
    * Compatible with WatermelonDB sync protocol.
    */
   const handleGetChanges = async (req, res) => {
-    const lastPulledAtString = req.query.last_pulled_at; // Prioritize last_pulled_at
+    const lastPulledAtString = req.query.last_pulled_at;
     logger.info(`[SyncController] Received req.query.last_pulled_at: '${lastPulledAtString}' (type: ${typeof lastPulledAtString})`);
-    let lastPulledAt = 0; // Default to 0 if not provided or unparseable
+    let lastPulledAt = 0;
 
     if (lastPulledAtString) {
       const parsedDate = Date.parse(lastPulledAtString);
       if (!isNaN(parsedDate)) {
         lastPulledAt = parsedDate;
-        logger.info(`[SyncController] Parsed last_pulled_at via Date.parse: ${lastPulledAt}`);
       } else {
         const parsedInt = parseInt(lastPulledAtString, 10);
         if (!isNaN(parsedInt)) {
           lastPulledAt = parsedInt;
-          logger.info(`[SyncController] Parsed last_pulled_at via parseInt: ${lastPulledAt}`);
         } else {
           logger.warn(`[SyncController] Could not parse last_pulled_at value: "${lastPulledAtString}". Defaulting to 0.`);
         }
@@ -947,12 +945,22 @@ function syncControllerFactory(socketService) {
     logger.info(`[SyncController] User ${userId} pulling changes since: ${new Date(lastPulledAt).toISOString()} (timestamp: ${lastPulledAt})`);
 
     try {
-      const changes = {};
+      const changes = {
+        list_items: { created: [], updated: [], deleted: [] },
+        lists: { created: [], updated: [], deleted: [] },
+        user_settings: { created: [], updated: [], deleted: [] },
+        users: { created: [], updated: [], deleted: [] },
+        movie_details: { created: [], updated: [], deleted: [] },
+        tv_details: { created: [], updated: [], deleted: [] },
+        favorites: { created: [], updated: [], deleted: [] },
+        followers: { created: [], updated: [], deleted: [] },
+        notifications: { created: [], updated: [], deleted: [] }
+      };
       const serverNow = Date.now();
-      // Add 'movie_details' and other detail tables as needed
       const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users', 'movie_details', 'tv_details', 'favorites', 'followers', 'notifications']; 
       
-      // console.log('[SyncController] Syncing tables for changes:', allSyncableTables);
+      const relatedUserIds = new Set();
+
       await db.transaction(async (client) => {
         for (const table of allSyncableTables) {
           const userIdentifierColumn = getUserIdentifierColumn(table);
@@ -961,7 +969,6 @@ function syncControllerFactory(socketService) {
           let deletedRecordIds = [];
 
           if (table === 'movie_details') {
-            // console.log(`[SyncController] Processing table: ${table} (special handling for detail table)`);
             const updatedQuery = `
               SELECT md.* FROM ${client.escapeIdentifier(table)} md
               JOIN list_items li ON md.list_item_id = li.id
@@ -977,74 +984,82 @@ function syncControllerFactory(socketService) {
                 updatedRecords.push(record);
               }
             });
-            // Deletion of movie_details is assumed to be handled by client when parent list_item is deleted,
-            // as movie_details table does not have its own deleted_at column in the provided DDL.
             deletedRecordIds = []; 
-
           } else if (userIdentifierColumn) { 
-            // console.log(`[SyncController] Processing table: ${table}, Using identifier column: ${userIdentifierColumn}`);
-            
             if (table === 'followers') {
-                // Handle 'followers' table specifically: new follows are identified by created_at
                 const createdQuery = `
                     SELECT * FROM ${client.escapeIdentifier(table)}
-                    WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 
+                    WHERE (${client.escapeIdentifier('follower_id')} = $1 OR ${client.escapeIdentifier('followed_id')} = $1)
                       AND created_at >= to_timestamp($2 / 1000.0) 
                       AND deleted_at IS NULL`;
                 const createdResult = await client.query(createdQuery, [userId, lastPulledAt]);
                 createdResult.rows.forEach(record => {
                     record.created_at = new Date(record.created_at).getTime();
-                    // No record.updated_at processing here as 'followers' table may not have it
+                    if (record.updated_at) record.updated_at = new Date(record.updated_at).getTime(); else record.updated_at = record.created_at;
                     createdRecords.push(record);
                 });
-                // For followers, updatedRecords remains empty as we assume they are not "updated" in place, only created or soft-deleted.
+                // For followers, also check for updates to existing records (e.g. if a deleted_at was set then cleared - restoration)
+                // For this, we look at updated_at. A follow action itself might not update 'updated_at' unless specified.
+                // The client logic primarily uses created_at for new follows and deleted_at for unfollows.
+                // We will primarily rely on 'created' and 'deleted' for followers.
+                // However, if a follow record *is* updated (e.g. restoring a soft-deleted one), send it.
+                 const updatedFollowersQuery = `
+                    SELECT * FROM ${client.escapeIdentifier(table)}
+                    WHERE (${client.escapeIdentifier('follower_id')} = $1 OR ${client.escapeIdentifier('followed_id')} = $1)
+                    AND updated_at >= to_timestamp($2 / 1000.0)
+                    AND created_at < to_timestamp($2 / 1000.0) -- Only consider as 'updated' if not already 'created'
+                    AND deleted_at IS NULL`; // Only send active, updated follows
+                const updatedFollowersResult = await client.query(updatedFollowersQuery, [userId, lastPulledAt]);
+                updatedFollowersResult.rows.forEach(record => {
+                    record.created_at = new Date(record.created_at).getTime();
+                    record.updated_at = new Date(record.updated_at).getTime();
+                    updatedRecords.push(record);
+                });
+
             } else if (table === 'notifications') {
-                // Handle 'notifications' table specifically: new notifications are identified by created_at
                 const createdQuery = `
                     SELECT * FROM ${client.escapeIdentifier(table)}
                     WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 
                       AND created_at >= to_timestamp($2 / 1000.0)
-                      AND deleted_at IS NULL`; // Assuming notifications can also be soft-deleted
+                      AND deleted_at IS NULL`;
                 const createdResult = await client.query(createdQuery, [userId, lastPulledAt]);
                 createdResult.rows.forEach(record => {
                     record.created_at = new Date(record.created_at).getTime();
-                    // No record.updated_at processing here as 'notifications' table may not have it
+                    if (record.updated_at) record.updated_at = new Date(record.updated_at).getTime(); else record.updated_at = record.created_at;
                     createdRecords.push(record);
                 });
-                // For notifications, updatedRecords remains empty for the same reason as followers
-            } else {
-                // Original logic for other tables that are expected to have an updated_at column
-                const updatedQuery = `
+                 const updatedNotificationsQuery = `
+                    SELECT * FROM ${client.escapeIdentifier(table)}
+                    WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1
+                    AND updated_at >= to_timestamp($2 / 1000.0)
+                    AND created_at < to_timestamp($2 / 1000.0)
+                    AND deleted_at IS NULL`;
+                const updatedNotificationsResult = await client.query(updatedNotificationsQuery, [userId, lastPulledAt]);
+                updatedNotificationsResult.rows.forEach(record => {
+                    record.created_at = new Date(record.created_at).getTime();
+                    record.updated_at = new Date(record.updated_at).getTime();
+                    updatedRecords.push(record);
+                });
+            } else { // General case for other tables with userIdentifierColumn
+                const query = `
                   SELECT * FROM ${client.escapeIdentifier(table)} 
                   WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND updated_at >= to_timestamp($2 / 1000.0)
                 `;
-                const updatedResult = await client.query(updatedQuery, [userId, lastPulledAt]);
-                updatedResult.rows.forEach(record => {
-                  // Ensure record.updated_at exists before trying to convert it
-                  if (record.updated_at) {
-                      record.updated_at = new Date(record.updated_at).getTime();
-                  } else {
-                      logger.warn(`[SyncController] PullChanges: Record ${record.id} from table ${table} is missing 'updated_at' field.`);
-                  }
+                const result = await client.query(query, [userId, lastPulledAt]);
+                result.rows.forEach(record => {
+                  if (record.updated_at) record.updated_at = new Date(record.updated_at).getTime();
                   record.created_at = new Date(record.created_at).getTime();
-
                   if (record.created_at >= lastPulledAt) {
                     createdRecords.push(record);
-                  } else if (record.updated_at && record.updated_at >= lastPulledAt) { 
-                    // Only add to updatedRecords if updated_at exists and meets criteria
+                  } else { // Already checked updated_at in query
                     updatedRecords.push(record);
-                  } else if (!record.updated_at && record.created_at < lastPulledAt) {
-                        logger.info(`[SyncController] PullChanges: Record ${record.id} from table ${table} (created before last pull, no recent update/no update field) not classified as new or updated.`);
                   }
                 });
             }
             
             if (await columnExists(client, table, 'deleted_at')) {
               let selectIdColumnForDeleted = 'id'; 
-              // Adjustments for specific tables if their primary ID isn't 'id' or if deleted records are identified differently.
               if (table === 'user_settings') { selectIdColumnForDeleted = `${client.escapeIdentifier('user_id')} AS id`; }
-              // Example if 'lists' or 'list_items' used a different column for their ID in a specific context for deletion tracking (unlikely here)
-
               const deletedQuery = `
                 SELECT ${selectIdColumnForDeleted} FROM ${client.escapeIdentifier(table)} 
                 WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND deleted_at IS NOT NULL AND deleted_at >= to_timestamp($2 / 1000.0)
@@ -1054,21 +1069,84 @@ function syncControllerFactory(socketService) {
                 deletedRecordIds = deletedResult.rows.map(r => r.id); 
               } catch (e) {
                  logger.warn(`[SyncController] Could not query deleted records for table ${table}. Error: ${e.message}`);
-                 // Potentially rethrow or handle if this is critical: throw e;
               }
-            } else {
-              logger.warn(`[SyncController] Table ${table} does not have a deleted_at column. Skipping soft delete check for this table.`);
             }
-          } else {
+          } else if (table !== 'movie_details' && table !== 'tv_details') { // Skip if no user identifier and not a detail table handled above
             logger.warn(`[SyncController] Skipping table ${table} in pull changes as it has no direct user identifier column and no special handling defined.`);
-            changes[table] = { created: [], updated: [], deleted: [] };
+            changes[table] = { created: [], updated: [], deleted: [] }; // Ensure it has an entry
             continue;
           }
+          // END OF PLACEHOLDER for per-table fetching logic
+
+          // Collect related user IDs
+          if (table === 'followers') {
+            createdRecords.forEach(record => {
+              if (record.follower_id) relatedUserIds.add(record.follower_id);
+              if (record.followed_id) relatedUserIds.add(record.followed_id);
+            });
+            updatedRecords.forEach(record => {
+              if (record.follower_id) relatedUserIds.add(record.follower_id);
+              if (record.followed_id) relatedUserIds.add(record.followed_id);
+            });
+          } else if (table === 'lists' || table === 'list_items') { // list_items also has owner_id
+            createdRecords.forEach(record => { if (record.owner_id) relatedUserIds.add(record.owner_id); });
+            updatedRecords.forEach(record => { if (record.owner_id) relatedUserIds.add(record.owner_id); });
+          } else if (table === 'notifications') {
+            createdRecords.forEach(record => {
+              if (record.user_id) relatedUserIds.add(record.user_id);
+              if (record.actor_id) relatedUserIds.add(record.actor_id);
+            });
+            updatedRecords.forEach(record => {
+              if (record.user_id) relatedUserIds.add(record.user_id);
+              if (record.actor_id) relatedUserIds.add(record.actor_id);
+            });
+          } else if (table === 'favorites') { // Favorites are user-specific
+             createdRecords.forEach(record => { if (record.user_id) relatedUserIds.add(record.user_id); });
+             updatedRecords.forEach(record => { if (record.user_id) relatedUserIds.add(record.user_id); });
+          }
+          // For 'users' table itself, the main query handles the current user.
+          // If other users are modified directly and should be synced, they'd be caught here
+          // but primary user sync for current user is usually more direct.
+          // We are mostly interested in related users from *other* tables.
+
           changes[table] = {
             created: createdRecords,
             updated: updatedRecords,
             deleted: deletedRecordIds,
           };
+        }
+
+        if (relatedUserIds.size > 0) {
+          relatedUserIds.delete(userId); 
+          if (relatedUserIds.size > 0) {
+            const userIdsToFetch = Array.from(relatedUserIds);
+            logger.info(`[SyncController handleGetChanges] Need to fetch profiles for related user IDs: ${userIdsToFetch.join(', ')}`);
+            const placeholders = userIdsToFetch.map((_, i) => `$${i + 1}`).join(',');
+            const usersQuery = `
+              SELECT * FROM public.users
+              WHERE id IN (${placeholders}) 
+              AND updated_at >= to_timestamp($${userIdsToFetch.length + 1} / 1000.0)
+            `;
+            const userResults = await client.query(usersQuery, [...userIdsToFetch, lastPulledAt]);
+            userResults.rows.forEach(userRecord => {
+              userRecord.created_at = new Date(userRecord.created_at).getTime();
+              userRecord.updated_at = new Date(userRecord.updated_at).getTime();
+              // Check if this user record is already in changes.users from the main 'users' table processing
+              const existingCreated = changes.users.created.find(u => u.id === userRecord.id);
+              const existingUpdated = changes.users.updated.find(u => u.id === userRecord.id);
+
+              if (!existingCreated && !existingUpdated) { // Only add if not already processed
+                if (userRecord.created_at >= lastPulledAt) {
+                  changes.users.created.push(userRecord);
+                } else {
+                  changes.users.updated.push(userRecord);
+                }
+              } else {
+                logger.info(`[SyncController handleGetChanges] User ${userRecord.id} was already processed in the main 'users' table sync. Skipping duplicate add from related IDs.`);
+              }
+            });
+            logger.info(`[SyncController handleGetChanges] Added ${userResults.rows.length} distinct related user profiles to the sync payload (if not already present).`);
+          }
         }
       });
 

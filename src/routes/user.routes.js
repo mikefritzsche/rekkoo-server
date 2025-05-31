@@ -10,6 +10,13 @@ function createUserRouter(userController) {
   const router = express.Router();
 
   /**
+   * @route GET /suggestions
+   * @desc Get users to suggest following
+   * @access Private
+   */
+  router.get('/suggestions', authenticateJWT, userController.getUserSuggestions);
+
+  /**
    * @route GET /
    * @desc Get all users with pagination
    * @access Private
@@ -22,6 +29,27 @@ function createUserRouter(userController) {
    * @access Private
    */
   router.get('/:id', authenticateJWT, userController.getUserById);
+
+  /**
+   * @route GET /:userId/followers
+   * @desc Get users following :userId
+   * @access Private
+   */
+  router.get('/:userId/followers', authenticateJWT, userController.getUserFollowers);
+
+  /**
+   * @route GET /:userId/following
+   * @desc Get users :userId is following
+   * @access Private
+   */
+  router.get('/:userId/following', authenticateJWT, userController.getUserFollowing);
+
+  /**
+   * @route GET /:targetUserId/lists
+   * @desc Get public lists of :targetUserId
+   * @access Private
+   */
+  router.get('/:targetUserId/lists', authenticateJWT, userController.getUserPublicLists);
 
   /**
    * @route POST /
