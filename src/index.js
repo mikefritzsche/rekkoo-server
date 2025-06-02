@@ -41,6 +41,7 @@ const authRoutes = require('./routes/auth');
 const amazonRoutes = require('./routes/amazon.routes');
 const geminiRoutes = require('./routes/gemini.routes');
 const openlibraryRoutes = require('./routes/openlibrary.routes');
+const { log } = require('console');
 
 // --- 2. Initialize Express App and HTTP Server ---
 const app = express();
@@ -61,9 +62,11 @@ const ytMusicController = ytMusicControllerFactory(socketService);
 const uploadController = uploadControllerFactory(socketService);
 const embeddingsController = embeddingsControllerFactory(socketService);
 
+console.log('CORS_ORIGIN', process.env.CORS_ORIGIN);
+
 // --- 5. Middleware ---
 app.use(cors({
-  origin: process.env.CORS_ORIGIN,
+  origin: ['http://localhost:3000', 'http://localhost:8081', 'http://app-dev.rekkoo.com'], // process.env.CORS_ORIGIN,
   credentials: true
 }));
 app.use(express.json({ limit: '5mb' }));
