@@ -66,7 +66,12 @@ console.log('CORS_ORIGIN', process.env.CORS_ORIGIN);
 
 // --- 5. Middleware ---
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:8081', 'http://app-dev.rekkoo.com'], // process.env.CORS_ORIGIN,
+  origin: [
+    'http://localhost:3000', 
+    'http://localhost:8081', 
+    'http://app-dev.rekkoo.com',
+    'https://*.app-staging.rekkoo.com'  // Allow all staging subdomains
+  ],
   credentials: true
 }));
 app.use(express.json({ limit: '5mb' }));
