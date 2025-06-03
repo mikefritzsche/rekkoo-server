@@ -67,12 +67,32 @@ console.log('CORS_ORIGIN', process.env.CORS_ORIGIN);
 
 // --- 5. Middleware --- --
 app.use(cors({
-  origin: [
-    'http://localhost:3000', 
-    'http://localhost:8081', 
-    'http://app-dev.rekkoo.com',
-    'https://*.app-staging.rekkoo.com'  // Allow all staging subdomains
-  ],
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:8081',
+      'http://app-dev.rekkoo.com',
+    ];
+    
+    // Check for exact matches first
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    
+    // Check for dynamic staging subdomain pattern (branch-based deployments)
+    // Matches: https://any-branch-name.app-staging.rekkoo.com
+    if (origin.match(/^https:\/\/[a-z0-9-]+\.app-staging\.rekkoo\.com$/)) {
+      console.log(`CORS: Allowed staging origin: ${origin}`);
+      return callback(null, true);
+    }
+    
+    // Log and reject other origins
+    console.log(`CORS: Rejected origin: ${origin}`);
+    callback(new Error('Not allowed by CORS'));
+  },
   credentials: true
 }));
 app.use(express.json({ limit: '5mb' }));
