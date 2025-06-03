@@ -1,4 +1,4 @@
-const { generatePresignedPutUrl, generateUniqueKey, s3Client } = require('../services/r2Service');
+const { generatePresignedPutUrl, generateUniqueKey, isR2Configured, s3Client } = require('../services/r2Service');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 
 /**
@@ -16,6 +16,14 @@ function uploadControllerFactory(socketService = null) {
    * Generate a pre-signed URL for client-side file uploads
    */
   const getPresignedUploadUrl = async (req, res) => {
+    // Check if R2 is configured
+    if (!isR2Configured()) {
+      return res.status(503).json({ 
+        error: 'File upload service is currently unavailable', 
+        details: 'R2 storage is not configured' 
+      });
+    }
+
     const userId = req.user?.id; // From authenticateJWT middleware
     const { fileName, contentType } = req.body; // Expect fileName and contentType from client
 
@@ -28,10 +36,8 @@ function uploadControllerFactory(socketService = null) {
     }
 
     try {
-      // Generate a unique key for the object in R2
-      const key = generateUniqueKey(userId, contentType, fileName);
-
-      const presignedUrl = await generatePresignedPutUrl(key, contentType);
+      // Generate presigned URL using the service
+      const { presignedUrl, key } = await generatePresignedPutUrl(userId, contentType);
 
       res.status(200).json({
         presignedUrl,
@@ -48,6 +54,14 @@ function uploadControllerFactory(socketService = null) {
    * Handle server-mediated file uploads
    */
   const uploadFile = async (req, res) => {
+    // Check if R2 is configured
+    if (!isR2Configured()) {
+      return res.status(503).json({ 
+        error: 'File upload service is currently unavailable', 
+        details: 'R2 storage is not configured' 
+      });
+    }
+
     // Ensure user is authenticated
     if (!req.user || !req.user.id) {
       console.error('[Server Upload] User not found on request after authentication middleware.');
@@ -65,7 +79,7 @@ function uploadControllerFactory(socketService = null) {
     const originalName = req.file.originalname; // Can be used for naming if desired
     
     // Use the imported service function to generate the key
-    const uniqueKey = generateUniqueKey(userId, contentType, originalName);
+    const uniqueKey = generateUniqueKey(userId, contentType);
 
     console.log(`[Server Upload] Attempting to upload for user ${userId}. Key: ${uniqueKey}, ContentType: ${contentType}, Size: ${fileBuffer.length}`);
 
@@ -77,8 +91,9 @@ function uploadControllerFactory(socketService = null) {
     });
 
     try {
-      // Use the imported s3Client from r2Service
-      await s3Client.send(command);
+      // Use the s3Client getter from r2Service
+      const client = s3Client;
+      await client.send(command);
       console.log(`[Server Upload] Successfully uploaded ${uniqueKey} to R2 bucket ${process.env.R2_BUCKET_NAME}.`);
       
       res.json({ 

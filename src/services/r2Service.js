@@ -2,26 +2,45 @@ const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const crypto = require('crypto'); // For generating unique keys
 
-// Ensure required environment variables are set
-if (!process.env.R2_ENDPOINT || !process.env.R2_ACCESS_KEY_ID || !process.env.R2_SECRET_ACCESS_KEY || !process.env.R2_BUCKET_NAME) {
-  console.error("Error: Missing required R2 environment variables (R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME).");
-  // Optionally, throw an error or exit if critical config is missing
-  // process.exit(1); 
-}
+// Check if R2 configuration is available
+const isR2Configured = () => {
+  return !!(process.env.R2_ENDPOINT && 
+           process.env.R2_ACCESS_KEY_ID && 
+           process.env.R2_SECRET_ACCESS_KEY && 
+           process.env.R2_BUCKET_NAME);
+};
 
 const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME;
 
-// Configure the S3 client for Cloudflare R2
-const s3Client = new S3Client({
-  region: "auto", // R2 doesn't use regions in the same way as AWS S3
-  endpoint: process.env.R2_ENDPOINT,
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-  },
-});
+// Initialize S3 client only if configuration is available
+let s3Client = null;
 
-console.log(`[R2 Service] Initialized S3 client for bucket: ${R2_BUCKET_NAME}`);
+const getS3Client = () => {
+  if (!isR2Configured()) {
+    throw new Error("R2 service is not configured. Missing required environment variables (R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME).");
+  }
+  
+  if (!s3Client) {
+    s3Client = new S3Client({
+      region: "auto", // R2 doesn't use regions in the same way as AWS S3
+      endpoint: process.env.R2_ENDPOINT,
+      credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID,
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+      },
+    });
+    console.log(`[R2 Service] Initialized S3 client for bucket: ${R2_BUCKET_NAME}`);
+  }
+  
+  return s3Client;
+};
+
+// Log configuration status at startup
+if (isR2Configured()) {
+  console.log(`[R2 Service] R2 configuration found - file upload service available`);
+} else {
+  console.log(`[R2 Service] R2 configuration missing - file upload service disabled`);
+}
 
 /**
  * Generates a unique object key including user ID.
@@ -47,6 +66,10 @@ const generateUniqueKey = (userId, mimeType) => {
  * @returns {Promise<{presignedUrl: string, key: string}>} An object containing the presigned URL and the generated object key.
  */
 const generatePresignedPutUrl = async (userId, contentType, expiresIn = 300) => {
+  if (!isR2Configured()) {
+    throw new Error("R2 service is not configured. File upload is currently unavailable.");
+  }
+  
   if (!userId || !contentType) {
       throw new Error("User ID and Content Type are required to generate a presigned URL.");
   }
@@ -65,7 +88,8 @@ const generatePresignedPutUrl = async (userId, contentType, expiresIn = 300) => 
   });
 
   try {
-    const presignedUrl = await getSignedUrl(s3Client, command, { expiresIn });
+    const client = getS3Client();
+    const presignedUrl = await getSignedUrl(client, command, { expiresIn });
     console.log(`[R2 Service] Successfully generated presigned URL valid for ${expiresIn} seconds.`);
     return { presignedUrl, key };
   } catch (error) {
@@ -76,5 +100,9 @@ const generatePresignedPutUrl = async (userId, contentType, expiresIn = 300) => 
 
 module.exports = {
   generatePresignedPutUrl,
-  s3Client // Export client if needed elsewhere (e.g., for delete operations)
+  generateUniqueKey,
+  isR2Configured,
+  get s3Client() {
+    return getS3Client();
+  }
 }; 
