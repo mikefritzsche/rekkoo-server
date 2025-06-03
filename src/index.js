@@ -65,7 +65,7 @@ const embeddingsController = embeddingsControllerFactory(socketService);
 
 console.log('CORS_ORIGIN', process.env.CORS_ORIGIN);
 
-// --- 5. Middleware ---
+// --- 5. Middleware --- --
 app.use(cors({
   origin: [
     'http://localhost:3000', 
