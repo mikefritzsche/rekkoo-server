@@ -75,6 +75,7 @@ app.use(cors({
       'http://localhost:3000',
       'http://localhost:8081',
       'http://app-dev.rekkoo.com',
+      'https://app.rekkoo.com'
     ];
     
     // Check for exact matches first
