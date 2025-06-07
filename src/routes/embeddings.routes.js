@@ -7,7 +7,7 @@ const { authenticateJWT } = require('../auth/middleware');
  * @param {Object} favoritesController - Controller with favorites methods
  * @returns {express.Router} Express router
  */
-function createEmbeddingsRouter(embeddingsController) {
+const createEmbeddingsRouter = (controller) => {
   const router = express.Router();
 
   /**
@@ -15,10 +15,15 @@ function createEmbeddingsRouter(embeddingsController) {
    * @desc Generate embeddings for a text
    * @access Private
    */
-  router.post('/', embeddingsController.generateEmbeddings);
+  router.post('/', controller.storeEmbedding);
 
+  // Find similar content
+  router.post('/similar', controller.findSimilar);
+
+  // Get model status
+  router.get('/status', controller.getStatus);
 
   return router;
-}
+};
 
 module.exports = createEmbeddingsRouter; 

@@ -1,32 +1,56 @@
 // const pipeline = require('@xenova/transformers').pipeline;
 
-function embeddingsControllerFactory(socketService = null) {
+const embeddingService = require('../services/embeddingService');
+const { logger } = require('../utils/logger');
 
-  const generateEmbeddings = (req, res) => {
-    return res.status(200).json({message: 'generateEmbeddings'});
+const embeddingsControllerFactory = (socketService) => {
+    return {
+        async storeEmbedding(req, res) {
+            try {
+                const { content, metadata } = req.body;
+                
+                if (!content) {
+                    return res.status(400).json({ error: 'Content is required' });
+                }
 
-    // const extractor = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-    // const output = await extractor(text, { pooling: 'mean', normalize: true });
+                const result = await embeddingService.storeEmbedding(content, metadata);
+                
+                // Notify connected clients about new embedding
+                socketService.io.emit('embedding:created', result);
+                
+                res.json(result);
+            } catch (error) {
+                logger.error('Error storing embedding:', error);
+                res.status(500).json({ error: 'Failed to store embedding' });
+            }
+        },
 
-    // return res.status(200).json(output.data);
-  }
+        async findSimilar(req, res) {
+            try {
+                const { text, limit, threshold, filter } = req.body;
+                
+                if (!text) {
+                    return res.status(400).json({ error: 'Text is required' });
+                }
 
-  // const main = async (req, res) => {
-  //   const sentences = [
-  //     "The weather is lovely today.",
-  //     "It's so sunny outside!",
-  //     "He drove to the stadium."
-  //   ];
-  
-  //   for (const sentence of sentences) {
-  //     const embedding = await generateEmbeddings(sentence);
-  //     console.log(`Embedding for "${sentence}":`, embedding);
-  //   }
-  // }
+                const results = await embeddingService.findSimilar(text, { limit, threshold, filter });
+                res.json(results);
+            } catch (error) {
+                logger.error('Error finding similar embeddings:', error);
+                res.status(500).json({ error: 'Failed to find similar embeddings' });
+            }
+        },
 
-  return {
-    generateEmbeddings
-  };
-}
+        async getStatus(req, res) {
+            try {
+                const status = await embeddingService.getStats();
+                res.json(status);
+            } catch (error) {
+                logger.error('Error getting embedding service status:', error);
+                res.status(500).json({ error: 'Failed to get status' });
+            }
+        }
+    };
+};
 
 module.exports = embeddingsControllerFactory; 
