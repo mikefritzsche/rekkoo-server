@@ -1,23 +1,26 @@
 const axios = require('axios');
 const db = require('../config/db');
 const { logger } = require('../utils/logger');
+const aiService = require('./aiService');
+const { getAiServerUrl } = require('../utils/environmentUtils');
 
-const AI_SERVER_URL = process.env.AI_SERVER_URL || 'http://ai-server:8000';
+const AI_SERVER_URL = getAiServerUrl();
+const MAX_BATCH_SIZE = parseInt(process.env.EMBEDDING_BATCH_SIZE || '10', 10);
+const RETRY_DELAYS = [1, 5, 15, 30, 60]; // minutes
 
 class EmbeddingService {
     constructor() {
-        this.dimension = null; // Will be fetched from AI server
+        this.dimension = null;
+        logger.info('EmbeddingService initialized');
     }
 
-    async #getAiServerDimensions() {
+    async _getAiServerDimensions() {
         if (this.dimension) {
             return this.dimension;
         }
 
         try {
-            // The AI server's /embeddings endpoint returns the dimension.
-            // We can send a dummy request to get it.
-            const response = await axios.post(`${AI_SERVER_URL}/embeddings`, {
+            const response = await aiService.client.post('/embeddings', {
                 text: 'hello'
             });
             this.dimension = response.data.dimensions;
@@ -25,22 +28,145 @@ class EmbeddingService {
             return this.dimension;
         } catch (error) {
             logger.error('Failed to fetch embedding dimensions from AI server:', error);
-            // Default to a common dimension if fetching fails
-            return 100;
+            return 384; // Default to the model's dimension
         }
     }
 
     async generateEmbedding(text) {
         try {
-            const response = await axios.post(`${AI_SERVER_URL}/embeddings`, { text });
+            const response = await aiService.client.post('/embeddings', { text });
             return response.data.embedding;
         } catch (error) {
             logger.error('Failed to generate embedding from AI server:', error);
-            const dims = await this.#getAiServerDimensions();
+            const dims = await this._getAiServerDimensions();
             return new Array(dims).fill(0);
         }
     }
 
+    async queueEmbeddingGeneration(entityId, entityType, metadata = {}) {
+        try {
+            // Normalize entity type to match AI server endpoints
+            const normalizedEntityType = entityType === 'list_item' ? 'list-items' : entityType.replace(/_/g, '-');
+            
+            const result = await db.query(
+                `INSERT INTO embedding_queue 
+                 (entity_id, entity_type, status, metadata)
+                 VALUES ($1, $2, 'pending', $3)
+                 ON CONFLICT (entity_id, entity_type) 
+                 WHERE status NOT IN ('completed', 'processing')
+                 DO UPDATE SET 
+                    retry_count = 0,
+                    status = 'pending',
+                    next_attempt = CURRENT_TIMESTAMP,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = CURRENT_TIMESTAMP
+                 RETURNING id`,
+                [entityId, normalizedEntityType, metadata]
+            );
+            
+            logger.info(`Queued embedding generation for ${entityType}/${entityId}`);
+            return result.rows[0];
+        } catch (error) {
+            logger.error(`Failed to queue embedding generation for ${entityType}/${entityId}:`, error);
+            throw error;
+        }
+    }
+
+    async processQueue(batchSize = MAX_BATCH_SIZE) {
+        try {
+            // Start a transaction
+            await db.query('BEGIN');
+
+            // Get batch of pending items
+            const pendingItems = await db.query(
+                `UPDATE embedding_queue
+                 SET status = 'processing',
+                     last_attempt = CURRENT_TIMESTAMP
+                 WHERE id IN (
+                     SELECT id
+                     FROM embedding_queue
+                     WHERE status = 'pending'
+                     AND (next_attempt IS NULL OR next_attempt <= CURRENT_TIMESTAMP)
+                     ORDER BY priority DESC, created_at ASC
+                     LIMIT $1
+                     FOR UPDATE SKIP LOCKED
+                 )
+                 RETURNING *`,
+                [batchSize]
+            );
+
+            for (const item of pendingItems.rows) {
+                try {
+                    // Use aiService to generate the embedding
+                    await aiService.generateEmbedding(
+                        item.entity_type,
+                        item.entity_id
+                    );
+
+                    // Mark as completed
+                    await db.query(
+                        `UPDATE embedding_queue
+                         SET status = 'completed',
+                             processed_at = CURRENT_TIMESTAMP,
+                             updated_at = CURRENT_TIMESTAMP
+                         WHERE id = $1`,
+                        [item.id]
+                    );
+
+                    logger.info(`Successfully generated embedding for ${item.entity_type}/${item.entity_id}`);
+                } catch (error) {
+                    const retryCount = item.retry_count + 1;
+                    const delayIndex = Math.min(retryCount - 1, RETRY_DELAYS.length - 1);
+                    const nextAttemptDelay = RETRY_DELAYS[delayIndex];
+
+                    await db.query(
+                        `UPDATE embedding_queue
+                         SET status = $1,
+                             retry_count = $2,
+                             next_attempt = CURRENT_TIMESTAMP + interval '${nextAttemptDelay} minutes',
+                             error_message = $3,
+                             updated_at = CURRENT_TIMESTAMP
+                         WHERE id = $4`,
+                        [
+                            retryCount >= item.max_retries ? 'failed' : 'pending',
+                            retryCount,
+                            error.message,
+                            item.id
+                        ]
+                    );
+
+                    logger.error(`Failed to generate embedding for ${item.entity_type}/${item.entity_id}:`, error);
+                }
+            }
+
+            await db.query('COMMIT');
+            return pendingItems.rows.length;
+        } catch (error) {
+            await db.query('ROLLBACK');
+            logger.error('Error processing embedding queue:', error);
+            throw error;
+        }
+    }
+
+    async getQueueStats() {
+        try {
+            const stats = await db.query(`
+                SELECT 
+                    status,
+                    COUNT(*) as count,
+                    MAX(last_attempt) as latest_attempt,
+                    COUNT(CASE WHEN retry_count > 0 THEN 1 END) as retried_count
+                FROM embedding_queue
+                GROUP BY status
+            `);
+            return stats.rows;
+        } catch (error) {
+            logger.error('Failed to get queue stats:', error);
+            throw error;
+        }
+    }
+
+    // Keep existing methods for backward compatibility and direct operations
     async storeEmbedding(content, metadata = {}) {
         try {
             const embedding = await this.generateEmbedding(content);
@@ -99,9 +225,9 @@ class EmbeddingService {
     }
 
     async getStats() {
-        const dims = await this.#getAiServerDimensions();
+        const dims = await this._getAiServerDimensions();
         return {
-            modelLoaded: true, // Delegated to AI server
+            modelLoaded: true,
             isLoading: false,
             dimension: dims
         };

@@ -4,13 +4,17 @@ services:
       target: development
     command: npm run dev
     environment:
-      - AI_SERVER_URL=http://ai-dev.rekkoo.com
+      - AI_SERVER_URL_LOCAL=http://ai-server:8000
+      - AI_SERVER_URL_REMOTE=https://ai.rekkoo.com
+      - AI_SERVER_ENV=local
     env_file:
       - .env
       - .env.development
     volumes:
       - ./src:/app/src
       - /app/node_modules
+    extra_hosts:
+      - "ai-dev.rekkoo.com:172.18.0.6"  # AI server's actual IP in the proxy network
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"

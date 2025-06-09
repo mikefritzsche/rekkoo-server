@@ -4,6 +4,7 @@ const http = require('http');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const { logger } = require('./utils/logger');
+const { worker: embeddingQueueWorker } = require('./workers/embeddingQueueWorker');
 
 dotenv.config();
 
@@ -109,6 +110,22 @@ app.use('/v1.0/products', productsRoutes);
 app.use('/v1.0/auth', authRoutes);
 app.use('/amazon', amazonRoutes);
 
+
+async function checkHealth() {
+  try {
+    const aiServerUrl = process.env.AI_SERVER_ENV === 'local' 
+      ? process.env.AI_SERVER_URL_LOCAL 
+      : process.env.AI_SERVER_URL_REMOTE;
+    
+    console.log('Using AI server URL:', aiServerUrl);
+    const response = await fetch(`${aiServerUrl}/health`);
+    console.log('AI server Health Check response', response);
+  } catch (error) {
+    console.error('AI server Health Check error', error);
+  }
+}
+checkHealth();
+
 // Initialize and mount routes that need socket service or use the factory pattern
 const favoritesRouter = createFavoritesRouter(favoritesController);
 app.use('/v1.0/favorites', favoritesRouter);
@@ -161,8 +178,25 @@ app.use((err, req, res, next) => {
 
 // --- 9. Start Server ---
 server.listen(PORT, () => {
-  console.log(`env: `, process.env)
-  console.log(`DB_SSL: `, process.env.DB_SSL);
+  console.log(`env: `, process.env.AI_SERVER_ENV, process.env.AI_SERVER_URL_LOCAL, process.env.AI_SERVER_URL_REMOTE)
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`Socket.IO listening on port ${PORT}`);
+
+  // Start the embedding queue worker
+  embeddingQueueWorker.start()
+    .catch(err => logger.error('Failed to start embedding queue worker:', err));
+});
+
+// Handle graceful shutdown
+process.on('SIGTERM', async () => {
+  logger.info('SIGTERM signal received. Starting graceful shutdown...');
+  
+  // Stop the embedding queue worker
+  embeddingQueueWorker.stop();
+  
+  // Close the server
+  server.close(() => {
+    logger.info('Server closed. Process terminating...');
+    process.exit(0);
+  });
 });

@@ -2,6 +2,7 @@
 const db = require('../config/db'); // Ensure this path is correct
 const ListService = require('../services/ListService'); // Import ListService
 const { logger } = require('../utils/logger'); // Assuming logger is in utils
+const EmbeddingService = require('../services/embeddingService'); // Import EmbeddingService
 
 // Define detail tables that are associated with records in the 'list_items' table
 const DETAIL_TABLES_MAP = {
@@ -679,6 +680,26 @@ function syncControllerFactory(socketService) {
                   [tableName, newServerId, operation]
                 );
                 logger.info(`[SyncController] Added/Updated CREATE in sync_tracking for ${tableName}/${newServerId}`);
+
+                // Inside handlePush function, after successful create/update operations for list_items or lists
+                if (tableName === 'list_items' || tableName === 'lists') {
+                    try {
+                        const entityId = newServerId || clientRecordId;
+                        const entityType = tableName === 'list_items' ? 'list_item' : 'list';
+                        await EmbeddingService.queueEmbeddingGeneration(
+                            entityId,
+                            entityType,
+                            {
+                                operation,
+                                priority: operation === 'create' ? 'high' : 'normal'
+                            }
+                        );
+                        logger.info(`[SyncController] Queued embedding generation for ${tableName}/${entityId}`);
+                    } catch (embeddingError) {
+                        logger.error(`[SyncController] Failed to queue embedding generation for ${tableName}/${newServerId || clientRecordId}:`, embeddingError);
+                        // Don't fail the sync operation if embedding queueing fails
+                    }
+                }
 
             } catch (insertError) {
                 logger.error(`[SyncController CREATE ${tableName}] Error inserting record with client-provided ID ${newServerId}:`, insertError);
