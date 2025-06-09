@@ -3,6 +3,8 @@ services:
     build:
       target: development
     command: npm run dev
+    environment:
+      - AI_SERVER_URL=http://ai-dev.rekkoo.com
     env_file:
       - .env
       - .env.development

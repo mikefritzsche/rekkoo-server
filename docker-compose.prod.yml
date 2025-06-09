@@ -17,6 +17,7 @@ services:
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
       JWT_SECRET: ${JWT_SECRET}
+      AI_SERVER_URL=https://ai.rekkoo.com
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
