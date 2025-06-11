@@ -200,7 +200,7 @@ function userControllerFactory(socketService = null) {
       // Query to get users who are following 'userId'
       // We select details of the follower from the 'users' table
       const query = `
-        SELECT u.id, u.username, u.profile_picture_url, u.full_name 
+        SELECT u.id, u.username, u.profile_image_url, u.full_name 
         FROM users u
         JOIN followers f ON u.id = f.follower_id
         WHERE f.followed_id = $1 AND f.deleted_at IS NULL
@@ -225,7 +225,7 @@ function userControllerFactory(socketService = null) {
       // Query to get users whom 'userId' is following
       // We select details of the followed user from the 'users' table
       const query = `
-        SELECT u.id, u.username, u.profile_picture_url, u.full_name
+        SELECT u.id, u.username, u.profile_image_url, u.full_name
         FROM users u
         JOIN followers f ON u.id = f.followed_id
         WHERE f.follower_id = $1 AND f.deleted_at IS NULL
@@ -251,7 +251,7 @@ function userControllerFactory(socketService = null) {
       const query = `
         SELECT l.id, l.name, l.description, l.created_at, l.updated_at, l.is_public, l.owner_id,
                (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
-               u.username as owner_username, u.profile_picture_url as owner_profile_picture_url
+               u.username as owner_username, u.profile_image_url as owner_profile_picture_url
         FROM lists l
         JOIN users u ON l.owner_id = u.id
         WHERE l.owner_id = $1 AND l.is_public = TRUE AND l.deleted_at IS NULL
@@ -265,37 +265,95 @@ function userControllerFactory(socketService = null) {
     }
   };
 
-  // Placeholder for getUserSuggestions
+  // Get user suggestions
   const getUserSuggestions = async (req, res) => {
-    console.log('!!!!!!!!!!!!!!!!! USERCONTROLLER.GETUSERSUGGESTIONS CALLED !!!!!!!!!!!!!!!!!');
-    console.log('!!!!!!!!!!!!!!!!! req.params: ', JSON.stringify(req.params));
-    console.log('!!!!!!!!!!!!!!!!! req.originalUrl: ', req.originalUrl);
     const requestingUserId = req.user?.id;
-    logger.info(`[UserController] Request to get user suggestions for user ${requestingUserId}`);
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
 
     try {
-      // Simple suggestion logic: Get a few users (e.g., 5) that the current user is not already following,
-      // are not the current user themselves, and are verified (if you have such a flag).
-      // This is a basic example and can be significantly improved (e.g., mutual friends, interests, etc.)
+      // Get users that are verified and active, including follow status
       const query = `
-        SELECT u.id, u.username, u.full_name, u.profile_image_url
+        WITH active_follows AS (
+          SELECT followed_id 
+          FROM followers 
+          WHERE follower_id = $1 
+            AND deleted_at IS NULL  -- Only consider active follows
+        )
+        SELECT DISTINCT ON (u.id) 
+          u.id, 
+          u.username, 
+          u.full_name, 
+          u.profile_image_url,
+          CASE WHEN f.id IS NOT NULL AND f.deleted_at IS NULL THEN TRUE ELSE FALSE END as is_followed,
+          random() as sort_key  -- Include random() in SELECT for ORDER BY
         FROM users u
+        LEFT JOIN followers f ON u.id = f.followed_id AND f.follower_id = $1
         WHERE u.id != $1  -- Not the requesting user
-          AND u.email_verified = TRUE -- Example: suggest only verified users
-          AND u.deleted_at IS NULL
-          AND NOT EXISTS (
-            SELECT 1
-            FROM followers f
-            WHERE f.follower_id = $1 AND f.followed_id = u.id AND f.deleted_at IS NULL
-          )
-        ORDER BY u.created_at DESC -- Or randomize, or by popularity etc.
-        LIMIT 5;
+          AND u.email_verified = TRUE  -- Only verified users
+          AND u.deleted_at IS NULL  -- Only active users
+        ORDER BY u.id, sort_key  -- Order by ID first to make DISTINCT ON work, then by random
+        OFFSET $2
+        LIMIT $3;
       `;
-      const { rows } = await db.query(query, [requestingUserId]);
-      res.status(200).json(rows);
+      
+      // Get total count for pagination
+      const countQuery = `
+        SELECT COUNT(DISTINCT u.id) as total
+        FROM users u
+        WHERE u.id != $1
+          AND u.email_verified = TRUE
+          AND u.deleted_at IS NULL;
+      `;
+      
+      const [{ rows }, countResult] = await Promise.all([
+        db.query(query, [requestingUserId, offset, limit]),
+        db.query(countQuery, [requestingUserId])
+      ]);
+
+      logger.info(`[UserController] Found ${rows.length} suggestions for user ${requestingUserId} (page ${page})`);
+      
+      // Remove the sort_key from the response
+      const suggestions = rows.map(({ sort_key, ...user }) => user);
+      
+      res.status(200).json({
+        data: suggestions,
+        pagination: {
+          total: parseInt(countResult.rows[0].total),
+          page,
+          limit,
+          has_more: offset + suggestions.length < parseInt(countResult.rows[0].total)
+        }
+      });
     } catch (error) {
       logger.error(`[UserController] Error getting user suggestions for user ${requestingUserId}:`, error);
       res.status(500).json({ error: 'Failed to get user suggestions', details: error.message });
+    }
+  };
+
+  /**
+   * Get multiple users by their IDs
+   */
+  const getUsersByIds = async (req, res) => {
+    try {
+      const ids = req.query.ids ? req.query.ids.split(',') : [];
+      if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: 'Please provide an array of user IDs' });
+      }
+
+      logger.info(`[UserController] Fetching users by IDs: ${ids.join(', ')}`);
+
+      const { rows } = await db.query(
+        'SELECT id, username, email, full_name, profile_image_url FROM users WHERE id = ANY($1) AND deleted_at IS NULL',
+        [ids]
+      );
+
+      logger.info(`[UserController] Found ${rows.length} users`);
+      res.json({ users: rows });
+    } catch (err) {
+      logger.error('Error fetching users by IDs:', err);
+      res.status(500).json({ error: 'Internal server error' });
     }
   };
 
@@ -309,7 +367,8 @@ function userControllerFactory(socketService = null) {
     getUserFollowers,
     getUserFollowing,
     getUserPublicLists,
-    getUserSuggestions
+    getUserSuggestions,
+    getUsersByIds
   };
 }
 

@@ -10,6 +10,13 @@ function createUserRouter(userController) {
   const router = express.Router();
 
   /**
+   * @route GET /batch
+   * @desc Get multiple users by their IDs
+   * @access Private
+   */
+  router.get('/batch', authenticateJWT, userController.getUsersByIds);
+
+  /**
    * @route GET /suggestions
    * @desc Get users to suggest following
    * @access Private
@@ -22,6 +29,13 @@ function createUserRouter(userController) {
    * @access Private
    */
   router.get('/', authenticateJWT, userController.getUsers);
+
+  /**
+   * @route DELETE /
+   * @desc Delete multiple users
+   * @access Private
+   */
+  router.delete('/', authenticateJWT, userController.deleteMultipleUsers);
 
   /**
    * @route GET /:id
@@ -64,13 +78,6 @@ function createUserRouter(userController) {
    * @access Private
    */
   router.delete('/:id', authenticateJWT, userController.deleteUser);
-
-  /**
-   * @route DELETE /
-   * @desc Delete multiple users
-   * @access Private
-   */
-  router.delete('/', authenticateJWT, userController.deleteMultipleUsers);
 
   return router;
 }
