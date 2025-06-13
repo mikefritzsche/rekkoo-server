@@ -6,7 +6,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "codemod:remove-console": "jscodeshift -t scripts/transform-remove-console.js --extensions=js,jsx,ts,tsx --ignore-pattern=**/node_modules/** ."
   },
   "keywords": [],
   "author": "",
@@ -38,5 +39,8 @@
     "socket.io": "^4.8.1",
     "uuid": "^11.1.0",
     "ytmusic-api": "^5.3.0"
+  },
+  "devDependencies": {
+    "jscodeshift": "^0.14.0"
   }
 }
