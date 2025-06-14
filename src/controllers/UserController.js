@@ -249,7 +249,8 @@ function userControllerFactory(socketService = null) {
     try {
       // Query to get lists owned by 'targetUserId' that are marked as public
       const query = `
-        SELECT l.id, l.name, l.description, l.created_at, l.updated_at, l.is_public, l.owner_id,
+        SELECT l.id, l.title, l.description, l.created_at, l.updated_at, l.is_public, l.owner_id,
+               l.background, l.image_url, l.list_type, l.occasion, l.sort_order,
                (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
                u.username as owner_username, u.profile_image_url as owner_profile_picture_url
         FROM lists l
