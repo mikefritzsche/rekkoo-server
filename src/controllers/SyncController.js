@@ -52,26 +52,23 @@ function syncControllerFactory(socketService) {
 
   // Helper function to process a single favorite creation or restoration
   async function processSingleFavoriteAddOrRestore(txnClient, userId, favDataFromPush) {
-    const { id: clientProvidedId, list_id, list_item_id, category_id, is_public, notes, sort_order } = favDataFromPush;
-    logger.debug(`[SyncController] processSingleFavoriteAddOrRestore called for user ${userId}, client ID ${clientProvidedId}, list_id ${list_id}, item_id ${list_item_id}`);
+    const { id: clientProvidedId, target_id, target_type, category_id, is_public, notes, sort_order } = favDataFromPush;
+    logger.debug(`[SyncController] processSingleFavoriteAddOrRestore called for user ${userId}, client ID ${clientProvidedId}, target ${target_id}, type ${target_type}`);
 
-    const targetIsList = !!list_id;
-    const targetId = list_id || list_item_id;
-
-    if (!targetId) {
-        logger.warn(`[SyncController] processSingleFavoriteAddOrRestore: Missing list_id or list_item_id for client ID ${clientProvidedId}`);
-        return { status: 'error_missing_target', error: 'Favorite must have a list_id or list_item_id' };
+    if (!target_id || !target_type) {
+        logger.warn(`[SyncController] processSingleFavoriteAddOrRestore: Missing target_id or target_type for client ID ${clientProvidedId}`);
+        return { status: 'error_missing_target', error: 'Favorite must include target_id and target_type' };
     }
 
     // 1. Check for an *active* favorite for the same target
     const activeFavoriteQuery = `
         SELECT id FROM public.favorites
-        WHERE user_id = $1 AND ${targetIsList ? 'list_id = $2' : 'list_item_id = $2'} AND deleted_at IS NULL LIMIT 1`;
-    const activeFavoriteResult = await txnClient.query(activeFavoriteQuery, [userId, targetId]);
+        WHERE user_id = $1 AND target_id = $2 AND target_type = $3 AND deleted_at IS NULL LIMIT 1`;
+    const activeFavoriteResult = await txnClient.query(activeFavoriteQuery, [userId, target_id, target_type]);
 
     if (activeFavoriteResult.rows.length > 0) {
         const existingActiveId = activeFavoriteResult.rows[0].id;
-        logger.info(`[SyncController] Active favorite found (id: ${existingActiveId}) for user ${userId}, target ${targetId}. Updating details.`);
+        logger.info(`[SyncController] Active favorite found (id: ${existingActiveId}) for user ${userId}, target ${target_id}, type ${target_type}. Updating details.`);
         const updateActiveQuery = `
             UPDATE public.favorites
             SET category_id = $1, is_public = $2, notes = $3, sort_order = $4, updated_at = CURRENT_TIMESTAMP
@@ -84,12 +81,12 @@ function syncControllerFactory(socketService) {
     // 2. Check for a *soft-deleted* favorite for the same target
     const softDeletedQuery = `
         SELECT id FROM public.favorites
-        WHERE user_id = $1 AND ${targetIsList ? 'list_id = $2' : 'list_item_id = $2'} AND deleted_at IS NOT NULL LIMIT 1 FOR UPDATE`;
-    const softDeletedResult = await txnClient.query(softDeletedQuery, [userId, targetId]);
+        WHERE user_id = $1 AND target_id = $2 AND target_type = $3 AND deleted_at IS NOT NULL LIMIT 1 FOR UPDATE`;
+    const softDeletedResult = await txnClient.query(softDeletedQuery, [userId, target_id, target_type]);
 
     if (softDeletedResult.rows.length > 0) {
         const existingSoftDeletedId = softDeletedResult.rows[0].id;
-        logger.info(`[SyncController] Soft-deleted favorite found (id: ${existingSoftDeletedId}) for user ${userId}, target ${targetId}. Restoring.`);
+        logger.info(`[SyncController] Soft-deleted favorite found (id: ${existingSoftDeletedId}) for user ${userId}, target ${target_id}, type ${target_type}. Restoring.`);
         const restoreQuery = `
             UPDATE public.favorites
             SET deleted_at = NULL, category_id = $1, is_public = $2, notes = $3, sort_order = $4, updated_at = CURRENT_TIMESTAMP
@@ -99,17 +96,10 @@ function syncControllerFactory(socketService) {
     }
 
     // 3. No existing (active or soft-deleted) favorite for this target - insert new using client's provided ID
-    logger.info(`[SyncController] No existing favorite found for user ${userId}, target ${targetId}. Inserting new with client ID ${clientProvidedId}.`);
-    const insertQueryFields = ['id', 'user_id'];
-    const insertValues = [clientProvidedId, userId]; // Use clientProvidedId as the new record's ID
-
-    if (targetIsList) {
-        insertQueryFields.push('list_id');
-        insertValues.push(targetId);
-    } else {
-        insertQueryFields.push('list_item_id');
-        insertValues.push(targetId);
-    }
+    logger.info(`[SyncController] No existing favorite found for user ${userId}, target ${target_id}, type ${target_type}. Inserting new with client ID ${clientProvidedId}.`);
+    const insertQueryFields = ['id', 'user_id', 'target_id', 'target_type'];
+    const insertValues = [clientProvidedId, userId, target_id, target_type];
+    
     // Add other fields if present in favDataFromPush
     if (category_id !== undefined && category_id !== null) { insertQueryFields.push('category_id'); insertValues.push(category_id); }
     if (is_public !== undefined && is_public !== null) { insertQueryFields.push('is_public'); insertValues.push(is_public); }
@@ -219,9 +209,9 @@ function syncControllerFactory(socketService) {
             for (const favItem of favoriteItems) {
               console.log('[DEBUG] Processing favorite item action:', favItem.action); // Add this
               const { action, ...favoriteData } = favItem;
-              const { id: clientFavId, list_id, list_item_id, category_id, is_public, notes, sort_order } = favoriteData;
+              const { id: clientFavId, target_id, target_type, category_id, is_public, notes, sort_order } = favoriteData;
 
-              if (!action || !clientFavId || (!list_id && !list_item_id)) {
+              if (!action || !clientFavId || (!target_id && !target_type)) {
                 logger.warn('[SyncController] BATCH_FAVORITES_UPDATE: Skipping invalid favorite item (missing action, id, or target):', favItem);
                 batchResults.push({ clientRecordId: clientFavId, status: 'error_invalid_favorite_item', error: 'Missing action, id, or target' });
                 continue;
@@ -233,15 +223,16 @@ function syncControllerFactory(socketService) {
                   const activeFavoriteQuery = `
                     SELECT id FROM public.favorites
                     WHERE user_id = $1
-                    AND ${list_id ? 'list_id = $2' : 'list_item_id = $2'}
+                    AND target_id = $2
+                    AND target_type = $3
                     AND deleted_at IS NULL
                     LIMIT 1
                   `;
-                  const activeFavoriteResult = await client.query(activeFavoriteQuery, [userId, list_id || list_item_id]);
+                  const activeFavoriteResult = await client.query(activeFavoriteQuery, [userId, target_id, target_type]);
 
                   if (activeFavoriteResult.rows.length > 0) {
                     // Active favorite already exists - treat as no-op
-                    logger.warn(`[SyncController] Favorite already exists for user ${userId} and ${list_id ? 'list' : 'item'} ${list_id || list_item_id}. Skipping.`);
+                    logger.warn(`[SyncController] Favorite already exists for user ${userId} and target ${target_id}, type ${target_type}. Skipping.`);
                     batchResults.push({ clientRecordId: clientFavId, status: 'noop' });
                     continue;
                   }
@@ -250,12 +241,13 @@ function syncControllerFactory(socketService) {
                   const softDeletedQuery = `
                     SELECT id FROM public.favorites
                     WHERE user_id = $1
-                    AND ${list_id ? 'list_id = $2' : 'list_item_id = $2'}
+                    AND target_id = $2
+                    AND target_type = $3
                     AND deleted_at IS NOT NULL
                     LIMIT 1
                     FOR UPDATE  -- Lock the row to prevent concurrent modifications
                   `;
-                  const softDeletedResult = await client.query(softDeletedQuery, [userId, list_id || list_item_id]);
+                  const softDeletedResult = await client.query(softDeletedQuery, [userId, target_id, target_type]);
 
                   let favoriteId;
                   let recordStatus = 'created';
@@ -264,20 +256,20 @@ function syncControllerFactory(socketService) {
                     // Restore the soft-deleted favorite
                     const restoreQuery = `
                       UPDATE public.favorites
-                      SET deleted_at = NULL, category_id = $3, is_public = $4, notes = $5, sort_order = $6, updated_at = CURRENT_TIMESTAMP
-                      WHERE id = $1 AND user_id = $2
+                      SET deleted_at = NULL, category_id = $4, is_public = $5, notes = $6, sort_order = $7, updated_at = CURRENT_TIMESTAMP
+                      WHERE id = $1 AND user_id = $2 AND target_id = $3 AND target_type = $8
                       RETURNING id
                     `;
-                    const restoreParams = [softDeletedResult.rows[0].id, userId, category_id || null, is_public || false, notes || null, sort_order || 0];
+                    const restoreParams = [softDeletedResult.rows[0].id, userId, target_id, target_type, category_id || null, is_public || false, notes || null, sort_order || 0];
                     const restoreResult = await client.query(restoreQuery, restoreParams);
                     favoriteId = restoreResult.rows[0].id;
                     recordStatus = 'restored';
                   } else {
                     // No existing favorite (active or soft-deleted) - insert new
                     const insertQuery = `
-                      INSERT INTO public.favorites (id, user_id, ${list_id ? 'list_id' : 'list_item_id'}, category_id, is_public, notes, sort_order, created_at, updated_at)
-                      VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                      ON CONFLICT (user_id, ${list_id ? 'list_id' : 'list_item_id'}) WHERE deleted_at IS NULL
+                      INSERT INTO public.favorites (id, user_id, target_id, target_type, category_id, is_public, notes, sort_order, created_at, updated_at)
+                      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                      ON CONFLICT (user_id, target_id, target_type) WHERE deleted_at IS NULL
                       DO UPDATE SET 
                         deleted_at = NULL,
                         category_id = EXCLUDED.category_id,
@@ -287,7 +279,7 @@ function syncControllerFactory(socketService) {
                         updated_at = EXCLUDED.updated_at
                       RETURNING id
                     `;
-                    const insertParams = [clientFavId, userId, list_id || list_item_id, category_id || null, is_public || false, notes || null, sort_order || 0];
+                    const insertParams = [clientFavId, userId, target_id, target_type, category_id || null, is_public || false, notes || null, sort_order || 0];
                     const insertResult = await client.query(insertQuery, insertParams);
                     favoriteId = insertResult.rows[0].id;
                   }
@@ -313,11 +305,11 @@ function syncControllerFactory(socketService) {
                   const deleteQuery = `
                     UPDATE public.favorites
                     SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = $1 AND user_id = $2
+                    WHERE id = $1 AND user_id = $2 AND target_id = $3 AND target_type = $4
                     RETURNING id
                   `;
-                  console.log('Executing soft-delete query:', deleteQuery, [clientFavId, userId]); // Debug log
-                  const deleteResult = await client.query(deleteQuery, [clientFavId, userId]);
+                  console.log('Executing soft-delete query:', deleteQuery, [clientFavId, userId, target_id, target_type]); // Debug log
+                  const deleteResult = await client.query(deleteQuery, [clientFavId, userId, target_id, target_type]);
                   console.log('Soft-delete result:', deleteResult.rows); // Debug log
                   if (deleteResult.rows.length > 0) {
                     batchResults.push({ clientRecordId: clientFavId, serverId: deleteResult.rows[0].id, status: 'deleted' });
