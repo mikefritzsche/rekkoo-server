@@ -354,7 +354,11 @@ const login = async (req, res) => {
  */
 const refreshToken = async (req, res) => { // This is the function declaration for refreshToken
   try {
-    const { token } = req.body;
+    let { token } = req.body;
+    if (!token) {
+      // Allow client to send { refreshToken }
+      token = req.body.refreshToken;
+    }
     if (!token) {
       return res.status(401).json({ message: 'Refresh token is required' });
     }
@@ -410,12 +414,20 @@ const refreshToken = async (req, res) => { // This is the function declaration f
         ]
       );
 
-      return { newAccessToken, newRefreshToken: newRefreshTokenValue }; // Return newRefreshTokenValue
+      // Fetch user basic profile for response
+      const userRes = await client.query(
+        `SELECT id, username, email, full_name, profile_image_url FROM users WHERE id = $1`,
+        [refreshTokenData.user_id]
+      );
+      const userObj = userRes.rows[0] || { id: refreshTokenData.user_id };
+
+      return { newAccessToken, newRefreshToken: newRefreshTokenValue, userObj }; // Return with user
     });
 
     return res.status(200).json({
       accessToken: result.newAccessToken,
-      refreshToken: result.newRefreshToken // Send newRefreshTokenValue to client
+      refreshToken: result.newRefreshToken,
+      user: result.userObj,
     });
   } catch (error) {
     console.error('Refresh token error:', error);

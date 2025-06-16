@@ -345,6 +345,90 @@ function syncControllerFactory(socketService) {
             });
             continue; // Move to next change item
           }
+          // Handle USER_SETTINGS table (create / update / delete)
+          else if (tableName === 'user_settings') {
+            try {
+              if (data && data.user_id && data.user_id !== userId) {
+                logger.warn(`[SyncController] Ignoring user_settings change for mismatched user_id ${data.user_id} (auth user ${userId})`);
+                results.push({
+                  tableName,
+                  operation,
+                  clientRecordId: clientRecordId || data.user_id,
+                  status: 'error_user_mismatch',
+                  error: 'user_id in payload does not match authenticated user.'
+                });
+                continue;
+              }
+
+              if (operation === 'delete') {
+                const delRes = await client.query(
+                  `UPDATE public.user_settings SET deleted_at = CURRENT_TIMESTAMP WHERE user_id = $1 AND deleted_at IS NULL`,
+                  [userId]
+                );
+                results.push({
+                  tableName,
+                  operation,
+                  clientRecordId: userId,
+                  status: delRes.rowCount > 0 ? 'deleted' : 'noop_or_not_found'
+                });
+              } else if (operation === 'create' || operation === 'update') {
+                // Build columns / values dynamically from data
+                const allowedCols = [
+                  'user_id',
+                  'theme',
+                  'notification_preferences',
+                  'privacy_settings',
+                  'lists_header_background_type',
+                  'lists_header_background_value',
+                  'lists_header_image_url',
+                  'social_networks',
+                  'updated_at'
+                ];
+                const cols = [];
+                const vals = [];
+                Object.keys(data || {}).forEach((k) => {
+                  if (allowedCols.includes(k)) {
+                    cols.push(k);
+                    vals.push(data[k]);
+                  }
+                });
+                if (!cols.includes('user_id')) {
+                  cols.unshift('user_id');
+                  vals.unshift(userId);
+                }
+                if (!cols.includes('updated_at')) {
+                  cols.push('updated_at');
+                  vals.push(new Date().toISOString());
+                }
+
+                const placeholders = cols.map((_, idx) => `$${idx + 1}`).join(', ');
+                const updateAssignments = cols.filter(c => c !== 'user_id').map((c, idx) => `${c} = EXCLUDED.${c}`).join(', ');
+
+                const upsertQuery = `INSERT INTO public.user_settings (${cols.join(', ')}) VALUES (${placeholders})
+                  ON CONFLICT (user_id) DO UPDATE SET ${updateAssignments}`;
+                await client.query(upsertQuery, vals);
+
+                results.push({
+                  tableName,
+                  operation,
+                  clientRecordId: userId,
+                  status: operation === 'create' ? 'created' : 'updated'
+                });
+              } else {
+                results.push({ tableName, operation, clientRecordId: userId, status: 'error_invalid_operation' });
+              }
+            } catch (settingsErr) {
+              logger.error('[SyncController] Error processing user_settings change:', settingsErr);
+              results.push({
+                tableName,
+                operation,
+                clientRecordId: clientRecordId || userId,
+                status: 'error',
+                error: settingsErr.message || 'Exception during user_settings processing'
+              });
+            }
+            continue; // move to next change item
+          }
           // START ---- NEW LOGIC FOR SINGLE FAVORITE CREATE ---- START
           else if (tableName === 'favorites' && operation === 'create') {
             logger.info(`[SyncController] Processing single favorite create for clientRecordId: ${clientRecordId}`);
