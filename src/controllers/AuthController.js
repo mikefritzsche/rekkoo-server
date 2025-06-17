@@ -17,6 +17,8 @@ const mailjet = new Mailjet({
   apiSecret: process.env.MJ_APIKEY_PRIVATE
 });
 
+const EXPIRES_IN = '30m';
+
 // Helper function to generate a refresh token
 const generateRefreshToken = () => {
   return crypto.randomBytes(40).toString('hex');
@@ -290,7 +292,7 @@ const login = async (req, res) => {
 
       // Generate JWT token (short-lived access token)
       const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
-        expiresIn: '30 days' // Token expires in 1 hour
+        expiresIn: EXPIRES_IN // Token expires in 1 hour
       });
 
       // Generate refresh token
@@ -383,10 +385,52 @@ const refreshToken = async (req, res) => { // This is the function declaration f
         throw { status: 403, message: 'Refresh token has expired' };
       }
 
+      // --- Account status hardening ---
+      const statusRes = await client.query(
+        `SELECT account_locked, admin_locked, deleted_at FROM users WHERE id = $1`,
+        [refreshTokenData.user_id]
+      );
+
+      if (
+        statusRes.rows.length === 0 ||
+        statusRes.rows[0].account_locked ||
+        statusRes.rows[0].admin_locked ||
+        statusRes.rows[0].deleted_at
+      ) {
+        // Invalidate existing refresh tokens for safety
+        await client.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [refreshTokenData.user_id]);
+        throw { status: 403, message: 'Account is unavailable (locked or deleted)' };
+      }
+
       // Generate new access token
       const newAccessToken = jwt.sign({ userId: refreshTokenData.user_id }, process.env.JWT_SECRET, {
-        expiresIn: '1h' // New access token expires in 1 hour
+        expiresIn: EXPIRES_IN // New access token expires in 1 hour
       });
+
+      // --- Update session with new access token so Socket.IO and other services can validate ---
+      // Replace the old session token with the freshly-issued access token (rolling sessions)
+      await client.query(
+        `UPDATE user_sessions
+         SET token = $1,
+             last_activity_at = NOW(),
+             expires_at = NOW() + INTERVAL '30 days'
+         WHERE user_id = $2 AND token = $3`,
+        [newAccessToken, refreshTokenData.user_id, token]
+      );
+
+      // If no existing session row was updated (e.g., token was removed), create a new one
+      const { rowCount } = await client.query(
+        `SELECT 1 FROM user_sessions WHERE user_id = $1 AND token = $2`,
+        [refreshTokenData.user_id, newAccessToken]
+      );
+
+      if (rowCount === 0) {
+        await client.query(
+          `INSERT INTO user_sessions (user_id, token, ip_address, user_agent, expires_at)
+           VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 days')`,
+          [refreshTokenData.user_id, newAccessToken, req.ip, req.headers['user-agent']]
+        );
+      }
 
       // Generate new refresh token
       const newRefreshTokenValue = generateRefreshToken();
@@ -843,7 +887,7 @@ const oauthCallback = async (req, res) => {
       );
 
       // Generate your application's JWTs
-      const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: '1h' });
+      const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
       const appRefreshToken = generateRefreshToken();
       const appRefreshTokenExpiresAt = new Date();
       appRefreshTokenExpiresAt.setDate(appRefreshTokenExpiresAt.getDate() + 30);

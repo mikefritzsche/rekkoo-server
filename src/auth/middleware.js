@@ -44,14 +44,17 @@ const authenticateJWT = async (req, res, next) => {
     try {
       // First get user details from token
       const userResult = await db.query(
-        `SELECT id, username, email, email_verified
+        `SELECT id, username, email, email_verified, admin_locked, deleted_at
          FROM users 
-         WHERE id = $1 AND account_locked = false`,
+         WHERE id = $1
+           AND account_locked = false
+           AND admin_locked = false
+           AND deleted_at IS NULL`,
         [decoded.userId]
       );
 
       if (userResult.rows.length === 0) {
-        return res.status(401).json({ message: 'User not found or account locked' });
+        return res.status(403).json({ message: 'Account unavailable (locked, suspended or deleted)' });
       }
 
       // Check if session exists (optional)
