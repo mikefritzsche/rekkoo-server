@@ -11,12 +11,12 @@ RUN apk add --no-cache \
 # --- Dependencies Stage ---
 FROM base AS dependencies
 # Install dependencies with cache optimization
-RUN npm ci --only=production --no-audit --no-fund \
+RUN npm install --omit=dev --legacy-peer-deps --no-audit --no-fund \
     && npm cache clean --force
 
 # --- Development Dependencies Stage ---
 FROM base AS dev-dependencies  
-RUN npm ci --no-audit --no-fund \
+RUN npm install --legacy-peer-deps --no-audit --no-fund \
     && npm cache clean --force
 
 # --- Development Stage ---
