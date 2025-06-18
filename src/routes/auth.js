@@ -7,6 +7,8 @@ const qs = require('querystring');
 const { body, validationResult } = require('express-validator');
 const AuthController = require('../controllers/AuthController');
 const { authenticateJWT, checkPermissions } = require('../auth/middleware');
+const passport = require('passport');
+require('../auth/passport');
 
 const {
   AMAZON_SELLER_ID,
@@ -457,6 +459,25 @@ router.get('/check', authenticateJWT, (req, res) => {
   console.log(`Auth check successful for user: ${req.user?.id}`);
   res.status(200).json({ message: 'Session valid', userId: req.user?.id });
 });
+
+// ===================== Passport OAuth Routes =====================
+const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
+
+// Google
+router.get('/oauth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+router.get(
+  '/oauth/google/callback',
+  passport.authenticate('google', { session: false, failureRedirect: `${CLIENT_URL}/login?oauth=google&error=1` }),
+  AuthController.passportCallback
+);
+
+// GitHub
+router.get('/oauth/github', passport.authenticate('github', { scope: ['user:email'] }));
+router.get(
+  '/oauth/github/callback',
+  passport.authenticate('github', { session: false, failureRedirect: `${CLIENT_URL}/login?oauth=github&error=1` }),
+  AuthController.passportCallback
+);
 
 module.exports = router;
 

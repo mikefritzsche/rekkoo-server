@@ -76,7 +76,9 @@ app.use(cors({
       'http://localhost:3000',
       'http://localhost:8081',
       'http://app-dev.rekkoo.com',
-      'https://app.rekkoo.com'
+      'https://app.rekkoo.com',
+      'https://rekkoo-admin.localhost',
+      'https://admin.rekkoo.com'
     ];
     
     // Check for exact matches first
@@ -95,10 +97,15 @@ app.use(cors({
     console.log(`CORS: Rejected origin: ${origin}`);
     callback(new Error('Not allowed by CORS'));
   },
-  credentials: true
+  credentials: true,
+  exposedHeaders: ['Authorization']
 }));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
+
+// ---- Passport ----
+const passport = require('./auth/passport');
+app.use(passport.initialize());
 
 // --- 6. Mount Routes ---
 // Routes that DON'T need socketService

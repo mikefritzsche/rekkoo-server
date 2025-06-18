@@ -45,8 +45,16 @@ class EmbeddingService {
 
     async queueEmbeddingGeneration(entityId, entityType, metadata = {}) {
         try {
-            // Normalize entity type to match AI server endpoints
-            const normalizedEntityType = entityType === 'list_item' ? 'list-items' : entityType.replace(/_/g, '-');
+            // Map entityType to match AI server endpoints
+            const pluralMap = {
+                list_item: 'list-items',
+                favorite: 'favorites',
+                follower: 'followers',
+                user: 'users', // explicit for clarity
+                list: 'lists',
+            };
+
+            const normalizedEntityType = pluralMap[entityType] || entityType.replace(/_/g, '-');
             
             const result = await db.query(
                 `INSERT INTO embedding_queue 
@@ -231,6 +239,48 @@ class EmbeddingService {
             isLoading: false,
             dimension: dims
         };
+    }
+
+    /**
+     * Soft-delete or down-weight an embedding.
+     * @param {string} entityId
+     * @param {string} entityType
+     * @param {number} weight  A value between 0 and 1. Default 0.2
+     */
+    async deactivateEmbedding(entityId, entityType, weight = 0.2) {
+        try {
+            await db.query(
+                `UPDATE embeddings
+                 SET deleted_at = CURRENT_TIMESTAMP,
+                     weight      = $3,
+                     updated_at  = CURRENT_TIMESTAMP
+                 WHERE related_entity_id = $1
+                   AND entity_type = $2`,
+                [entityId, entityType, weight]
+            );
+            logger.info(`Embedding for ${entityType}/${entityId} marked inactive (weight=${weight})`);
+        } catch (error) {
+            logger.error(`Failed to deactivate embedding for ${entityType}/${entityId}:`, error);
+        }
+    }
+
+    /**
+     * Persist a search query's embedding for personalization/analytics.
+     * Non-blocking: caller may ignore return value.
+     */
+    async storeSearchEmbedding(userId, queryText) {
+        if (!queryText || queryText.trim().length < 2) return;
+        try {
+            const embedding = await this.generateEmbedding(queryText.trim());
+            await db.query(
+                `INSERT INTO search_embeddings (user_id, raw_query, embedding)
+                 VALUES ($1, $2, $3)`,
+                [userId || null, queryText.trim(), `[${embedding.join(',')}]`]
+            );
+            logger.debug(`Stored search embedding (len=${queryText.length}) for user ${userId || 'anon'}`);
+        } catch (err) {
+            logger.error('Failed to store search embedding:', err);
+        }
     }
 }
 

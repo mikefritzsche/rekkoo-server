@@ -925,6 +925,66 @@ const oauthCallback = async (req, res) => {
   }
 };
 
+/**
+ * Passport OAuth success handler – issues JWT + refresh token for the user set by passport.
+ * This is called after passport has attached req.user.
+ */
+const passportCallback = async (req, res) => {
+  try {
+    if (!req.user || !req.user.id) {
+      return res.status(400).json({ message: 'OAuth authentication failed – no user in request.' });
+    }
+
+    const user = req.user;
+
+    const result = await db.transaction(async (client) => {
+      const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
+
+      const refreshTokenValue = generateRefreshToken();
+      const rtExpires = new Date();
+      rtExpires.setDate(rtExpires.getDate() + 30);
+
+      await client.query(
+        `INSERT INTO refresh_tokens (user_id, token, expires_at)
+         VALUES ($1,$2,$3)
+         ON CONFLICT (user_id, token) DO UPDATE SET expires_at = $3`,
+        [user.id, refreshTokenValue, rtExpires]
+      );
+
+      await client.query(
+        `INSERT INTO user_sessions (user_id, token, ip_address, user_agent, expires_at)
+         VALUES ($1,$2,$3,$4, NOW() + INTERVAL '30 days')
+         ON CONFLICT DO NOTHING`,
+        [user.id, accessToken, req.ip, req.headers['user-agent']]
+      );
+
+      return { accessToken, refreshToken: refreshTokenValue };
+    });
+
+    // Try to fetch roles for convenience
+    const rolesRes = await db.query(
+      `SELECT r.name FROM roles r JOIN user_roles ur ON r.id = ur.role_id WHERE ur.user_id = $1`,
+      [user.id]
+    );
+    const roles = rolesRes.rows.map(r => r.name);
+
+    // Decide whether to redirect or send JSON
+    if (process.env.CLIENT_URL) {
+      const redirectUrl = `${process.env.CLIENT_URL}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}`;
+      return res.redirect(redirectUrl);
+    }
+
+    return res.status(200).json({
+      message: 'OAuth login successful',
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken,
+      user: { id: user.id, username: user.username, email: user.email, roles }
+    });
+  } catch (error) {
+    console.error('passportCallback error:', error);
+    return res.status(500).json({ message: 'Server error during OAuth login' });
+  }
+};
 
 // Admin-only route example
 const getAllUsers = [ // Array for multiple middleware + handler
@@ -953,5 +1013,6 @@ module.exports = {
   resetPassword,
   changePassword,
   oauthCallback,
+  passportCallback,
   getAllUsers
 }; 

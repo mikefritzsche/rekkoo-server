@@ -31,6 +31,9 @@ function booksControllerFactory(socketService = null) {
 
       const data = await response.json();
 
+      const { safeStoreSearchEmbedding } = require('../utils/searchEmbeddingUtils');
+      await safeStoreSearchEmbedding(req, query);
+
       data.items?.map(item => ({
         id: `${item.id}`,
         title: item.volumeInfo.title,

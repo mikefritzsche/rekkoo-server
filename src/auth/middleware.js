@@ -135,4 +135,6 @@ const checkPermissions = (requiredPermissions) => {
   };
 };
 
+const requireRole = (roleName) => checkPermissions([] , roleName); // adjust as needed
+
 module.exports = { authenticateJWT, checkPermissions, authenticateToken };

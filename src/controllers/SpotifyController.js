@@ -1,5 +1,6 @@
 const { spotifyService } = require('../services/spotify-service');
 const { logger } = require('../utils/logger');
+const { safeStoreSearchEmbedding } = require('../utils/searchEmbeddingUtils');
 
 /**
  * Factory function that creates a SpotifyController
@@ -41,6 +42,8 @@ function spotifyControllerFactory(socketService = null) {
         parseInt(offset),
         parseInt(limit)
       );
+
+      await safeStoreSearchEmbedding(req, query);
 
       res.json(result);
     } catch (error) {

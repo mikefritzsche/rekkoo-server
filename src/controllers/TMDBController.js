@@ -54,6 +54,10 @@ function tmdbControllerFactory(socketService = null) {
       // Search for all movies
       const searchResults = await searchSingleMovie(query, page, include_adult);
 
+      /* Persist search embedding for personalization */
+      const { safeStoreSearchEmbedding } = require('../utils/searchEmbeddingUtils');
+      await safeStoreSearchEmbedding(req, query);
+
       res.json(searchResults);
     } catch (error) {
       console.error('media search error:', error);

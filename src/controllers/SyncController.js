@@ -299,6 +299,21 @@ function syncControllerFactory(socketService) {
                       ['favorites', favoriteId, recordStatus === 'created' ? 'create' : 'update']
                     );
                   }
+
+                  // Queue embedding generation for favorite within batch operation
+                  try {
+                    await EmbeddingService.queueEmbeddingGeneration(
+                      favoriteId,
+                      'favorite',
+                      {
+                        operation: recordStatus === 'created' ? 'create' : 'update',
+                        priority: recordStatus === 'created' ? 'high' : 'normal'
+                      }
+                    );
+                    logger.info(`[SyncController] Queued embedding generation for favorites/${favoriteId} (batch)`);
+                  } catch (embeddingError) {
+                    logger.error(`[SyncController] Failed to queue embedding generation for favorites/${favoriteId} (batch):`, embeddingError);
+                  }
                 } else if (action === 'delete') {
                   console.log(`[SyncController] BATCH_FAVORITES_UPDATE: Deleting favorite item ${clientFavId} for user ${userId}`);
                   // Soft delete
@@ -325,6 +340,14 @@ function syncControllerFactory(socketService) {
                          sync_error = NULL`,
                       ['favorites', deleteResult.rows[0].id, 'delete']
                     );
+
+                    // Soft-delete embedding row (set deleted_at, reduce weight)
+                    try {
+                      await EmbeddingService.deactivateEmbedding(deleteResult.rows[0].id, 'favorite');
+                      logger.info(`[SyncController] Deactivated embedding for favorites/${deleteResult.rows[0].id}`);
+                    } catch (embErr) {
+                      logger.error(`[SyncController] Failed to deactivate embedding for favorites/${deleteResult.rows[0].id}`, embErr);
+                    }
                   } else {
                     batchResults.push({ clientRecordId: clientFavId, status: 'error_not_found_or_not_owner' });
                   }
@@ -463,6 +486,21 @@ function syncControllerFactory(socketService) {
                         [tableName, result.serverId, syncOperation]
                     );
                     logger.info(`[SyncController] Added/Updated ${syncOperation.toUpperCase()} in sync_tracking for ${tableName}/${result.serverId}`);
+
+                    // Queue embedding generation for favorite
+                    try {
+                        await EmbeddingService.queueEmbeddingGeneration(
+                            result.serverId,
+                            'favorite',
+                            {
+                                operation: syncOperation,
+                                priority: syncOperation === 'create' ? 'high' : 'normal'
+                            }
+                        );
+                        logger.info(`[SyncController] Queued embedding generation for favorites/${result.serverId}`);
+                    } catch (embeddingError) {
+                        logger.error(`[SyncController] Failed to queue embedding generation for favorites/${result.serverId}:`, embeddingError);
+                    }
                 } else if (!result.serverId) {
                     logger.warn(`[SyncController] Sync tracking not added for favorite create op for client ID ${clientRecordId} due to missing serverId in result.`);
                 } else {
@@ -758,10 +796,14 @@ function syncControllerFactory(socketService) {
                 logger.info(`[SyncController] Added/Updated CREATE in sync_tracking for ${tableName}/${newServerId}`);
 
                 // Inside handlePush function, after successful create/update operations for list_items or lists
-                if (tableName === 'list_items' || tableName === 'lists') {
+                if (tableName === 'list_items' || tableName === 'lists' || tableName === 'favorites' || tableName === 'followers') {
                     try {
+                        let entityType;
+                        if (tableName === 'list_items') entityType = 'list_item';
+                        else if (tableName === 'lists') entityType = 'list';
+                        else if (tableName === 'favorites') entityType = 'favorite';
+                        else if (tableName === 'followers') entityType = 'follower';
                         const entityId = newServerId || clientRecordId;
-                        const entityType = tableName === 'list_items' ? 'list_item' : 'list';
                         await EmbeddingService.queueEmbeddingGeneration(
                             entityId,
                             entityType,
@@ -868,6 +910,30 @@ function syncControllerFactory(socketService) {
                     logger.error(`[SyncController] Error sending WebSocket notification for user_settings update to user ${data.user_id}:`, wsError);
                   }
                 }
+
+                // Queue embedding generation for list_items and lists after successful UPDATE
+                if (tableName === 'list_items' || tableName === 'lists' || tableName === 'favorites' || tableName === 'followers') {
+                  try {
+                    const entityIdForEmbedding = recordIdForSync || clientRecordId;
+                    let entityTypeForEmbedding;
+                    if (tableName === 'list_items') entityTypeForEmbedding = 'list_item';
+                    else if (tableName === 'lists') entityTypeForEmbedding = 'list';
+                    else if (tableName === 'favorites') entityTypeForEmbedding = 'favorite';
+                    else if (tableName === 'followers') entityTypeForEmbedding = 'follower';
+                    await EmbeddingService.queueEmbeddingGeneration(
+                      entityIdForEmbedding,
+                      entityTypeForEmbedding,
+                      {
+                        operation,
+                        priority: 'normal'
+                      }
+                    );
+                    logger.info(`[SyncController] Queued embedding generation (UPDATE) for ${tableName}/${entityIdForEmbedding}`);
+                  } catch (embeddingError) {
+                    logger.error(`[SyncController] Failed to queue embedding generation for ${tableName}/${recordIdForSync}:`, embeddingError);
+                    // Do not interrupt the update flow if queuing fails
+                  }
+                }
               } else {
                 logger.warn(`[SyncController] Could not add UPDATE to sync_tracking for ${tableName} due to missing record_id. Client ID: ${clientRecordId}`);
               }
@@ -954,6 +1020,21 @@ function syncControllerFactory(socketService) {
                   );
                   logger.info(`[SyncController] Added/Updated DELETE in sync_tracking for ${tableName}/${recordIdForDeleteSync}`);
 
+                  // Mark embedding as inactive (soft delete) for supported entity types
+                  if (['list_items', 'lists', 'favorites', 'followers'].includes(tableName)) {
+                      try {
+                          let embType;
+                          if (tableName === 'list_items') embType = 'list_item';
+                          else if (tableName === 'lists') embType = 'list';
+                          else if (tableName === 'favorites') embType = 'favorite';
+                          else if (tableName === 'followers') embType = 'follower';
+
+                          await EmbeddingService.deactivateEmbedding(recordIdForDeleteSync, embType);
+                      } catch (embErr) {
+                          logger.error(`[SyncController] Failed to deactivate embedding for ${tableName}/${recordIdForDeleteSync}:`, embErr);
+                      }
+                  }
+                  
                   // WebSocket notification for user_settings deletion
                   if (isUserSettingsTable && socketService && recordIdForDeleteSync === userId) { 
                      try {
