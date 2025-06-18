@@ -43,6 +43,7 @@ const authRoutes = require('./routes/auth');
 const amazonRoutes = require('./routes/amazon.routes');
 const geminiRoutes = require('./routes/gemini.routes');
 const openlibraryRoutes = require('./routes/openlibrary.routes');
+const adminRoutes = require('./routes/admin.routes');
 const { log } = require('console');
 
 // --- 2. Initialize Express App and HTTP Server ---
@@ -77,7 +78,7 @@ app.use(cors({
       'http://localhost:8081',
       'http://app-dev.rekkoo.com',
       'https://app.rekkoo.com',
-      'https://rekkoo-admin.localhost',
+      'http://rekkoo-admin.localhost',
       'https://admin.rekkoo.com'
     ];
     
@@ -117,6 +118,8 @@ app.use('/v1.0/products', productsRoutes);
 app.use('/v1.0/auth', authRoutes);
 app.use('/amazon', amazonRoutes);
 
+// Admin routes (requires admin role)
+app.use('/v1.0/admin', adminRoutes);
 
 async function checkHealth() {
   try {
