@@ -48,11 +48,11 @@ class AiService {
         try {
             // Check basic service health
             const serviceHealth = await this.client.get('/health');
-            logger.info('AI Server health check response:', serviceHealth.data);
+            // logger.info('AI Server health check response:', serviceHealth.data);
 
             // Check database health
             const dbHealth = await this.client.get('/database/health');
-            logger.info('AI Server database health check response:', dbHealth.data);
+            // logger.info('AI Server database health check response:', dbHealth.data);
 
             return serviceHealth.data.status === 'healthy' && dbHealth.data.status === 'connected';
         } catch (error) {

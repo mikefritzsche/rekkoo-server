@@ -76,7 +76,10 @@ app.use(cors({
     const allowedOrigins = [
       'http://localhost:3000',
       'http://localhost:8081',
-      'http://app-dev.rekkoo.com',
+      // Local development
+      'http://localhost:5173',  // Vite dev server (admin SPA)
+      'http://localhost:3100',  // Express API itself (for server-to-server requests)
+      'http://api-dev.rekkoo.com',
       'https://app.rekkoo.com',
       'http://rekkoo-admin.localhost',
       'https://admin.rekkoo.com'
@@ -129,7 +132,7 @@ async function checkHealth() {
     
     console.log('Using AI server URL:', aiServerUrl);
     const response = await fetch(`${aiServerUrl}/health`);
-    console.log('AI server Health Check response', response);
+    // console.log('AI server Health Check response', response);
   } catch (error) {
     console.error('AI server Health Check error', error);
   }
