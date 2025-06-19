@@ -86,7 +86,7 @@ const authenticateJWT = async (req, res, next) => {
       return res.status(500).json({ message: 'Server error during authentication' });
     }
   } catch (jwtError) {
-    console.error('JWT verification error:', jwtError);
+    // console.error('JWT verification error:', jwtError);
     return res.status(401).json({ message: 'Invalid token' });
   }
 };

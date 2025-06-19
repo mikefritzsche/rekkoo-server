@@ -40,7 +40,7 @@ class EmbeddingQueueWorker {
             // In development, log queue stats periodically
             if (isDevelopment()) {
                 const stats = await EmbeddingService.getQueueStats();
-                logger.debug('Embedding queue stats:', stats);
+                // logger.debug('Embedding queue stats:', stats);
             }
         } catch (error) {
             logger.error('Error processing embedding queue:', error);

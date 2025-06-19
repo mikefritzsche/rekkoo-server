@@ -474,7 +474,7 @@ const refreshToken = async (req, res) => { // This is the function declaration f
       user: result.userObj,
     });
   } catch (error) {
-    console.error('Refresh token error:', error);
+    // console.error('Refresh token error:', error);
     if (error.status) {
       return res.status(error.status).json({ message: error.message });
     }

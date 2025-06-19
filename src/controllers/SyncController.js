@@ -46,7 +46,7 @@ function syncControllerFactory(socketService) {
     }
     // For any other table, including detail tables, we are saying there is no direct user identifier for the generic pull.
     // This means they won't be processed in the main loop of handleGetChanges for direct user-filtered updates/deletes.
-    logger.warn(`[SyncController] Table '${tableName}' will not be processed by user-identifier in handleGetChanges main loop.`);
+    // logger.warn(`[SyncController] Table '${tableName}' will not be processed by user-identifier in handleGetChanges main loop.`);
     return null;
   };
 
@@ -1096,7 +1096,7 @@ function syncControllerFactory(socketService) {
    */
   const handleGetChanges = async (req, res) => {
     const lastPulledAtString = req.query.last_pulled_at;
-    logger.info(`[SyncController] Received req.query.last_pulled_at: '${lastPulledAtString}' (type: ${typeof lastPulledAtString})`);
+    // logger.info(`[SyncController] Received req.query.last_pulled_at: '${lastPulledAtString}' (type: ${typeof lastPulledAtString})`);
     let lastPulledAt = 0;
 
     if (lastPulledAtString) {
@@ -1112,15 +1112,15 @@ function syncControllerFactory(socketService) {
         }
       }
     } else {
-      logger.info(`[SyncController] req.query.last_pulled_at was not provided or was empty. Defaulting to 0.`);
+      // logger.info(`[SyncController] req.query.last_pulled_at was not provided or was empty. Defaulting to 0.`);
     }
-    logger.info(`[SyncController] Final parsed lastPulledAt timestamp before use: ${lastPulledAt}`);
+    // logger.info(`[SyncController] Final parsed lastPulledAt timestamp before use: ${lastPulledAt}`);
 
     const userId = req.user?.id;
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    logger.info(`[SyncController] User ${userId} pulling changes since: ${new Date(lastPulledAt).toISOString()} (timestamp: ${lastPulledAt})`);
+    // logger.info(`[SyncController] User ${userId} pulling changes since: ${new Date(lastPulledAt).toISOString()} (timestamp: ${lastPulledAt})`);
 
     try {
       const changes = {
