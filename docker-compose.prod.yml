@@ -5,19 +5,9 @@ services:
     build:
       target: production
     env_file:
-      - .env
       - .env.common
+      - .env
     environment:
-      - PORT: ${PORT}
-      - HOST: ${HOST}
-      - ENTRYPOINT: ${ENTRYPOINT}
-      - USE_TLS: ${USE_TLS}
-      - DB_USER: ${DB_USER}
-      - DB_PASSWORD: ${DB_PASSWORD}
-      - DB_NAME: ${DB_NAME}
-      - DB_HOST: ${DB_HOST}
-      - DB_PORT: ${DB_PORT}
-      - JWT_SECRET: ${JWT_SECRET}
       - AI_SERVER_URL_LOCAL=http://ai-server:8000
       - AI_SERVER_URL_REMOTE=https://ai.rekkoo.com
       - AI_SERVER_ENV=production
