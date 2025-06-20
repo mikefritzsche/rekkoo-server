@@ -1,16 +1,18 @@
 const Mailjet = require('node-mailjet');
 
 // Load environment variables
-require('dotenv').config({ path: require('path').resolve(__dirname, '../../../.env.common') }); // Adjust path as needed
+require('dotenv').config({ path: require('path').resolve(__dirname, '../../../.env.common') });
 
-const mailjet = Mailjet.apiConnect(
-  process.env.MJ_APIKEY_PUBLIC,
-  process.env.MJ_APIKEY_PRIVATE
-);
+const MAILJET_ENABLED = !!process.env.MJ_APIKEY_PUBLIC && !!process.env.MJ_APIKEY_PRIVATE;
 
-if (!process.env.MJ_APIKEY_PUBLIC || !process.env.MJ_APIKEY_PRIVATE) {
-  console.error('MAILJET ERROR: API Keys not found in environment variables. Email functionality disabled.');
-  // Optionally throw an error or use a mock client for development
+let mailjet = null;
+if (MAILJET_ENABLED) {
+  mailjet = Mailjet.apiConnect(
+    process.env.MJ_APIKEY_PUBLIC,
+    process.env.MJ_APIKEY_PRIVATE
+  );
+} else {
+  console.warn('[emailService] Mailjet API keys missing – e-mails disabled in this environment.');
 }
 
 // Helper function to get appropriate base URL for the current environment
@@ -25,10 +27,9 @@ const getAppBaseUrl = () => {
 };
 
 const sendPasswordResetEmail = async (toEmail, resetToken) => {
-  // Ensure API keys are available before attempting to send
-  if (!process.env.MJ_APIKEY_PUBLIC || !process.env.MJ_APIKEY_PRIVATE) {
-    console.error('Mailjet keys missing, cannot send password reset email.');
-    throw new Error('Email configuration error.'); // Prevent proceeding
+  if (!MAILJET_ENABLED) {
+    console.info('[emailService] sendPasswordResetEmail skipped (mail disabled).');
+    return { disabled: true };
   }
 
   // Construct the reset link using the environment-aware base URL
@@ -76,10 +77,9 @@ const sendPasswordResetEmail = async (toEmail, resetToken) => {
 };
 
 const sendVerificationEmail = async (toEmail, username, verificationToken) => {
-  // Ensure API keys are available before attempting to send
-  if (!process.env.MJ_APIKEY_PUBLIC || !process.env.MJ_APIKEY_PRIVATE) {
-    console.error('Mailjet keys missing, cannot send verification email.');
-    throw new Error('Email configuration error.'); // Prevent proceeding
+  if (!MAILJET_ENABLED) {
+    console.info('[emailService] sendVerificationEmail skipped (mail disabled).');
+    return { disabled: true };
   }
 
   // Construct the verification link using the environment-aware base URL
