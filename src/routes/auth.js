@@ -464,7 +464,14 @@ router.get('/check', authenticateJWT, (req, res) => {
 const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 
 // Google
-router.get('/oauth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+router.get('/oauth/google', (req, res, next) => {
+  const target = req.query.redirect || 'admin';
+  if (req.session) {
+    req.session.oauthRedirect = target;
+    console.log('[Google OAuth] Stored redirect in session:', req.sessionID, target);
+  }
+  passport.authenticate('google', { scope: ['profile', 'email'], prompt: 'select_account', state: target })(req, res, next);
+});
 router.get(
   '/oauth/google/callback',
   passport.authenticate('google', { session: false, failureRedirect: `${CLIENT_URL}/login?oauth=google&error=1` }),
@@ -478,6 +485,9 @@ router.get(
   passport.authenticate('github', { session: false, failureRedirect: `${CLIENT_URL}/login?oauth=github&error=1` }),
   AuthController.passportCallback
 );
+
+// Mobile installed-app OAuth token exchange
+router.post('/oauth/mobile/:provider', AuthController.mobileOauth);
 
 module.exports = router;
 

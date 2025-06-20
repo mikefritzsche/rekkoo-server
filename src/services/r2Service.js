@@ -17,7 +17,7 @@ let s3Client = null;
 
 const getS3Client = () => {
   if (!isR2Configured()) {
-    throw new Error("R2 service is not configured. Missing required environment variables (R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME).");
+    return null; // Gracefully handle missing config so server can still start
   }
   
   if (!s3Client) {

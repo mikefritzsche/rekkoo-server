@@ -11,11 +11,20 @@ const { authenticateJWT, checkPermissions } = require('../auth/middleware');
 const Mailjet = require('node-mailjet');
 const emailService = require('../services/emailService');
 const { validationResult } = require('express-validator');
+const fetch = require('node-fetch');
 
-const mailjet = new Mailjet({
-  apiKey: process.env.MJ_APIKEY_PUBLIC,
-  apiSecret: process.env.MJ_APIKEY_PRIVATE
-});
+// Prevent crash in dev when Mailjet keys are absent
+const MAILJET_ENABLED = !!process.env.MJ_APIKEY_PUBLIC && !!process.env.MJ_APIKEY_PRIVATE;
+
+let mailjet = null;
+if (MAILJET_ENABLED) {
+  mailjet = new Mailjet({
+    apiKey: process.env.MJ_APIKEY_PUBLIC,
+    apiSecret: process.env.MJ_APIKEY_PRIVATE,
+  });
+} else {
+  console.warn('[AuthController] Mailjet disabled – missing env keys');
+}
 
 const EXPIRES_IN = '30m';
 
@@ -822,13 +831,25 @@ const oauthCallback = async (req, res) => {
     const { email, providerId, name, profileImageUrl, emailVerified } = mockUser;
 
     const result = await db.transaction(async (client) => {
-      // Check if user exists via OAuth provider ID
+      // Look up provider row
+      let providerRes = await client.query(`SELECT id FROM oauth_providers WHERE provider_name = $1`, [provider]);
+      let providerRowId = providerRes.rows.length ? providerRes.rows[0].id : null;
+
+      // Insert provider row if missing
+      if (!providerRowId) {
+        const insertProv = await client.query(
+          `INSERT INTO oauth_providers (provider_name) VALUES ($1) RETURNING id`,
+          [provider]
+        );
+        providerRowId = insertProv.rows[0].id;
+      }
+
       let userResult = await client.query(
-        `SELECT u.* 
-         FROM users u 
-         JOIN user_oauth_identities oi ON u.id = oi.user_id 
-         WHERE oi.provider = $1 AND oi.provider_user_id = $2 AND u.deleted_at IS NULL`,
-        [provider, providerId]
+        `SELECT u.*
+         FROM users u
+         JOIN user_oauth_connections c ON u.id = c.user_id
+         WHERE c.provider_id = $1 AND c.provider_user_id = $2 AND u.deleted_at IS NULL`,
+        [providerRowId, providerId]
       );
       let user = userResult.rows[0];
 
@@ -844,10 +865,13 @@ const oauthCallback = async (req, res) => {
           if (user) {
             // User exists with this email, link OAuth identity
             await client.query(
-              `INSERT INTO user_oauth_identities (user_id, provider, provider_user_id)
-               VALUES ($1, $2, $3)
-               ON CONFLICT (user_id, provider) DO UPDATE SET provider_user_id = $3`,
-              [user.id, provider, providerId]
+              `DELETE FROM user_oauth_connections WHERE user_id = $1 AND provider_id = $2`,
+              [user.id, providerRowId]
+            );
+            await client.query(
+              `INSERT INTO user_oauth_connections (user_id, provider_id, provider_user_id, access_token, refresh_token, token_expires_at, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, NULL, NOW() + INTERVAL '1 hour', NOW(), NOW())`,
+              [user.id, providerRowId, providerId, accessToken]
             );
           } else {
             // New user: Create user and link OAuth identity
@@ -860,9 +884,9 @@ const oauthCallback = async (req, res) => {
             user = newUserResult.rows[0];
 
             await client.query(
-              `INSERT INTO user_oauth_identities (user_id, provider, provider_user_id)
-               VALUES ($1, $2, $3)`,
-              [user.id, provider, providerId]
+              `INSERT INTO user_oauth_connections (user_id, provider_id, provider_user_id, access_token, refresh_token, token_expires_at, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, NULL, NOW() + INTERVAL '1 hour', NOW(), NOW())`,
+              [user.id, providerRowId, providerId, accessToken]
             );
 
             // Assign default role
@@ -903,16 +927,8 @@ const oauthCallback = async (req, res) => {
 
     // Redirect to frontend with tokens, or set cookies
     // Example: res.redirect(`${process.env.CLIENT_URL}/auth/callback?accessToken=${result.appAccessToken}&refreshToken=${result.appRefreshToken}`);
-    return res.status(200).json({
-      message: `Successfully authenticated with ${provider}`,
-      accessToken: result.appAccessToken,
-      refreshToken: result.appRefreshToken,
-      user: {
-        id: result.user.id,
-        username: result.user.username,
-        email: result.user.email
-      }
-    });
+    const redirectUrl = `${process.env.CLIENT_URL}/oauth/callback?accessToken=${result.appAccessToken}&refreshToken=${result.appRefreshToken}&userId=${result.user.id}`;
+    return res.redirect(redirectUrl);
 
   } catch (error) {
     console.error(`[OAuth ${provider}] Callback error:`, error);
@@ -931,6 +947,7 @@ const oauthCallback = async (req, res) => {
  */
 const passportCallback = async (req, res) => {
   try {
+    console.log('[passportCallback] cookies header:', req.headers.cookie);
     if (!req.user || !req.user.id) {
       return res.status(400).json({ message: 'OAuth authentication failed – no user in request.' });
     }
@@ -968,18 +985,21 @@ const passportCallback = async (req, res) => {
     );
     const roles = rolesRes.rows.map(r => r.name);
 
-    // Decide whether to redirect or send JSON
-    if (process.env.CLIENT_URL) {
-      const redirectUrl = `${process.env.CLIENT_URL}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}`;
-      return res.redirect(redirectUrl);
-    }
+    // Decide which frontend should receive the tokens
+    const queryRedirect = req.query.state; // Google returns state param unchanged
 
-    return res.status(200).json({
-      message: 'OAuth login successful',
-      accessToken: result.accessToken,
-      refreshToken: result.refreshToken,
-      user: { id: user.id, username: user.username, email: user.email, roles }
-    });
+    let baseClient = process.env.CLIENT_URL || 'http://localhost:5173';
+    const redirectFlag = req.session?.oauthRedirect || queryRedirect;
+    console.log('[passportCallback] redirectFlag:', redirectFlag, 'sessionID', req.sessionID);
+    if (redirectFlag === 'app') {
+      baseClient = process.env.CLIENT_URL_APP || 'http://localhost:8081';
+    } else if (redirectFlag === 'admin') {
+      baseClient = process.env.CLIENT_URL_ADMIN || baseClient;
+    }
+    if (req.session) delete req.session.oauthRedirect;
+
+    const redirectUrl = `${baseClient}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
+    return res.redirect(redirectUrl);
   } catch (error) {
     console.error('passportCallback error:', error);
     return res.status(500).json({ message: 'Server error during OAuth login' });
@@ -1001,6 +1021,131 @@ const getAllUsers = [ // Array for multiple middleware + handler
   }
 ];
 
+// --- New: mobile OAuth token exchange (installed-app flow) ---
+const mobileOauth = async (req, res) => {
+  const { provider } = req.params;
+  if (provider !== 'google') {
+    return res.status(400).json({ message: 'Unsupported provider' });
+  }
+
+  const { accessToken, idToken } = req.body || {};
+
+  if (!idToken) {
+    return res.status(400).json({ message: 'idToken is required' });
+  }
+
+  try {
+    // Verify idToken with Google tokeninfo endpoint (lightweight; for production use google-auth-library).
+    const verifyRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`);
+    if (!verifyRes.ok) {
+      return res.status(401).json({ message: 'Invalid Google ID token' });
+    }
+    const payload = await verifyRes.json();
+
+    const email = payload.email;
+    const emailVerified = payload.email_verified === 'true' || payload.email_verified === true;
+    const providerId = payload.sub;
+    const name = payload.name;
+    const profileImageUrl = payload.picture;
+
+    // Re-use logic from oauthCallback (manual copy) to find/create user and issue tokens
+
+    const result = await db.transaction(async (client) => {
+      // Look up provider row
+      let providerRes = await client.query(`SELECT id FROM oauth_providers WHERE provider_name = $1`, [provider]);
+      let providerRowId = providerRes.rows.length ? providerRes.rows[0].id : null;
+
+      // Insert provider row if missing
+      if (!providerRowId) {
+        const insertProv = await client.query(
+          `INSERT INTO oauth_providers (provider_name) VALUES ($1) RETURNING id`,
+          [provider]
+        );
+        providerRowId = insertProv.rows[0].id;
+      }
+
+      let userResult = await client.query(
+        `SELECT u.*
+         FROM users u
+         JOIN user_oauth_connections c ON u.id = c.user_id
+         WHERE c.provider_id = $1 AND c.provider_user_id = $2 AND u.deleted_at IS NULL`,
+        [providerRowId, providerId]
+      );
+      let user = userResult.rows[0];
+
+      if (!user) {
+        if (email && emailVerified) {
+          userResult = await client.query(
+            `SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL`,
+            [email]
+          );
+          user = userResult.rows[0];
+
+          if (user) {
+            await client.query(
+              `DELETE FROM user_oauth_connections WHERE user_id = $1 AND provider_id = $2`,
+              [user.id, providerRowId]
+            );
+            await client.query(
+              `INSERT INTO user_oauth_connections (user_id, provider_id, provider_user_id, access_token, refresh_token, token_expires_at, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, NULL, NOW() + INTERVAL '1 hour', NOW(), NOW())`,
+              [user.id, providerRowId, providerId, accessToken]
+            );
+          } else {
+            const newUserResult = await client.query(
+              `INSERT INTO users (username, email, email_verified, profile_image_url, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, NOW(), NOW()) RETURNING *`,
+              [name || email.split('@')[0], email, emailVerified, profileImageUrl]
+            );
+            user = newUserResult.rows[0];
+
+            await client.query(
+              `INSERT INTO user_oauth_connections (user_id, provider_id, provider_user_id, access_token, refresh_token, token_expires_at, created_at, updated_at)
+               VALUES ($1, $2, $3, $4, NULL, NOW() + INTERVAL '1 hour', NOW(), NOW())`,
+              [user.id, providerRowId, providerId, accessToken]
+            );
+
+            await client.query(
+              `INSERT INTO user_roles (user_id, role_id)
+               VALUES ($1, (SELECT id FROM roles WHERE name = 'user'))`,
+              [user.id]
+            );
+          }
+        } else {
+          throw { status: 400, message: 'Verified email required' };
+        }
+      }
+
+      await client.query(
+        `UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [user.id]
+      );
+
+      const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
+      const appRefreshToken = generateRefreshToken();
+      const rtExpires = new Date();
+      rtExpires.setDate(rtExpires.getDate() + 30);
+
+      await client.query(
+        `INSERT INTO refresh_tokens (user_id, token, expires_at)
+         VALUES ($1,$2,$3)
+         ON CONFLICT (user_id, token) DO UPDATE SET expires_at = $3`,
+        [user.id, appRefreshToken, rtExpires]
+      );
+
+      return { accessToken: appAccessToken, refreshToken: appRefreshToken, userId: user.id };
+    });
+
+    return res.json(result);
+  } catch (error) {
+    console.error('[mobileOauth] error:', error);
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    return res.status(500).json({ message: 'Server error during mobile OAuth' });
+  }
+};
+
 module.exports = {
   register,
   verifyEmail,
@@ -1014,5 +1159,6 @@ module.exports = {
   changePassword,
   oauthCallback,
   passportCallback,
+  mobileOauth,
   getAllUsers
 }; 

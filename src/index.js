@@ -5,6 +5,7 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const { logger } = require('./utils/logger');
 const { worker: embeddingQueueWorker } = require('./workers/embeddingQueueWorker');
+const expressSession = require('express-session');
 
 dotenv.config();
 
@@ -107,6 +108,18 @@ app.use(cors({
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
+// ---- Session Middleware (must come before passport to allow passport to access session) ----
+app.use(expressSession({
+  secret: process.env.SESSION_SECRET || 'rekkoo_session_secret',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+  },
+}));
+
 // ---- Passport ----
 const passport = require('./auth/passport');
 app.use(passport.initialize());
@@ -191,7 +204,7 @@ app.use((err, req, res, next) => {
 
 // --- 9. Start Server ---
 server.listen(PORT, () => {
-  console.log(`env: `, process.env.AI_SERVER_ENV, process.env.AI_SERVER_URL_LOCAL, process.env.AI_SERVER_URL_REMOTE)
+  console.log(`env: `, process.env.CLIENT_URL_APP, process.env.CLIENT_URL_ADMIN, process.env.AI_SERVER_ENV, process.env.AI_SERVER_URL_LOCAL, process.env.AI_SERVER_URL_REMOTE)
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`Socket.IO listening on port ${PORT}`);
 

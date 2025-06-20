@@ -1,4 +1,4 @@
-const { generatePresignedPutUrl, generateUniqueKey, isR2Configured, s3Client } = require('../services/r2Service');
+const { generatePresignedPutUrl, generateUniqueKey, isR2Configured } = require('../services/r2Service');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 
 /**
@@ -91,7 +91,8 @@ function uploadControllerFactory(socketService = null) {
     });
 
     try {
-      // Use the s3Client getter from r2Service
+      // Lazy load s3Client to avoid requiring it when R2 is not configured
+      const { s3Client } = require('../services/r2Service');
       const client = s3Client;
       await client.send(command);
       console.log(`[Server Upload] Successfully uploaded ${uniqueKey} to R2 bucket ${process.env.R2_BUCKET_NAME}.`);
