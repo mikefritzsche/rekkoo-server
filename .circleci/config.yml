@@ -137,6 +137,7 @@ commands:
               docker-compose.yml \
               ${DOCKER_COMPOSE_OVERRIDE} \
               scripts/deploy.sh \
+              scripts/debug-env.sh \
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
             echo "✅ Configuration files copied successfully"
       - run:
@@ -222,6 +223,10 @@ commands:
             ssh -o StrictHostKeyChecking=no ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST} "
               cd ${DEPLOY_DIR}
               chmod +x deploy.sh
+              chmod +x scripts/debug-env.sh
+              
+              echo '🔍 Running environment debug script...'
+              ./scripts/debug-env.sh
               
               echo '🔧 Setting environment variables...'
               export SAFE_BRANCH_NAME=${SAFE_BRANCH_NAME}
