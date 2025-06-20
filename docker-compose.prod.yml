@@ -6,6 +6,7 @@ services:
       target: production
     env_file:
       - .env
+      - .env.common
     environment:
       - PORT: ${PORT}
       - HOST: ${HOST}

@@ -1,6 +1,7 @@
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const GitHubStrategy = require('passport-github2').Strategy;
+const AppleStrategy = require('passport-apple').Strategy;
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 const db = require('../config/db');
@@ -137,6 +138,28 @@ if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
         scope: ['user:email'],
       },
       makeVerify('github')
+    )
+  );
+}
+
+// Apple (web) -------------------------------------------------------------
+if (
+  process.env.APPLE_CLIENT_ID &&
+  process.env.APPLE_TEAM_ID &&
+  process.env.APPLE_KEY_ID &&
+  process.env.APPLE_PRIVATE_KEY
+) {
+  passport.use(
+    new AppleStrategy(
+      {
+        clientID: process.env.APPLE_CLIENT_ID,
+        teamID: process.env.APPLE_TEAM_ID,
+        keyID: process.env.APPLE_KEY_ID,
+        privateKeyString: process.env.APPLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        callbackURL: process.env.APPLE_CALLBACK_URL || '/v1.0/auth/oauth/apple/callback',
+        scope: ['name', 'email'],
+      },
+      makeVerify('apple')
     )
   );
 }

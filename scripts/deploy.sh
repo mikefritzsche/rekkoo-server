@@ -18,27 +18,54 @@ check_status() {
 # Function to set up environment files
 setup_env() {
     echo "Setting up environment files..."
-    # First, get .env.common from parent directory if it doesn't exist
-    if [ ! -f .env.common ]; then
-        cp ../.env.common .
-    fi
-
-    # Copy main .env from parent directory, overwriting if it exists
-    if [ -f ../.env ]; then
-        echo "Copying .env from parent directory..."
-        cp -f ../.env .
-        # Ensure the copy was successful
-        if [ $? -eq 0 ]; then
-            echo "Successfully copied .env file"
-            echo "Current .env contents:"
-            cat .env
+    
+    # Check for environment files copied by CircleCI
+    echo "Available environment files:"
+    ls -la .env* 2>/dev/null || echo "No .env files found"
+    
+    # Priority order: .env.production > .env.staging > .env.development > .env.common > .env
+    # Use the most appropriate file for the environment
+    
+    if [ -f .env.production ]; then
+        echo "Using .env.production as primary environment file"
+        cp .env.production .env
+    elif [ -f .env.staging ]; then
+        echo "Using .env.staging as primary environment file"
+        cp .env.staging .env
+    elif [ -f .env.development ]; then
+        echo "Using .env.development as primary environment file"
+        cp .env.development .env
+    elif [ -f .env.common ]; then
+        echo "Using .env.common as primary environment file"
+        cp .env.common .env
+    elif [ -f .env ]; then
+        echo "Using existing .env file"
+    else
+        echo "⚠️  No environment files found!"
+        echo "Expected files: .env.production, .env.staging, .env.development, .env.common, or .env"
+        
+        # Fallback: try parent directory (backward compatibility)
+        if [ -f ../.env.common ]; then
+            echo "Fallback: copying .env.common from parent directory..."
+            cp ../.env.common .env
         else
-            echo "Failed to copy .env file"
+            echo "❌ No environment configuration found. Deployment may fail."
             exit 1
         fi
+    fi
+    
+    # Verify we have a working .env file
+    if [ -f .env ]; then
+        echo "✅ Environment file configured successfully"
+        echo "📋 Environment file summary:"
+        echo "  Lines: $(wc -l < .env)"
+        echo "  Size: $(du -h .env | cut -f1)"
+        # Show first few non-comment, non-empty lines (without values for security)
+        echo "  Sample variables:"
+        grep -E '^[A-Z_]+=.*' .env | head -5 | sed 's/=.*/=***/' | sed 's/^/    /'
     else
-        echo "No .env found in parent directory, creating from .env.common..."
-        cp .env.common .env
+        echo "❌ Failed to set up environment file"
+        exit 1
     fi
 }
 

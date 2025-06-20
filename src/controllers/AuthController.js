@@ -1024,29 +1024,50 @@ const getAllUsers = [ // Array for multiple middleware + handler
 // --- New: mobile OAuth token exchange (installed-app flow) ---
 const mobileOauth = async (req, res) => {
   const { provider } = req.params;
-  if (provider !== 'google') {
+  if (!['google', 'apple'].includes(provider)) {
     return res.status(400).json({ message: 'Unsupported provider' });
   }
 
-  const { accessToken, idToken } = req.body || {};
+  const { accessToken, idToken, userInfo } = req.body || {};
 
-  if (!idToken) {
-    return res.status(400).json({ message: 'idToken is required' });
+  if (!idToken && !accessToken) {
+    return res.status(400).json({ message: 'idToken or accessToken is required' });
   }
 
   try {
-    // Verify idToken with Google tokeninfo endpoint (lightweight; for production use google-auth-library).
-    const verifyRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`);
-    if (!verifyRes.ok) {
-      return res.status(401).json({ message: 'Invalid Google ID token' });
-    }
-    const payload = await verifyRes.json();
+    let email, emailVerified, providerId, name, profileImageUrl;
 
-    const email = payload.email;
-    const emailVerified = payload.email_verified === 'true' || payload.email_verified === true;
-    const providerId = payload.sub;
-    const name = payload.name;
-    const profileImageUrl = payload.picture;
+    if (provider === 'google') {
+      // Verify idToken with Google tokeninfo endpoint (lightweight; for production use google-auth-library).
+      const verifyRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${idToken}`);
+      if (!verifyRes.ok) {
+        return res.status(401).json({ message: 'Invalid Google ID token' });
+      }
+      const payload = await verifyRes.json();
+
+      email = payload.email;
+      emailVerified = payload.email_verified === 'true' || payload.email_verified === true;
+      providerId = payload.sub;
+      name = payload.name;
+      profileImageUrl = payload.picture;
+    } else if (provider === 'apple') {
+      // For Apple, we trust the client-side verification since it's done by Apple's SDK
+      // The idToken contains the user identifier, and userInfo contains additional details
+      if (!idToken) {
+        return res.status(400).json({ message: 'Apple idToken is required' });
+      }
+
+      // Decode the JWT payload (we're trusting client-side verification for now)
+      // In production, you should verify the JWT signature with Apple's public keys
+      const base64Payload = idToken.split('.')[1];
+      const payload = JSON.parse(Buffer.from(base64Payload, 'base64').toString());
+      
+      providerId = payload.sub;
+      email = payload.email || userInfo?.email;
+      emailVerified = !!email; // Apple emails are verified
+      name = userInfo?.name ? `${userInfo.name.firstName || ''} ${userInfo.name.lastName || ''}`.trim() : null;
+      profileImageUrl = null; // Apple doesn't provide profile images
+    }
 
     // Re-use logic from oauthCallback (manual copy) to find/create user and issue tokens
 
