@@ -23,50 +23,51 @@ setup_env() {
     echo "Available environment files:"
     ls -la .env* 2>/dev/null || echo "No .env files found"
     
-    # Priority order: .env.production > .env.staging > .env.development > .env.common > .env
-    # Use the most appropriate file for the environment
+    # Verify required environment files exist
+    # Docker Compose will automatically load them in the correct order
     
-    if [ -f .env.production ]; then
-        echo "Using .env.production as primary environment file"
-        cp .env.production .env
-    elif [ -f .env.staging ]; then
-        echo "Using .env.staging as primary environment file"
-        cp .env.staging .env
-    elif [ -f .env.development ]; then
-        echo "Using .env.development as primary environment file"
-        cp .env.development .env
-    elif [ -f .env.common ]; then
-        echo "Using .env.common as primary environment file"
-        cp .env.common .env
-    elif [ -f .env ]; then
-        echo "Using existing .env file"
+    if [ -f .env.common ]; then
+        echo "✅ Found .env.common (shared configuration)"
+        echo "📋 .env.common summary:"
+        echo "  Lines: $(wc -l < .env.common)"
+        echo "  Size: $(du -h .env.common | cut -f1)"
+        
+        # Check for Apple OAuth variables in .env.common
+        APPLE_VARS=$(grep -c "^APPLE_" .env.common 2>/dev/null || echo "0")
+        echo "  Apple OAuth variables: $APPLE_VARS found"
     else
-        echo "⚠️  No environment files found!"
-        echo "Expected files: .env.production, .env.staging, .env.development, .env.common, or .env"
+        echo "⚠️  .env.common not found!"
         
         # Fallback: try parent directory (backward compatibility)
         if [ -f ../.env.common ]; then
             echo "Fallback: copying .env.common from parent directory..."
-            cp ../.env.common .env
+            cp ../.env.common .env.common
         else
-            echo "❌ No environment configuration found. Deployment may fail."
+            echo "❌ No .env.common file found. This is required for shared configuration."
             exit 1
         fi
     fi
     
-    # Verify we have a working .env file
     if [ -f .env ]; then
-        echo "✅ Environment file configured successfully"
-        echo "📋 Environment file summary:"
+        echo "✅ Found .env (environment-specific overrides)"
+        echo "📋 .env summary:"
         echo "  Lines: $(wc -l < .env)"
         echo "  Size: $(du -h .env | cut -f1)"
-        # Show first few non-comment, non-empty lines (without values for security)
-        echo "  Sample variables:"
-        grep -E '^[A-Z_]+=.*' .env | head -5 | sed 's/=.*/=***/' | sed 's/^/    /'
     else
-        echo "❌ Failed to set up environment file"
-        exit 1
+        echo "ℹ️  No .env file found (environment-specific overrides)"
+        echo "This is optional - .env.common will provide base configuration"
     fi
+    
+    # Show sample variables from .env.common (without values for security)
+    if [ -f .env.common ]; then
+        echo "📋 Sample variables from .env.common:"
+        grep -E '^[A-Z_]+=.*' .env.common | head -5 | sed 's/=.*/=***/' | sed 's/^/    /'
+    fi
+    
+    echo "✅ Environment files validated successfully"
+    echo "🐳 Docker Compose will load files in this order:"
+    echo "  1. .env (if present) - environment-specific variables"
+    echo "  2. .env.common - shared variables (including Apple OAuth)"
 }
 
 # Function to display logs
