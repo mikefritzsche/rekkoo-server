@@ -140,25 +140,50 @@ commands:
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
             echo "✅ Configuration files copied successfully"
       - run:
-          name: Upload environment files (if provided)
+          name: Copy environment files
           command: |
-            echo "📄 Handling environment files..."
-            # Option 1: if ENV_FILE_CONTENT_BASE64 variable is set we create .env dynamically
-            if [ -n "${ENV_FILE_CONTENT_BASE64}" ]; then
-              echo "🔑 Detected ENV_FILE_CONTENT_BASE64 variable – generating .env"
-              echo "${ENV_FILE_CONTENT_BASE64}" | base64 -d > .env
+            echo "🔧 Copying environment files..."
+            echo "🗂️  Environment files to copy:"
+            
+            # Check which environment files exist locally
+            ENV_FILES=""
+            if [ -f ".env.common" ]; then
+              echo "  - .env.common"
+              ENV_FILES="$ENV_FILES .env.common"
             fi
-            # Option 2: copy any existing .env* files committed to repo
-            for f in .env .env.common .env.development .env.staging; do
-              if [ -f "$f" ]; then
-                echo "🔄 Preparing $f for transfer"
-                scp -o StrictHostKeyChecking=no "$f" ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
-              fi
-            done
-            if [ -f .env ]; then
-              echo "✅ .env uploaded"
+            if [ -f ".env.development" ]; then
+              echo "  - .env.development"
+              ENV_FILES="$ENV_FILES .env.development"
+            fi
+            if [ -f ".env.staging" ]; then
+              echo "  - .env.staging"
+              ENV_FILES="$ENV_FILES .env.staging"
+            fi
+            if [ -f ".env.production" ]; then
+              echo "  - .env.production"
+              ENV_FILES="$ENV_FILES .env.production"
+            fi
+            if [ -f ".env" ]; then
+              echo "  - .env"
+              ENV_FILES="$ENV_FILES .env"
+            fi
+            
+            # Copy environment files if any exist
+            if [ -n "$ENV_FILES" ]; then
+              echo "📤 Copying environment files to server..."
+              scp -o StrictHostKeyChecking=no \
+                $ENV_FILES \
+                ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
+              echo "✅ Environment files copied successfully"
+              
+              # Show what was copied (without revealing secrets)
+              echo "📋 Copied files:"
+              for file in $ENV_FILES; do
+                echo "  ✓ $file ($(wc -l < $file) lines)"
+              done
             else
-              echo "⚠️  No .env file found/generated – deploy.sh will attempt to create one from .env.common"
+              echo "⚠️  No environment files found to copy"
+              echo "Expected files: .env.common, .env.development, .env.staging, .env.production, .env"
             fi
       - run:
           name: Transfer Docker image to server

@@ -13,8 +13,6 @@ services:
     volumes:
       - ./src:/app/src
       - /app/node_modules
-    ports:
-      - "3100:3100"
     extra_hosts:
       - "ai-dev.rekkoo.com:172.18.0.6"  # AI server's actual IP in the proxy network
     labels:

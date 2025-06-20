@@ -486,6 +486,21 @@ router.get(
   AuthController.passportCallback
 );
 
+// Apple
+router.get('/oauth/apple', (req, res, next) => {
+  const target = req.query.redirect || 'admin';
+  if (req.session) {
+    req.session.oauthRedirect = target;
+    console.log('[Apple OAuth] Stored redirect in session:', req.sessionID, target);
+  }
+  passport.authenticate('apple', { scope: ['name', 'email'], state: target })(req, res, next);
+});
+router.get(
+  '/oauth/apple/callback',
+  passport.authenticate('apple', { session: false, failureRedirect: `${CLIENT_URL}/login?oauth=apple&error=1` }),
+  AuthController.passportCallback
+);
+
 // Mobile installed-app OAuth token exchange
 router.post('/oauth/mobile/:provider', AuthController.mobileOauth);
 
