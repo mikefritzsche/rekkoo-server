@@ -5,8 +5,8 @@ services:
     build:
       target: production
     env_file:
-      - .env.common
       - .env
+      - .env.common
     environment:
       - AI_SERVER_URL_LOCAL=http://ai-server:8000
       - AI_SERVER_URL_REMOTE=https://ai.rekkoo.com
