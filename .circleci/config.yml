@@ -140,6 +140,27 @@ commands:
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
             echo "✅ Configuration files copied successfully"
       - run:
+          name: Upload environment files (if provided)
+          command: |
+            echo "📄 Handling environment files..."
+            # Option 1: if ENV_FILE_CONTENT_BASE64 variable is set we create .env dynamically
+            if [ -n "${ENV_FILE_CONTENT_BASE64}" ]; then
+              echo "🔑 Detected ENV_FILE_CONTENT_BASE64 variable – generating .env"
+              echo "${ENV_FILE_CONTENT_BASE64}" | base64 -d > .env
+            fi
+            # Option 2: copy any existing .env* files committed to repo
+            for f in .env .env.common .env.development .env.staging; do
+              if [ -f "$f" ]; then
+                echo "🔄 Preparing $f for transfer"
+                scp -o StrictHostKeyChecking=no "$f" ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
+              fi
+            done
+            if [ -f .env ]; then
+              echo "✅ .env uploaded"
+            else
+              echo "⚠️  No .env file found/generated – deploy.sh will attempt to create one from .env.common"
+            fi
+      - run:
           name: Transfer Docker image to server
           no_output_timeout: 20m
           command: |
