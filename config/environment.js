@@ -43,6 +43,22 @@ class EnvironmentConfig {
   loadVariable(key, schema) {
     let value = process.env[key];
 
+    // Check for file-based secrets (Docker-style file mounting)
+    const fileKey = `${key}_FILE`;
+    if (process.env[fileKey] && !value) {
+      try {
+        const fs = require('fs');
+        value = fs.readFileSync(process.env[fileKey], 'utf8').trim();
+        console.log(`📁 Loaded ${key} from file: ${process.env[fileKey]}`);
+      } catch (error) {
+        if (this.isRequired(schema)) {
+          this.errors.push(`Failed to read secret file for ${key}: ${error.message}`);
+        } else {
+          this.warnings.push(`Failed to read optional secret file for ${key}: ${error.message}`);
+        }
+      }
+    }
+
     // Apply defaults if value is missing
     if (value === undefined && schema.default !== undefined) {
       value = schema.default;
