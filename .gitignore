@@ -7,3 +7,4 @@ node_modules
 .env.common.backup
 *.pem
 *.p8
+coverage/*
