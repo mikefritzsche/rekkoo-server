@@ -3,18 +3,27 @@ const express = require('express');
 const { authenticateJWT } = require('../auth/middleware'); // Adjust path if needed
 const validateListData = require('../middleware/validate-list-data'); // Adjust path if needed
 
-// --- Import the controller factory function ---
+// --- Import the controller factory functions ---
 const syncControllerFactory = require('../controllers/SyncController');
+const optimizedSyncControllerFactory = require('../controllers/OptimizedSyncController');
+const syncMonitor = require('../middleware/sync-monitoring');
 
 // --- Export a function that takes socketService ---
 module.exports = (socketService) => {
   const router = express.Router(); // Create router inside the function
 
-  // --- Instantiate the controller with the socketService ---
+  // --- Instantiate the controllers with the socketService ---
   const syncController = syncControllerFactory(socketService);
+  const optimizedSyncController = optimizedSyncControllerFactory(socketService);
 
-  // Get sync state (pull changes)
-  router.get('/changes', authenticateJWT, syncController.handleGetChanges);
+  // Apply monitoring middleware to all sync routes
+  router.use(syncMonitor.monitor());
+
+  // Get sync state (pull changes) - NEW OPTIMIZED VERSION
+  router.get('/changes', authenticateJWT, optimizedSyncController.handleGetChangesOptimized);
+  
+  // Get sync state (pull changes) - LEGACY VERSION (for fallback)
+  router.get('/changes/legacy', authenticateJWT, syncController.handleGetChanges);
 
   // Push changes
   router.post('/push', authenticateJWT, validateListData, syncController.handlePush);
@@ -30,6 +39,15 @@ module.exports = (socketService) => {
 
   // Get sync queue status
   router.get('/queue', authenticateJWT, syncController.handleGetQueue);
+
+  // New optimized endpoints
+  router.get('/stats', authenticateJWT, optimizedSyncController.getSyncStats);
+  
+  // Health check endpoint
+  router.get('/health', (req, res) => {
+    const healthStatus = syncMonitor.getHealthStatus();
+    res.status(healthStatus.status === 'healthy' ? 200 : 503).json(healthStatus);
+  });
 
   return router; // Return the configured router
 }; // End export function
