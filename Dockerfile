@@ -1,59 +1,56 @@
 # --- Base Stage ---
-FROM node:22-alpine AS base
-WORKDIR /app
-COPY package*.json ./
+FROM node:20-bullseye AS base
 
-# Add required system libraries for onnxruntime-node
-RUN apk add --no-cache \
-    libc6-compat \
-    gcompat
+# Install Chromium, editors, and dependencies for both ARM64 and x86_64
+RUN apt-get update && \
+    apt-get install -y \
+    chromium \
+    nano \
+    vim \
+    fonts-liberation \
+    libappindicator3-1 \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libnspr4 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    xdg-utils \
+    --no-install-recommends && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set Puppeteer to skip downloading Chromium (we use system Chromium)
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+WORKDIR /app
 
 # --- Dependencies Stage ---
 FROM base AS dependencies
-# Install dependencies with cache optimization
-RUN npm install --omit=dev --legacy-peer-deps --no-audit --no-fund \
-    && npm cache clean --force
-
-# --- Development Dependencies Stage ---
-FROM base AS dev-dependencies  
-RUN npm install --legacy-peer-deps --no-audit --no-fund \
-    && npm cache clean --force
+COPY package*.json ./
+RUN npm install --omit=dev --legacy-peer-deps --no-audit --no-fund && npm cache clean --force
 
 # --- Development Stage ---
-FROM dev-dependencies AS development
-COPY src src
-COPY .env* ./
+FROM base AS development
+COPY package*.json ./
+RUN npm install --legacy-peer-deps --no-audit --no-fund && npm cache clean --force
+COPY . .
 ENV NODE_ENV=development
-ENV PORT=3100
 EXPOSE 3100
 CMD ["npm", "run", "dev"]
 
 # --- Production Stage ---
-FROM node:22-alpine AS production
-WORKDIR /app
-
-# Create non-root user for security
-RUN addgroup -g 1001 -S nodejs \
-    && adduser -S nodejs -u 1001 \
-    && apk add --no-cache \
-    libc6-compat \
-    gcompat
-
-# Copy only production dependencies from dependencies stage
+FROM base AS production
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY --from=dependencies /app/package*.json ./
-
-# Copy source code
-COPY src src
-COPY .env* ./
-
-# Set proper ownership
-RUN chown -R nodejs:nodejs /app
-USER nodejs
-
+COPY . .
 ENV NODE_ENV=production
-ENV PORT=3100
 EXPOSE 3100
-
-# Use exec form for better signal handling
 CMD ["node", "src/index.js"]

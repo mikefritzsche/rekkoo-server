@@ -6,6 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node src/index.js",
+    "build:dev": "docker compose --env-file=.env.common --env-file=.env.development -f docker-compose.yml -f docker-compose.override.yml up -d --build",
     "dev": "nodemon src/index.js",
     "codemod:remove-console": "jscodeshift -t scripts/transform-remove-console.js --extensions=js,jsx,ts,tsx --ignore-pattern=**/node_modules/** .",
     "generate:session-secret": "node scripts/generate-session-secret.js"
@@ -16,6 +17,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.797.0",
     "@aws-sdk/s3-request-presigner": "^3.797.0",
+    "@brandonrjguth/recipe-scraper": "^2.3.0",
     "@google/generative-ai": "^0.22.0",
     "amazon-sp-api": "^1.1.5",
     "axios": "^1.8.2",
@@ -39,7 +41,6 @@
     "passport-github2": "^0.1.12",
     "passport-google-oauth20": "^2.0.0",
     "pg": "^8.13.1",
-    "puppeteer": "^24.4.0",
     "qs": "^6.14.0",
     "querystring": "^0.2.1",
     "socket.io": "^4.8.1",

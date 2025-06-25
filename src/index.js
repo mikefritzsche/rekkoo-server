@@ -24,6 +24,7 @@ const createStockImagesRouter = require('./routes/stock-images.routes');
 const createYTMusicRouter = require('./routes/ytmusic.routes');
 const createUploadRouter = require('./routes/upload.routes');
 const createEmbeddingsRouter = require('./routes/embeddings.routes');
+const createRecipeRouter = require('./routes/recipe.routes');
 
 // Import controllers that need initialization
 const favoritesControllerFactory = require('./controllers/FavoritesController');
@@ -35,6 +36,7 @@ const stockImagesControllerFactory = require('./controllers/StockImagesControlle
 const ytMusicControllerFactory = require('./controllers/YTMusicController');
 const uploadControllerFactory = require('./controllers/UploadController');
 const embeddingsControllerFactory = require('./controllers/EmbeddingsController');
+const recipeControllerFactory = require('./controllers/RecipeController');
 
 // Import standard routes
 const claudeRoutes = require('./routes/claude');
@@ -65,6 +67,7 @@ const stockImagesController = stockImagesControllerFactory(socketService);
 const ytMusicController = ytMusicControllerFactory(socketService);
 const uploadController = uploadControllerFactory(socketService);
 const embeddingsController = embeddingsControllerFactory(socketService);
+const recipeController = recipeControllerFactory(socketService);
 
 console.log('CORS_ORIGIN', process.env.CORS_ORIGIN);
 
@@ -179,6 +182,9 @@ app.use('/uploads', uploadRouter);
 
 const embeddingsRouter = createEmbeddingsRouter(embeddingsController);
 app.use('/v1.0/embeddings', embeddingsRouter);
+
+const recipeRouter = createRecipeRouter(recipeController);
+app.use('/v1.0/recipe', recipeRouter);
 
 app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));

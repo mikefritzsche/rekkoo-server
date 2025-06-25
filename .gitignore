@@ -5,6 +5,7 @@ node_modules
 .env.common
 .env.development
 .env.common.backup
+.env.backup
 *.pem
 *.p8
 coverage/*
