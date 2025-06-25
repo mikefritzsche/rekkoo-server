@@ -32,12 +32,15 @@ module.exports = (socketService) => {
       // const body = await page.content();
       // image-block-main-image-hover img
       const imageUrl = await page.evaluate(() => {
-        const img = document.querySelector('.kdp-poster__image');
+        // imgTagWrapperId
+        // image-block-main-image-hover
+        const img = document.querySelector('#imgTagWrapperId img');
+        // const img = document.querySelector('.kdp-poster__image');
         return img ? img.src : null;
       });
   
       await browser.close();
-      res.json({ pageTitle: title, imageUrl });
+      res.json({ url: testUrl, pageTitle: title, imageUrl });
     } catch (err) {
       console.error('Puppeteer test failed:', err);
       res.status(500).json({ error: 'Puppeteer test failed' });
