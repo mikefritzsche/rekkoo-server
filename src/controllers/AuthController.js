@@ -632,8 +632,8 @@ const forgotPassword = async (req, res) => {
 
       await client.query(
         `UPDATE users 
-         SET password_reset_token = $1,
-             password_reset_token_expires_at = $2,
+         SET reset_password_token = $1,
+             reset_password_token_expires_at = $2,
              updated_at = NOW()
          WHERE id = $3`,
         [resetToken, resetTokenExpiresAt, user.id]
@@ -664,8 +664,8 @@ const resetPassword = async (req, res) => {
     const result = await db.transaction(async (client) => {
       const userResult = await client.query(
         `SELECT id FROM users 
-         WHERE password_reset_token = $1 
-           AND password_reset_token_expires_at > NOW()
+         WHERE reset_password_token = $1 
+           AND reset_password_token_expires_at > NOW()
            AND deleted_at IS NULL`,
         [token]
       );
@@ -680,8 +680,8 @@ const resetPassword = async (req, res) => {
       await client.query(
         `UPDATE users 
          SET password_hash = $1,
-             password_reset_token = NULL,
-             password_reset_token_expires_at = NULL,
+             reset_password_token = NULL,
+             reset_password_token_expires_at = NULL,
              failed_login_attempts = 0, -- Reset failed attempts
              account_locked = false,    -- Unlock account
              lockout_until = NULL,
