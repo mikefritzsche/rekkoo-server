@@ -209,6 +209,7 @@ const resendVerification = async (req, res) => {
  * @route POST /auth/login
  */
 const login = async (req, res) => {
+  console.log('login process.env.JWT_SECRET', process.env.JWT_SECRET);
   try {
     const { username, email, password } = req.body;
     const identifier = username || email;
@@ -301,7 +302,7 @@ const login = async (req, res) => {
 
       // Generate JWT token (short-lived access token)
       const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
-        expiresIn: EXPIRES_IN // Token expires in 1 hour
+        expiresIn: EXPIRES_IN
       });
 
       // Generate refresh token

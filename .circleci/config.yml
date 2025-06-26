@@ -141,51 +141,69 @@ commands:
               ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
             echo "✅ Configuration files copied successfully"
       - run:
-          name: Copy environment files
+          name: Create environment files from CircleCI variables
           command: |
-            echo "🔧 Copying environment files..."
-            echo "🗂️  Environment files to copy:"
+            echo "🔧 Creating environment files from CircleCI environment variables..."
             
-            # Check which environment files exist locally
-            ENV_FILES=""
-            if [ -f ".env.common" ]; then
-              echo "  - .env.common"
-              ENV_FILES="$ENV_FILES .env.common"
-            fi
-            if [ -f ".env.development" ]; then
-              echo "  - .env.development"
-              ENV_FILES="$ENV_FILES .env.development"
-            fi
-            if [ -f ".env.staging" ]; then
-              echo "  - .env.staging"
-              ENV_FILES="$ENV_FILES .env.staging"
-            fi
-            if [ -f ".env.production" ]; then
-              echo "  - .env.production"
-              ENV_FILES="$ENV_FILES .env.production"
-            fi
-            if [ -f ".env" ]; then
-              echo "  - .env"
-              ENV_FILES="$ENV_FILES .env"
-            fi
+            # Create .env.common with shared variables
+            echo "# Generated from CircleCI environment variables - $(date)" > /tmp/.env.common
+            echo "# Shared configuration for all environments" >> /tmp/.env.common
+            echo "" >> /tmp/.env.common
             
-            # Copy environment files if any exist
-            if [ -n "$ENV_FILES" ]; then
-              echo "📤 Copying environment files to server..."
-              scp -o StrictHostKeyChecking=no \
-                $ENV_FILES \
-                ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
-              echo "✅ Environment files copied successfully"
+            # Create environment-specific .env file
+            echo "# Generated from CircleCI environment variables - $(date)" > /tmp/.env
+            echo "# Environment: << parameters.environment >>" >> /tmp/.env
+            echo "NODE_ENV=<< parameters.environment >>" >> /tmp/.env
+            echo "" >> /tmp/.env
+            
+            # Get all environment variables and filter them
+            env | sort | while IFS='=' read -r var_name var_value; do
+              # Skip empty variable names or values
+              if [ -z "$var_name" ] || [ -z "$var_value" ]; then
+                continue
+              fi
               
-              # Show what was copied (without revealing secrets)
-              echo "📋 Copied files:"
-              for file in $ENV_FILES; do
-                echo "  ✓ $file ($(wc -l < $file) lines)"
-              done
-            else
-              echo "⚠️  No environment files found to copy"
-              echo "Expected files: .env.common, .env.development, .env.staging, .env.production, .env"
+              # Skip system and CircleCI variables
+              case "$var_name" in
+                PATH|HOME|USER|SHELL|PWD|OLDPWD|SHLVL|_|TERM) continue ;;
+                CIRCLE_*|CI|DEBIAN_FRONTEND|LANG|LC_ALL|TZ) continue ;;
+                BASH_ENV|SAFE_BRANCH_NAME|DEPLOY_DIR|DOCKER_COMPOSE_OVERRIDE|API_URL) continue ;;
+                HETZNER_*|CIRCLECI_TOKEN) continue ;;
+              esac
+              
+              # Add to appropriate file based on variable type
+              case "$var_name" in
+                GOOGLE_*|APPLE_*|CLIENT_URL*|CORS_ORIGIN)
+                  # Public/shared variables go to .env.common
+                  echo "$var_name=$var_value" >> /tmp/.env.common
+                  ;;
+                *)
+                  # Private/environment-specific variables go to .env
+                  echo "$var_name=$var_value" >> /tmp/.env
+                  ;;
+              esac
+            done
+            
+            echo "✅ Environment files created dynamically"
+            echo "📋 .env.common contents ($(wc -l < /tmp/.env.common) lines):"
+            cat /tmp/.env.common | sed 's/=.*/=***/' | head -10
+            echo "📋 .env contents ($(wc -l < /tmp/.env) lines):"
+            cat /tmp/.env | sed 's/=.*/=***/' | head -10
+            
+            # Verify files were created
+            if [[ ! -f /tmp/.env.common ]] || [[ ! -f /tmp/.env ]]; then
+              echo "❌ Error: Environment files were not created properly"
+              exit 1
             fi
+      - run:
+          name: Transfer environment files to server
+          command: |
+            echo "📤 Transferring environment files to server..."
+            scp -o StrictHostKeyChecking=no \
+              /tmp/.env.common \
+              /tmp/.env \
+              ${HETZNER_DEPLOY_USER}@${HETZNER_VPS_HOST}:${DEPLOY_DIR}/
+            echo "✅ Environment files transferred successfully"
       - run:
           name: Transfer Docker image to server
           no_output_timeout: 20m
