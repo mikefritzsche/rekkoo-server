@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX user_roles_user_id_role_id_unique ON public.user_roles (user_id, role_id) WHERE (deleted_at IS NULL);
