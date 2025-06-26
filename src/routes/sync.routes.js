@@ -43,8 +43,11 @@ module.exports = (socketService) => {
   // New optimized endpoints
   router.get('/stats', authenticateJWT, optimizedSyncController.getSyncStats);
   
-  // Health check endpoint
-  router.get('/health', (req, res) => {
+  // Health check endpoint (includes Valkey status)
+  router.get('/health', optimizedSyncController.getHealthCheck);
+
+  // System health check endpoint (monitoring stats)
+  router.get('/system-health', (req, res) => {
     const healthStatus = syncMonitor.getHealthStatus();
     res.status(healthStatus.status === 'healthy' ? 200 : 503).json(healthStatus);
   });

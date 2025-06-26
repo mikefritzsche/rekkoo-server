@@ -40,18 +40,19 @@ class SyncMonitor {
 
       // Track request
       const originalSend = res.send;
+      const self = this;
       res.send = function(data) {
         const endTime = Date.now();
         const responseTime = endTime - startTime;
         
         // Record metrics
-        this.requestTimes.push(responseTime);
-        if (this.requestTimes.length > 100) {
-          this.requestTimes.shift();
+        self.requestTimes.push(responseTime);
+        if (self.requestTimes.length > 100) {
+          self.requestTimes.shift();
         }
         
-        this.metrics.activeConnections--;
-        this.metrics.avgResponseTime = this.requestTimes.reduce((a, b) => a + b, 0) / this.requestTimes.length;
+        self.metrics.activeConnections--;
+        self.metrics.avgResponseTime = self.requestTimes.reduce((a, b) => a + b, 0) / self.requestTimes.length;
         
         // Log slow requests
         if (responseTime > 5000) {
@@ -59,11 +60,11 @@ class SyncMonitor {
         }
         
         originalSend.call(this, data);
-      }.bind(this);
+      };
 
       // Track errors
       res.on('error', (error) => {
-        this.errors.push(Date.now());
+        self.errors.push(Date.now());
         logger.error('[SyncMonitor] Sync request error:', error);
       });
 

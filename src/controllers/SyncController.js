@@ -1059,10 +1059,12 @@ function syncControllerFactory(socketService) {
             }
 
             // TODO: Handle list_items with details deletion if necessary (simplified for now)
-            if (tableName === 'list_items' && data.api_metadata) {
-                // Logic to find existing movie_detail_id
-                // Decide to DELETE existing movie_detail or UPDATE old if not found (and maybe insert new)
-                // This is more complex than create.
+            // Note: For delete operations, we don't have access to the original data.api_metadata
+            // If needed, we could query the database to fetch the list_item before deletion
+            // to get the api_metadata, but for now we skip this complex logic.
+            if (tableName === 'list_items') {
+                // Logic for cleaning up related movie_details/tv_details could go here
+                // For now, we rely on database CASCADE constraints or separate cleanup jobs
             }
           } else {
             logger.warn(`[SyncController] Unknown operation '${operation}' for table '${tableName}'. Skipping.`);

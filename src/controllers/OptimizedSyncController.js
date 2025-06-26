@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { logger } = require('../utils/logger');
+const syncOptimization = require('../config/sync-optimization');
 
 function optimizedSyncControllerFactory(socketService) {
   
@@ -48,7 +49,7 @@ function optimizedSyncControllerFactory(socketService) {
               (SELECT row_to_json(f.*) FROM public.followers f WHERE f.id = cl.record_id::uuid AND (f.follower_id = $1 OR f.followed_id = $1) AND f.deleted_at IS NULL)
             WHEN cl.operation != 'delete' AND cl.table_name = 'notifications' THEN
               (SELECT row_to_json(n.*) FROM public.notifications n WHERE n.id = cl.record_id::uuid AND n.user_id = $1 AND n.deleted_at IS NULL)
-            ELSE cl.change_data
+            ELSE cl.change_data::json
           END as current_data
         FROM public.change_log cl
         WHERE cl.user_id = $1 
@@ -148,9 +149,47 @@ function optimizedSyncControllerFactory(socketService) {
     }
   };
 
+  /**
+   * Health check endpoint with cache status
+   */
+  const getHealthCheck = async (req, res) => {
+    try {
+      // Test database connection
+      const dbResult = await db.query('SELECT 1 as healthy');
+      
+      // Get cache stats
+      const cacheStats = syncOptimization.getStats();
+      
+      res.status(200).json({
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        database: {
+          connected: dbResult.rows.length > 0,
+          status: 'healthy'
+        },
+        cache: {
+          type: cacheStats.type,
+          connected: cacheStats.connected,
+          stats: cacheStats.stats,
+          size: cacheStats.cacheSize,
+          locks: cacheStats.lockCount
+        }
+      });
+
+    } catch (error) {
+      logger.error('[OptimizedSyncController] Health check failed:', error);
+      res.status(500).json({
+        status: 'unhealthy',
+        timestamp: new Date().toISOString(),
+        error: error.message
+      });
+    }
+  };
+
   return {
     handleGetChangesOptimized,
-    getSyncStats
+    getSyncStats,
+    getHealthCheck
   };
 }
 

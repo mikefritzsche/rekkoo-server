@@ -2,6 +2,8 @@ services:
   rekkoo-server:
     image: rekkoo-server-staging-${SAFE_BRANCH_NAME}:latest
     container_name: rekkoo-server-staging-${SAFE_BRANCH_NAME}
+    environment:
+      - VALKEY_URL=redis://valkey:6379
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
@@ -10,3 +12,9 @@ services:
       - "traefik.http.routers.rekkoo-staging-${SAFE_BRANCH_NAME}.entrypoints=websecure"
       - "traefik.http.routers.rekkoo-staging-${SAFE_BRANCH_NAME}.tls=true"
       - "traefik.http.routers.rekkoo-staging-${SAFE_BRANCH_NAME}.service=rekkoo-server-staging-${SAFE_BRANCH_NAME}"
+
+  valkey:
+    container_name: rekkoo-valkey-staging-${SAFE_BRANCH_NAME}
+    ports: []  # No external ports in staging
+    labels:
+      - "traefik.enable=false"

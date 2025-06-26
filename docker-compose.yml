@@ -7,10 +7,29 @@ services:
     restart: unless-stopped
     environment:
       JWT_SECRET: ${JWT_SECRET}
+      VALKEY_URL: redis://valkey:6379
     networks:
       - proxy
     env_file:
       - .env.common
+    depends_on:
+      - valkey
+
+  valkey:
+    image: valkey/valkey:8.0-alpine
+    container_name: rekkoo-valkey
+    restart: unless-stopped
+    command: valkey-server /usr/local/etc/valkey/valkey.conf
+    volumes:
+      - ./valkey.conf:/usr/local/etc/valkey/valkey.conf:ro
+      - valkey_data:/data
+    networks:
+      - proxy
+    # No external ports - only accessible via internal Docker network
+
+volumes:
+  valkey_data:
+    driver: local
 
 networks:
   proxy:

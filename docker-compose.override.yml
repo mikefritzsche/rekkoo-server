@@ -7,6 +7,7 @@ services:
       - AI_SERVER_URL_LOCAL=http://ai-server:8000
       - AI_SERVER_URL_REMOTE=https://ai.rekkoo.com
       - AI_SERVER_ENV=local
+      - VALKEY_URL=redis://valkey:6379
     env_file:
       - .env.common
       - .env.development
@@ -24,3 +25,11 @@ services:
       - "traefik.http.routers.rekkoo-server-api.rule=Host(`api-dev.rekkoo.com`)"
       - "traefik.http.routers.rekkoo-server-api.entrypoints=web"
       - "traefik.http.services.rekkoo-server-api.loadbalancer.server.port=3100"
+
+  valkey:
+    container_name: rekkoo-valkey-dev
+    labels:
+      - "traefik.enable=false"  # Don't expose via Traefik
+    ports:
+      - "6379:6379"  # TEMPORARY: For GUI access - remove when done
+    # No external ports - accessible via docker exec if debugging needed
