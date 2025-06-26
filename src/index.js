@@ -47,6 +47,7 @@ const amazonRoutes = require('./routes/amazon.routes');
 const geminiRoutes = require('./routes/gemini.routes');
 const openlibraryRoutes = require('./routes/openlibrary.routes');
 const adminRoutes = require('./routes/admin.routes');
+const invitationRoutes = require('./routes/invitations.routes');
 const { log } = require('console');
 
 // --- 2. Initialize Express App and HTTP Server ---
@@ -141,6 +142,9 @@ app.use('/amazon', amazonRoutes);
 
 // Admin routes (requires admin role)
 app.use('/v1.0/admin', adminRoutes);
+
+// Invitation routes (requires authentication)
+app.use('/v1.0/invitations', invitationRoutes);
 
 async function checkHealth() {
   try {

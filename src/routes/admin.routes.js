@@ -1,6 +1,7 @@
 const express = require('express');
 const { authenticateJWT } = require('../auth/middleware');
 const db = require('../config/db');
+const invitationService = require('../services/invitationService');
 
 const router = express.Router();
 
@@ -177,16 +178,19 @@ router.get('/metrics', authenticateJWT, async (req, res) => {
 
     const [{ rows: usersCnt },
            { rows: listsCnt },
-           { rows: queueCnt }] = await Promise.all([
+           { rows: queueCnt },
+           { rows: invitesCnt }] = await Promise.all([
       db.query('SELECT COUNT(*) FROM users  WHERE deleted_at IS NULL'),
       db.query('SELECT COUNT(*) FROM lists  WHERE deleted_at IS NULL'),
-      db.query("SELECT COUNT(*) FROM embedding_queue WHERE status = 'pending'")
+      db.query("SELECT COUNT(*) FROM embedding_queue WHERE status = 'pending'"),
+      db.query("SELECT COUNT(*) FROM invitations WHERE status = 'pending' AND deleted_at IS NULL")
     ]);
 
     res.json({
       totalUsers:        Number(usersCnt[0].count),
       activeLists:       Number(listsCnt[0].count),
-      embeddingsPending: Number(queueCnt[0].count)
+      embeddingsPending: Number(queueCnt[0].count),
+      pendingInvitations: Number(invitesCnt[0].count)
     });
   } catch (err) {
     console.error('Admin metrics error', err);
@@ -281,6 +285,143 @@ router.put('/lists/:id', authenticateJWT, async (req, res) => {
     res.sendStatus(204);
   } catch (err) {
     console.error('Admin update list error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ===== INVITATION MANAGEMENT ROUTES =====
+
+// GET /v1.0/admin/invitations – list all invitations (paginated)
+router.get('/invitations', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+    const offset = parseInt(req.query.offset || '0', 10);
+
+    const invitationsRes = await db.query(
+      `SELECT i.id,
+              i.email,
+              i.invitation_code,
+              i.status,
+              i.expires_at,
+              i.created_at,
+              i.accepted_at,
+              u.username AS inviter_username,
+              u.email AS inviter_email,
+              au.username AS accepted_by_username,
+              au.email AS accepted_by_email,
+              COUNT(*) OVER() AS total_count
+       FROM invitations i
+       JOIN users u ON u.id = i.inviter_id
+       LEFT JOIN users au ON au.id = i.accepted_by_user_id
+       WHERE i.deleted_at IS NULL
+       ORDER BY i.created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset],
+    );
+
+    const invitations = invitationsRes.rows;
+    const total = invitations.length ? parseInt(invitations[0].total_count, 10) : 0;
+    invitations.forEach((r) => delete r.total_count);
+    
+    res.json({ invitations, total });
+  } catch (err) {
+    console.error('Admin invitations list error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// GET /v1.0/admin/invitation-stats – get invitation statistics
+router.get('/invitation-stats', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const stats = await invitationService.getInvitationStats();
+    res.json({ stats });
+  } catch (err) {
+    console.error('Admin invitation stats error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// DELETE /v1.0/admin/invitations/:id – cancel/delete invitation
+router.delete('/invitations/:id', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const invitationId = req.params.id;
+    
+    // Admin can force cancel any invitation by setting status to cancelled
+    await db.query(
+      'UPDATE invitations SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      ['cancelled', invitationId]
+    );
+    
+    res.json({ success: true, message: 'Invitation cancelled' });
+  } catch (err) {
+    console.error('Admin cancel invitation error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// POST /v1.0/admin/invitations/:id/resend – resend invitation
+router.post('/invitations/:id/resend', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const invitationId = req.params.id;
+    
+    // Get invitation details
+    const invitationRes = await db.query(
+      `SELECT i.*, u.username as inviter_username
+       FROM invitations i
+       JOIN users u ON i.inviter_id = u.id
+       WHERE i.id = $1 AND i.deleted_at IS NULL`,
+      [invitationId]
+    );
+
+    if (invitationRes.rows.length === 0) {
+      return res.status(404).json({ message: 'Invitation not found' });
+    }
+
+    const invitation = invitationRes.rows[0];
+
+    if (invitation.status !== 'pending') {
+      return res.status(400).json({ message: 'Can only resend pending invitations' });
+    }
+
+    // Resend email
+    await invitationService.sendInvitationEmail(invitation);
+    
+    res.json({ success: true, message: 'Invitation resent' });
+  } catch (err) {
+    console.error('Admin resend invitation error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// GET /v1.0/admin/users/:userId/invitations – get invitations for a specific user
+router.get('/users/:userId/invitations', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const { userId } = req.params;
+    const invitations = await invitationService.getInvitationsByInviter(userId);
+    
+    res.json({ invitations });
+  } catch (err) {
+    console.error('Admin user invitations error', err);
     res.status(500).json({ message: 'Server error' });
   }
 });

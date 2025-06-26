@@ -119,7 +119,52 @@ const sendVerificationEmail = async (toEmail, username, verificationToken) => {
   }
 };
 
+const sendInvitationEmail = async (toEmail, invitationToken, invitationCode, inviter, metadata = {}) => {
+  if (!MAILJET_ENABLED) {
+    console.info('[emailService] sendInvitationEmail skipped (mail disabled).');
+    return { disabled: true };
+  }
+
+  // Construct the invitation link using the environment-aware base URL
+  const appBaseUrl = getAppBaseUrl();
+  const invitationLink = `${appBaseUrl}/invite/${invitationToken}`;
+  const customMessage = metadata.message || '';
+
+  console.log(`Sending invitation email to: ${toEmail}`); // Log recipient
+
+  const request = mailjet
+    .post("send", { 'version': 'v3.1' })
+    .request({
+      "Messages": [
+        {
+          "From": {
+            "Email": "mike@mikefritzsche.com",
+            "Name": "Rekkoo App"
+          },
+          "To": [
+            {
+              "Email": toEmail
+            }
+          ],
+          "Subject": `${inviter.username} invited you to join Rekkoo!`,
+          "TextPart": `Hi there,\n\n${inviter.username} has invited you to join Rekkoo!\n\n${customMessage ? `Personal message: "${customMessage}"\n\n` : ''}You can accept this invitation by:\n\n1. Clicking this link: ${invitationLink}\n2. Or using invitation code: ${invitationCode}\n\nThis invitation will expire in 7 days.\n\nThanks,\nThe Rekkoo Team`,
+          "HTMLPart": `<h3>Hi there,</h3><p><strong>${inviter.username}</strong> has invited you to join Rekkoo!</p>${customMessage ? `<p><em>Personal message:</em> "${customMessage}"</p>` : ''}<p>You can accept this invitation by:</p><ol><li>Clicking this link: <a href="${invitationLink}">${invitationLink}</a></li><li>Or using invitation code: <strong>${invitationCode}</strong></li></ol><p>This invitation will expire in 7 days.</p><p>Thanks,<br/>The Rekkoo Team</p>`
+        }
+      ]
+    });
+
+  try {
+    const result = await request;
+    console.log('Invitation email sent successfully');
+    return result.body;
+  } catch (err) {
+    console.error('Mailjet send error:', err.statusCode, err.message, err.response?.body);
+    throw new Error('Failed to send invitation email.'); // Re-throw a generic error
+  }
+};
+
 module.exports = {
   sendPasswordResetEmail,
-  sendVerificationEmail
+  sendVerificationEmail,
+  sendInvitationEmail
 }; 
