@@ -22,8 +22,16 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=proxy"
-      - "traefik.http.routers.rekkoo-server-api.rule=Host(`api-dev.rekkoo.com`)"
-      - "traefik.http.routers.rekkoo-server-api.entrypoints=web"
+      # HTTP router for api-dev.rekkoo.com
+      - "traefik.http.routers.rekkoo-server-api-http.rule=Host(`api-dev.rekkoo.com`)"
+      - "traefik.http.routers.rekkoo-server-api-http.entrypoints=web"
+      - "traefik.http.routers.rekkoo-server-api-http.service=rekkoo-server-api"
+      # HTTPS router for api-dev.rekkoo.com
+      - "traefik.http.routers.rekkoo-server-api-https.rule=Host(`api-dev.rekkoo.com`)"
+      - "traefik.http.routers.rekkoo-server-api-https.entrypoints=websecure"
+      - "traefik.http.routers.rekkoo-server-api-https.tls=true"
+      - "traefik.http.routers.rekkoo-server-api-https.service=rekkoo-server-api"
+      # Service definition
       - "traefik.http.services.rekkoo-server-api.loadbalancer.server.port=3100"
 
   valkey:

@@ -86,7 +86,9 @@ app.use(cors({
       'http://api-dev.rekkoo.com',
       'https://app.rekkoo.com',
       'http://rekkoo-admin.localhost',
-      'https://admin.rekkoo.com'
+      'https://admin.rekkoo.com',
+      'http://admin-dev.rekkoo.com',
+      'https://admin-dev.rekkoo.com'
     ];
     
     // Check for exact matches first

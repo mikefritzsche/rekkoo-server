@@ -4,7 +4,8 @@ node_modules
 .env
 .env.common
 .env.development
-.env.common.backup
+.env.development.*
+.env.common.*
 .env.backup
 *.pem
 *.p8
@@ -12,3 +13,4 @@ coverage/*
 AuthKey_*.p8
 config/environments/development.env
 secrets/
+admin.code-workspace
