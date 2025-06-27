@@ -101,7 +101,7 @@ router.get('/', authenticateJWT, async (req, res) => {
                 status: inv.status,
                 expires_at: inv.expires_at,
                 created_at: inv.created_at,
-                metadata: JSON.parse(inv.metadata || '{}')
+                metadata: invitationService.parseMetadata(inv.metadata)
             }))
         });
     } catch (error) {
@@ -129,7 +129,7 @@ router.get('/validate/:tokenOrCode', async (req, res) => {
                 email: validation.invitation.email,
                 inviter_username: validation.invitation.inviter_username,
                 expires_at: validation.invitation.expires_at,
-                metadata: JSON.parse(validation.invitation.metadata || '{}')
+                metadata: invitationService.parseMetadata(validation.invitation.metadata)
             }
         });
     } catch (error) {

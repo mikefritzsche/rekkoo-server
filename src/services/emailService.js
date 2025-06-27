@@ -20,7 +20,7 @@ const getAppBaseUrl = () => {
   const nodeEnv = process.env.NODE_ENV || 'development';
   
   if (nodeEnv === 'production') {
-    return 'https://api.rekkoo.com';
+    return 'https://app.rekkoo.com';
   } else {
     return process.env.APP_BASE_URL || 'http://localhost:8081'; // Fallback for local dev
   }
@@ -127,7 +127,7 @@ const sendInvitationEmail = async (toEmail, invitationToken, invitationCode, inv
 
   // Construct the invitation link using the environment-aware base URL
   const appBaseUrl = getAppBaseUrl();
-  const invitationLink = `${appBaseUrl}/invite/${invitationToken}`;
+  const invitationLink = `${appBaseUrl}/invitation/accept/${invitationToken}`;
   const customMessage = metadata.message || '';
 
   console.log(`Sending invitation email to: ${toEmail}`); // Log recipient

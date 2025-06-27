@@ -999,7 +999,7 @@ const passportCallback = async (req, res) => {
     }
     if (req.session) delete req.session.oauthRedirect;
 
-    const redirectUrl = `${baseClient}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
+    const redirectUrl = `${baseClient}/oauth-callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
     return res.redirect(redirectUrl);
   } catch (error) {
     console.error('passportCallback error:', error);

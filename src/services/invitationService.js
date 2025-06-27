@@ -12,6 +12,28 @@ class InvitationService {
     }
 
     /**
+     * Safely parse metadata - handles both string and object formats
+     */
+    parseMetadata(metadata) {
+        if (!metadata) {
+            return {};
+        }
+        
+        if (typeof metadata === 'string') {
+            try {
+                return JSON.parse(metadata);
+            } catch (parseError) {
+                logger.warn('Failed to parse invitation metadata as JSON:', parseError);
+                return {};
+            }
+        } else if (typeof metadata === 'object') {
+            return metadata;
+        }
+        
+        return {};
+    }
+
+    /**
      * Generate a secure random invitation code
      */
     generateInvitationCode() {
@@ -342,7 +364,7 @@ class InvitationService {
             );
 
             const inviter = inviterResult.rows[0];
-            const metadata = JSON.parse(invitation.metadata || '{}');
+            const metadata = this.parseMetadata(invitation.metadata);
             
             await emailService.sendInvitationEmail(
                 invitation.email,
