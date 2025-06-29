@@ -7,6 +7,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node src/index.js",
     "build:dev": "docker compose --env-file=.env.common --env-file=.env.development -f docker-compose.yml -f docker-compose.override.yml up -d --build",
+    "stop:dev": "docker compose --env-file=.env.common --env-file=.env.development -f docker-compose.yml -f docker-compose.override.yml down",
     "dev": "nodemon src/index.js",
     "codemod:remove-console": "jscodeshift -t scripts/transform-remove-console.js --extensions=js,jsx,ts,tsx --ignore-pattern=**/node_modules/** .",
     "generate:session-secret": "node scripts/generate-session-secret.js",

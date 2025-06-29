@@ -644,7 +644,7 @@ const forgotPassword = async (req, res) => {
 
     if (result && result.user && result.resetToken) {
       // Send password reset email
-      const resetLink = `${process.env.CLIENT_URL}/reset-password?token=${result.resetToken}`;
+      const resetLink = `${process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com'}/reset-password?token=${result.resetToken}`;
       await emailService.sendPasswordResetEmail(result.user.email, result.user.username, resetLink);
     }
 
@@ -926,9 +926,9 @@ const oauthCallback = async (req, res) => {
       return { appAccessToken, appRefreshToken, user };
     });
 
-    // Redirect to frontend with tokens, or set cookies
-    // Example: res.redirect(`${process.env.CLIENT_URL}/auth/callback?accessToken=${result.appAccessToken}&refreshToken=${result.appRefreshToken}`);
-    const redirectUrl = `${process.env.CLIENT_URL}/oauth/callback?accessToken=${result.appAccessToken}&refreshToken=${result.appRefreshToken}&userId=${result.user.id}`;
+    // Redirect to frontend with tokens, or set cookies (legacy - now handled by passportCallback)
+    const adminUrl = process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com';
+    const redirectUrl = `${adminUrl}/oauth/callback?accessToken=${result.appAccessToken}&refreshToken=${result.appRefreshToken}&userId=${result.user.id}`;
     return res.redirect(redirectUrl);
 
   } catch (error) {
@@ -937,8 +937,8 @@ const oauthCallback = async (req, res) => {
       return res.status(error.status).json({ message: error.message });
     }
     // Redirect to an error page on the frontend
-    // return res.redirect(`${process.env.CLIENT_URL}/auth/error?message=oauth_failed`);
-    return res.status(500).json({ message: `Server error during ${provider} OAuth process` });
+    const adminUrl = process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com';
+    return res.redirect(`${adminUrl}/auth/error?message=oauth_failed`);
   }
 };
 
@@ -989,21 +989,63 @@ const passportCallback = async (req, res) => {
     // Decide which frontend should receive the tokens
     const queryRedirect = req.query.state; // Google returns state param unchanged
 
-    let baseClient = process.env.CLIENT_URL || 'http://localhost:5173';
     const redirectFlag = req.session?.oauthRedirect || queryRedirect;
     console.log('[passportCallback] redirectFlag:', redirectFlag, 'sessionID', req.sessionID);
+    
+    let redirectUrl;
     if (redirectFlag === 'app') {
-      baseClient = process.env.CLIENT_URL_APP || 'http://localhost:8081';
+      // For mobile app, determine the redirect approach based on user agent
+      const userAgent = req.get('User-Agent') || '';
+      const isMobileBrowser = /Mobile|Android|iPhone|iPad/.test(userAgent);
+      const isWebBrowser = !isMobileBrowser || /Chrome/.test(userAgent) || /Firefox/.test(userAgent) || /Edge/.test(userAgent);
+      
+      console.log('[passportCallback] User agent detection:', {
+        userAgent,
+        isMobileBrowser,
+        isWebBrowser,
+        redirectFlag
+      });
+      
+      const appUrl = process.env.CLIENT_URL_APP || 'http://localhost:8081';
+      
+      if (isWebBrowser) {
+        // For web browsers (desktop/laptop), redirect to oauth-callback route
+        redirectUrl = `${appUrl}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
+        console.log('[passportCallback] Using web browser approach:', redirectUrl);
+      } else {
+        // For mobile browsers (iOS Safari, Android Chrome, etc.), use mobile platform flag
+        redirectUrl = `${appUrl}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}&platform=mobile`;
+        console.log('[passportCallback] Using mobile browser approach:', redirectUrl);
+      }
     } else if (redirectFlag === 'admin') {
-      baseClient = process.env.CLIENT_URL_ADMIN || baseClient;
+      const adminUrl = process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com';
+      redirectUrl = `${adminUrl}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
+    } else {
+      // Default to app client for better UX
+      const appUrl = process.env.CLIENT_URL_APP || 'http://localhost:8081';
+      redirectUrl = `${appUrl}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
     }
+    
     if (req.session) delete req.session.oauthRedirect;
 
-    const redirectUrl = `${baseClient}/oauth-callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
+    console.log('[passportCallback] Redirecting to:', redirectUrl);
     return res.redirect(redirectUrl);
   } catch (error) {
     console.error('passportCallback error:', error);
-    return res.status(500).json({ message: 'Server error during OAuth login' });
+    
+    // Handle error redirects based on the target
+    const redirectFlag = req.session?.oauthRedirect || req.query.state;
+    let errorRedirectUrl;
+    
+    if (redirectFlag === 'app') {
+      const appUrl = process.env.CLIENT_URL_APP || 'http://localhost:8081';
+      errorRedirectUrl = `${appUrl}/oauth/callback?error=authentication_failed`;
+    } else {
+      const adminUrl = process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com';
+      errorRedirectUrl = `${adminUrl}/login?oauth=google&error=1`;
+    }
+    
+    return res.redirect(errorRedirectUrl);
   }
 };
 

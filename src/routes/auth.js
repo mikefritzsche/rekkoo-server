@@ -461,48 +461,141 @@ router.get('/check', authenticateJWT, (req, res) => {
 });
 
 // ===================== Passport OAuth Routes =====================
-const CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
+const CLIENT_URL_ADMIN = process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com';
+const CLIENT_URL_APP = process.env.CLIENT_URL_APP || 'http://localhost:8081';
 
-// Google
-router.get('/oauth/google', (req, res, next) => {
-  const target = req.query.redirect || 'admin';
+// Helper functions for OAuth redirect management
+const validateOAuthRedirect = (target) => {
+  const validTargets = ['app', 'admin'];
+  return validTargets.includes(target);
+};
+
+const getFailureRedirect = (target, provider) => {
+  if (target === 'app') {
+    return `${CLIENT_URL_APP}/oauth/callback?error=authentication_failed`;
+  } else {
+    return `${CLIENT_URL_ADMIN}/login?oauth=${provider}&error=1`;
+  }
+};
+
+const setupOAuthRedirect = (req, target, provider) => {
+  // Validate redirect target
+  if (!validateOAuthRedirect(target)) {
+    console.error(`[${provider} OAuth] Invalid redirect target:`, target);
+    throw new Error('Invalid redirect target. Must be "app" or "admin"');
+  }
+
+  // Store redirect target in session
   if (req.session) {
     req.session.oauthRedirect = target;
-    console.log('[Google OAuth] Stored redirect in session:', req.sessionID, target);
+    console.log(`[${provider} OAuth] Stored redirect in session:`, req.sessionID, target);
   }
-  passport.authenticate('google', { scope: ['profile', 'email'], prompt: 'select_account', state: target })(req, res, next);
+
+  return target;
+};
+
+// Google OAuth Routes
+router.get('/oauth/google', (req, res, next) => {
+  try {
+    const target = req.query.redirect || 'app'; // Default to app for better UX
+    setupOAuthRedirect(req, target, 'Google');
+
+    // Pass target as state parameter for additional security
+    passport.authenticate('google', { 
+      scope: ['profile', 'email'], 
+      prompt: 'select_account', 
+      state: target 
+    })(req, res, next);
+  } catch (error) {
+    console.error('[Google OAuth] Setup error:', error.message);
+    return res.status(400).json({ error: error.message });
+  }
 });
+
 router.get(
   '/oauth/google/callback',
-  passport.authenticate('google', { session: false, failureRedirect: `${CLIENT_URL}/login?oauth=google&error=1` }),
+  passport.authenticate('google', { 
+    session: false, 
+    failureRedirect: (req) => {
+      const target = req.session?.oauthRedirect || req.query.state || 'app';
+      return getFailureRedirect(target, 'google');
+    }
+  }),
   AuthController.passportCallback
 );
 
-// GitHub
-router.get('/oauth/github', passport.authenticate('github', { scope: ['user:email'] }));
+// GitHub OAuth Routes
+router.get('/oauth/github', (req, res, next) => {
+  try {
+    const target = req.query.redirect || 'app';
+    setupOAuthRedirect(req, target, 'GitHub');
+
+    passport.authenticate('github', { 
+      scope: ['user:email'], 
+      state: target 
+    })(req, res, next);
+  } catch (error) {
+    console.error('[GitHub OAuth] Setup error:', error.message);
+    return res.status(400).json({ error: error.message });
+  }
+});
+
 router.get(
   '/oauth/github/callback',
-  passport.authenticate('github', { session: false, failureRedirect: `${CLIENT_URL}/login?oauth=github&error=1` }),
+  passport.authenticate('github', { 
+    session: false, 
+    failureRedirect: (req) => {
+      const target = req.session?.oauthRedirect || req.query.state || 'app';
+      return getFailureRedirect(target, 'github');
+    }
+  }),
   AuthController.passportCallback
 );
 
-// Apple
+// Apple OAuth Routes
 router.get('/oauth/apple', (req, res, next) => {
-  const target = req.query.redirect || 'admin';
-  if (req.session) {
-    req.session.oauthRedirect = target;
-    console.log('[Apple OAuth] Stored redirect in session:', req.sessionID, target);
+  try {
+    const target = req.query.redirect || 'app';
+    setupOAuthRedirect(req, target, 'Apple');
+
+    passport.authenticate('apple', { 
+      scope: ['name', 'email'], 
+      state: target 
+    })(req, res, next);
+  } catch (error) {
+    console.error('[Apple OAuth] Setup error:', error.message);
+    return res.status(400).json({ error: error.message });
   }
-  passport.authenticate('apple', { scope: ['name', 'email'], state: target })(req, res, next);
 });
+
 router.get(
   '/oauth/apple/callback',
-  passport.authenticate('apple', { session: false, failureRedirect: `${CLIENT_URL}/login?oauth=apple&error=1` }),
+  passport.authenticate('apple', { 
+    session: false, 
+    failureRedirect: (req) => {
+      const target = req.session?.oauthRedirect || req.query.state || 'app';
+      return getFailureRedirect(target, 'apple');
+    }
+  }),
   AuthController.passportCallback
 );
 
 // Mobile installed-app OAuth token exchange
 router.post('/oauth/mobile/:provider', AuthController.mobileOauth);
+
+// Test endpoint to check environment variables (development only)
+if (process.env.NODE_ENV === 'development') {
+  router.get('/test-env', (req, res) => {
+    res.json({
+      GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ? 'Set' : 'Missing',
+      GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ? 'Set' : 'Missing',
+      GOOGLE_CALLBACK_URL: process.env.GOOGLE_CALLBACK_URL || 'Not configured',
+      NODE_ENV: process.env.NODE_ENV,
+      CLIENT_URL_APP: process.env.CLIENT_URL_APP,
+      CLIENT_URL_ADMIN: process.env.CLIENT_URL_ADMIN
+    });
+  });
+}
 
 module.exports = router;
 

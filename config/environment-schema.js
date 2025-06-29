@@ -83,14 +83,19 @@ const environmentSchema = {
   // Google OAuth Configuration
   GOOGLE_CLIENT_ID: {
     type: 'string',
-    required: ['production', 'staging'],
+    required: ['development', 'production', 'staging'],
     description: 'Google OAuth Client ID'
   },
   GOOGLE_CLIENT_SECRET: {
     type: 'string',
-    required: ['production', 'staging'],
+    required: ['development', 'production', 'staging'],
     sensitive: true,
     description: 'Google OAuth Client Secret'
+  },
+  GOOGLE_CALLBACK_URL: {
+    type: 'string',
+    required: ['development', 'production', 'staging'],
+    description: 'Google OAuth callback URL'
   },
 
   // AI Service Configuration
@@ -122,6 +127,18 @@ const environmentSchema = {
     required: ['production'],
     sensitive: true,
     description: 'Mailjet private API key'
+  },
+
+  // Client URLs
+  CLIENT_URL_APP: {
+    type: 'string',
+    default: 'http://localhost:8081',
+    description: 'Mobile app client URL (Expo development server)'
+  },
+  CLIENT_URL_ADMIN: {
+    type: 'string',
+    default: 'https://admin-dev.rekkoo.com',
+    description: 'Admin client URL'
   },
 
   // Security

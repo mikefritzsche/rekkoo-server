@@ -3,11 +3,27 @@ const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const path = require('path');
 const { logger } = require('./utils/logger');
 const { worker: embeddingQueueWorker } = require('./workers/embeddingQueueWorker');
 const expressSession = require('express-session');
 
+// Load environment variables from multiple files
+// Load .env first (base configuration)
 dotenv.config();
+// Load .env.common (contains OAuth credentials and other shared config)
+dotenv.config({ path: path.resolve(process.cwd(), '.env.common') });
+// Load environment-specific file if it exists
+const envFile = `.env.${process.env.NODE_ENV || 'development'}`;
+dotenv.config({ path: path.resolve(process.cwd(), envFile) });
+
+// Log environment loading for debugging
+console.log('🔧 Environment loaded from:', {
+  NODE_ENV: process.env.NODE_ENV,
+  GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID ? '✓ Set' : '✗ Missing',
+  GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET ? '✓ Set' : '✗ Missing',
+  PORT: process.env.PORT
+});
 
 // --- 1. Import Services and Route Initializers ---
 const SocketService = require('./services/socket-service');
@@ -85,6 +101,7 @@ app.use(cors({
       'http://localhost:5173',  // Vite dev server (admin SPA)
       'http://localhost:3100',  // Express API itself (for server-to-server requests)
       'http://api-dev.rekkoo.com',
+      'https://api-dev.rekkoo.com',
       'https://app.rekkoo.com',
       'http://rekkoo-admin.localhost',
       'https://admin.rekkoo.com',
