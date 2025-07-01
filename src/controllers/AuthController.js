@@ -1210,6 +1210,396 @@ const mobileOauth = async (req, res) => {
   }
 };
 
+/**
+ * Link an OAuth provider to an existing user account
+ * @route POST /auth/oauth/link
+ * @access Private (requires authentication)
+ */
+const linkOAuthAccount = async (req, res) => {
+  try {
+    const { provider, providerUserId, accessToken, refreshToken, profileData } = req.body;
+    const userId = req.user.id;
+
+    if (!provider || !providerUserId || !accessToken) {
+      return res.status(400).json({ 
+        message: 'Provider, providerUserId, and accessToken are required' 
+      });
+    }
+
+    const result = await db.transaction(async (client) => {
+      // Get or create provider
+      let providerRes = await client.query(
+        `SELECT id FROM oauth_providers WHERE provider_name = $1`,
+        [provider]
+      );
+      let providerId = providerRes.rows.length ? providerRes.rows[0].id : null;
+
+      if (!providerId) {
+        const insertProv = await client.query(
+          `INSERT INTO oauth_providers (provider_name) VALUES ($1) RETURNING id`,
+          [provider]
+        );
+        providerId = insertProv.rows[0].id;
+      }
+
+      // Check if this provider account is already linked to another user
+      const existingLink = await client.query(
+        `SELECT user_id FROM user_oauth_connections 
+         WHERE provider_id = $1 AND provider_user_id = $2 AND deleted_at IS NULL`,
+        [providerId, providerUserId]
+      );
+
+      if (existingLink.rows.length > 0) {
+        const linkedUserId = existingLink.rows[0].user_id;
+        if (linkedUserId !== userId) {
+          throw { 
+            status: 409, 
+            message: `This ${provider} account is already linked to another user` 
+          };
+        }
+        // Already linked to this user, update tokens
+        await client.query(
+          `UPDATE user_oauth_connections 
+           SET access_token = $1, refresh_token = $2, token_expires_at = NOW() + INTERVAL '1 hour', 
+               profile_data = $3, updated_at = NOW()
+           WHERE user_id = $4 AND provider_id = $5 AND provider_user_id = $6`,
+          [accessToken, refreshToken || null, profileData ? JSON.stringify(profileData) : null, 
+           userId, providerId, providerUserId]
+        );
+      } else {
+        // Create new link
+        await client.query(
+          `INSERT INTO user_oauth_connections 
+           (user_id, provider_id, provider_user_id, access_token, refresh_token, 
+            token_expires_at, profile_data, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '1 hour', $6, NOW(), NOW())`,
+          [userId, providerId, providerUserId, accessToken, refreshToken || null, 
+           profileData ? JSON.stringify(profileData) : null]
+        );
+      }
+
+      return { success: true, message: `${provider} account linked successfully` };
+    });
+
+    res.json(result);
+  } catch (error) {
+    console.error('linkOAuthAccount error:', error);
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    res.status(500).json({ message: 'Failed to link OAuth account' });
+  }
+};
+
+/**
+ * Unlink an OAuth provider from user account
+ * @route DELETE /auth/oauth/unlink/:provider
+ * @access Private (requires authentication)
+ */
+const unlinkOAuthAccount = async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const userId = req.user.id;
+
+    const result = await db.transaction(async (client) => {
+      // Get provider ID
+      const providerRes = await client.query(
+        `SELECT id FROM oauth_providers WHERE provider_name = $1`,
+        [provider]
+      );
+
+      if (providerRes.rows.length === 0) {
+        throw { status: 404, message: 'Provider not found' };
+      }
+
+      const providerId = providerRes.rows[0].id;
+
+      // Check if user has password or other OAuth providers
+      const userRes = await client.query(
+        `SELECT password_hash FROM users WHERE id = $1`,
+        [userId]
+      );
+
+      const otherOAuthRes = await client.query(
+        `SELECT COUNT(*) as count FROM user_oauth_connections 
+         WHERE user_id = $1 AND provider_id != $2 AND deleted_at IS NULL`,
+        [userId, providerId]
+      );
+
+      const hasPassword = userRes.rows[0]?.password_hash;
+      const hasOtherOAuth = parseInt(otherOAuthRes.rows[0].count) > 0;
+
+      if (!hasPassword && !hasOtherOAuth) {
+        throw { 
+          status: 400, 
+          message: 'Cannot unlink the only authentication method. Please set a password first.' 
+        };
+      }
+
+      // Soft delete the connection
+      await client.query(
+        `UPDATE user_oauth_connections 
+         SET deleted_at = NOW() 
+         WHERE user_id = $1 AND provider_id = $2`,
+        [userId, providerId]
+      );
+
+      return { success: true, message: `${provider} account unlinked successfully` };
+    });
+
+    res.json(result);
+  } catch (error) {
+    console.error('unlinkOAuthAccount error:', error);
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    res.status(500).json({ message: 'Failed to unlink OAuth account' });
+  }
+};
+
+/**
+ * Get all linked OAuth accounts for current user
+ * @route GET /auth/oauth/accounts
+ * @access Private (requires authentication)
+ */
+const getLinkedAccounts = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const result = await db.query(
+      `SELECT 
+         op.provider_name,
+         uoc.provider_user_id,
+         uoc.created_at as linked_at,
+         uoc.profile_data
+       FROM user_oauth_connections uoc
+       JOIN oauth_providers op ON uoc.provider_id = op.id
+       WHERE uoc.user_id = $1 AND uoc.deleted_at IS NULL
+       ORDER BY uoc.created_at DESC`,
+      [userId]
+    );
+
+    const linkedAccounts = result.rows.map(row => ({
+      provider: row.provider_name,
+      providerUserId: row.provider_user_id,
+      linkedAt: row.linked_at,
+      profileData: row.profile_data ? JSON.parse(row.profile_data) : null
+    }));
+
+    res.json({ linkedAccounts });
+  } catch (error) {
+    console.error('getLinkedAccounts error:', error);
+    res.status(500).json({ message: 'Failed to get linked accounts' });
+  }
+};
+
+/**
+ * Enhanced OAuth callback that supports manual linking
+ * @route POST /auth/oauth/:provider/callback
+ * @access Public
+ */
+const enhancedOAuthCallback = async (req, res) => {
+  try {
+    const { provider } = req.params;
+    const { 
+      providerUserId, 
+      accessToken, 
+      refreshToken, 
+      profileData, 
+      linkToUserId, // Optional: link to specific user
+      email,
+      emailVerified 
+    } = req.body;
+
+    if (!providerUserId || !accessToken) {
+      return res.status(400).json({ 
+        message: 'providerUserId and accessToken are required' 
+      });
+    }
+
+    const result = await db.transaction(async (client) => {
+      // Get or create provider
+      let providerRes = await client.query(
+        `SELECT id FROM oauth_providers WHERE provider_name = $1`,
+        [provider]
+      );
+      let providerId = providerRes.rows.length ? providerRes.rows[0].id : null;
+
+      if (!providerId) {
+        const insertProv = await client.query(
+          `INSERT INTO oauth_providers (provider_name) VALUES ($1) RETURNING id`,
+          [provider]
+        );
+        providerId = insertProv.rows[0].id;
+      }
+
+      let user = null;
+
+      // If linking to specific user (manual linking)
+      if (linkToUserId) {
+        const userRes = await client.query(
+          `SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL`,
+          [linkToUserId]
+        );
+        user = userRes.rows[0];
+        
+        if (!user) {
+          throw { status: 404, message: 'User not found' };
+        }
+
+        // Check if provider is already linked to another user
+        const existingLink = await client.query(
+          `SELECT user_id FROM user_oauth_connections 
+           WHERE provider_id = $1 AND provider_user_id = $2 AND deleted_at IS NULL`,
+          [providerId, providerUserId]
+        );
+
+        if (existingLink.rows.length > 0 && existingLink.rows[0].user_id !== linkToUserId) {
+          throw { 
+            status: 409, 
+            message: `This ${provider} account is already linked to another user` 
+          };
+        }
+
+        // Link the account
+        await client.query(
+          `INSERT INTO user_oauth_connections 
+           (user_id, provider_id, provider_user_id, access_token, refresh_token, 
+            token_expires_at, profile_data, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '1 hour', $6, NOW(), NOW())
+           ON CONFLICT (user_id, provider_id) 
+           DO UPDATE SET 
+             provider_user_id = $3,
+             access_token = $4,
+             refresh_token = $5,
+             token_expires_at = NOW() + INTERVAL '1 hour',
+             profile_data = $6,
+             updated_at = NOW()`,
+          [linkToUserId, providerId, providerUserId, accessToken, refreshToken || null, 
+           profileData ? JSON.stringify(profileData) : null]
+        );
+
+        return { 
+          success: true, 
+          message: `${provider} account linked successfully`,
+          user: { id: user.id, username: user.username, email: user.email }
+        };
+      }
+
+      // Standard OAuth flow (find/create user)
+      // 1. Check by provider ID first
+      let userResult = await client.query(
+        `SELECT u.*
+         FROM users u
+         JOIN user_oauth_connections c ON u.id = c.user_id
+         WHERE c.provider_id = $1 AND c.provider_user_id = $2 AND u.deleted_at IS NULL`,
+        [providerId, providerUserId]
+      );
+      user = userResult.rows[0];
+
+      if (!user && email && emailVerified) {
+        // 2. Check by email if verified
+        userResult = await client.query(
+          `SELECT * FROM users WHERE email = $1 AND deleted_at IS NULL`,
+          [email]
+        );
+        user = userResult.rows[0];
+
+        if (user) {
+          // Link existing user
+          await client.query(
+            `INSERT INTO user_oauth_connections 
+             (user_id, provider_id, provider_user_id, access_token, refresh_token, 
+              token_expires_at, profile_data, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '1 hour', $6, NOW(), NOW())
+             ON CONFLICT (user_id, provider_id) 
+             DO UPDATE SET 
+               provider_user_id = $3,
+               access_token = $4,
+               refresh_token = $5,
+               token_expires_at = NOW() + INTERVAL '1 hour',
+               profile_data = $6,
+               updated_at = NOW()`,
+            [user.id, providerId, providerUserId, accessToken, refreshToken || null, 
+             profileData ? JSON.stringify(profileData) : null]
+          );
+        }
+      }
+
+      if (!user) {
+        // 3. Create new user (if email provided)
+        if (email) {
+          const name = profileData?.name || email.split('@')[0];
+          const profileImageUrl = profileData?.picture || null;
+          
+          const newUserResult = await client.query(
+            `INSERT INTO users (username, email, email_verified, profile_image_url, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, NOW(), NOW())
+             RETURNING *`,
+            [name, email, emailVerified || false, profileImageUrl]
+          );
+          user = newUserResult.rows[0];
+
+          // Link OAuth account
+          await client.query(
+            `INSERT INTO user_oauth_connections 
+             (user_id, provider_id, provider_user_id, access_token, refresh_token, 
+              token_expires_at, profile_data, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '1 hour', $6, NOW(), NOW())`,
+            [user.id, providerId, providerUserId, accessToken, refreshToken || null, 
+             profileData ? JSON.stringify(profileData) : null]
+          );
+
+          // Assign default role
+          await client.query(
+            `INSERT INTO user_roles (user_id, role_id)
+             VALUES ($1, (SELECT id FROM roles WHERE name = 'user'))`,
+            [user.id]
+          );
+        } else {
+          // No email provided and no existing user found
+          throw { 
+            status: 400, 
+            message: 'Unable to link account. Please provide an email or link to an existing account.' 
+          };
+        }
+      }
+
+      // Update last login
+      await client.query(
+        `UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1`,
+        [user.id]
+      );
+
+      // Generate JWT tokens
+      const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
+      const appRefreshToken = generateRefreshToken();
+      const appRefreshTokenExpiresAt = new Date();
+      appRefreshTokenExpiresAt.setDate(appRefreshTokenExpiresAt.getDate() + 30);
+
+      await client.query(
+        `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, token) DO UPDATE SET expires_at = $3`,
+        [user.id, appRefreshToken, appRefreshTokenExpiresAt]
+      );
+
+      return { 
+        appAccessToken, 
+        appRefreshToken, 
+        user: { id: user.id, username: user.username, email: user.email }
+      };
+    });
+
+    res.json(result);
+  } catch (error) {
+    console.error(`[Enhanced OAuth ${provider}] Callback error:`, error);
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    res.status(500).json({ message: 'OAuth authentication failed' });
+  }
+};
+
 module.exports = {
   register,
   verifyEmail,
@@ -1224,5 +1614,9 @@ module.exports = {
   oauthCallback,
   passportCallback,
   mobileOauth,
-  getAllUsers
+  getAllUsers,
+  linkOAuthAccount,
+  unlinkOAuthAccount,
+  getLinkedAccounts,
+  enhancedOAuthCallback
 }; 

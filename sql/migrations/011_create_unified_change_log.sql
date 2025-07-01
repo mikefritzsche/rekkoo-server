@@ -24,6 +24,7 @@ RETURNS TRIGGER AS $$
 DECLARE
     affected_user_id UUID;
     change_op VARCHAR(20);
+    record_id_text TEXT;
 BEGIN
     -- Determine operation type
     IF TG_OP = 'DELETE' THEN
@@ -34,14 +35,20 @@ BEGIN
         change_op = 'update';
     END IF;
     
-    -- Extract user_id based on table
+    -- Extract user_id and record_id based on table
     CASE TG_TABLE_NAME
         WHEN 'lists', 'list_items' THEN
             affected_user_id = COALESCE(NEW.owner_id, OLD.owner_id);
-        WHEN 'user_settings', 'favorites', 'notifications' THEN
+            record_id_text = COALESCE(NEW.id::text, OLD.id::text);
+        WHEN 'user_settings' THEN
             affected_user_id = COALESCE(NEW.user_id, OLD.user_id);
+            record_id_text = COALESCE(NEW.user_id::text, OLD.user_id::text);
+        WHEN 'favorites', 'notifications' THEN
+            affected_user_id = COALESCE(NEW.user_id, OLD.user_id);
+            record_id_text = COALESCE(NEW.id::text, OLD.id::text);
         WHEN 'users' THEN
             affected_user_id = COALESCE(NEW.id, OLD.id);
+            record_id_text = COALESCE(NEW.id::text, OLD.id::text);
         WHEN 'followers' THEN
             -- Log for both follower and followed user
             IF COALESCE(NEW.follower_id, OLD.follower_id) IS NOT NULL THEN
@@ -55,6 +62,7 @@ BEGIN
                 );
             END IF;
             affected_user_id = COALESCE(NEW.followed_id, OLD.followed_id);
+            record_id_text = COALESCE(NEW.id::text, OLD.id::text);
         ELSE
             RETURN COALESCE(NEW, OLD);
     END CASE;
@@ -65,7 +73,7 @@ BEGIN
         VALUES (
             affected_user_id,
             TG_TABLE_NAME,
-            COALESCE(NEW.id::text, OLD.id::text),
+            record_id_text,
             change_op,
             CASE WHEN TG_OP = 'DELETE' THEN NULL ELSE row_to_json(NEW) END
         );

@@ -111,13 +111,7 @@ function favoritesControllerFactory(socketService = null) {
         favoriteId = insertResult.rows[0].id;
       }
 
-      // Add to sync tracking
-      await db.query(
-        `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-         VALUES ($1, $2, $3)
-         ON CONFLICT (table_name, record_id) DO NOTHING`,
-        ['favorites', favoriteId, 'create']
-      );
+      // Sync tracking is now handled automatically by database triggers
 
       // Send realtime update if socket service is available
       if (safeSocketService && typeof safeSocketService.emitToUser === 'function') {
@@ -179,12 +173,7 @@ function favoritesControllerFactory(socketService = null) {
       await db.query(deleteQuery, [id, userId]);
 
       // Add to sync tracking
-      await db.query(
-        `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-         VALUES ($1, $2, $3)
-         ON CONFLICT (table_name, record_id) DO NOTHING`,
-        ['favorites', id, 'delete']
-      );
+      // Sync tracking is now handled automatically by database triggers
 
       // Send realtime update if socket service is available
       if (safeSocketService && typeof safeSocketService.emitToUser === 'function') {
@@ -400,12 +389,7 @@ function favoritesControllerFactory(socketService = null) {
       const result = await db.query(query, params);
       
       // Add to sync tracking
-      await db.query(
-        `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-         VALUES ($1, $2, $3)
-         ON CONFLICT (table_name, record_id) DO NOTHING`,
-        ['favorite_categories', result.rows[0].id, 'create']
-      );
+      // Sync tracking is now handled automatically by database triggers
 
       return res.status(201).json(result.rows[0]);
     } catch (error) {
@@ -483,12 +467,7 @@ function favoritesControllerFactory(socketService = null) {
       const result = await db.query(updateQuery, updateParams);
       
       // Add to sync tracking
-      await db.query(
-        `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-         VALUES ($1, $2, $3)
-         ON CONFLICT (table_name, record_id) DO NOTHING`,
-        ['favorite_categories', id, 'update']
-      );
+      // Sync tracking is now handled automatically by database triggers
 
       return res.status(200).json(result.rows[0]);
     } catch (error) {
@@ -540,13 +519,7 @@ function favoritesControllerFactory(socketService = null) {
         `;
         await client.query(deleteCategoryQuery, [id, userId]);
         
-        // Add to sync tracking
-        await client.query(
-          `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-           VALUES ($1, $2, $3)
-           ON CONFLICT (table_name, record_id) DO NOTHING`,
-          ['favorite_categories', id, 'delete']
-        );
+        // Sync tracking is now handled automatically by database triggers
       });
 
       return res.status(200).json({ 
@@ -626,13 +599,7 @@ function favoritesControllerFactory(socketService = null) {
           `;
           await client.query(updateQuery, [sort_order, id, userId]);
           
-          // Add to sync tracking
-          await client.query(
-            `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-             VALUES ($1, $2, $3)
-             ON CONFLICT (table_name, record_id) DO NOTHING`,
-            ['favorites', id, 'update']
-          );
+          // Sync tracking is now handled automatically by database triggers
         }
       });
       
@@ -741,12 +708,7 @@ function favoritesControllerFactory(socketService = null) {
       }
 
       // Add to sync tracking
-      await db.query(
-        `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-         VALUES ($1, $2, $3)
-         ON CONFLICT (table_name, record_id) DO NOTHING`,
-        ['favorite_sharing', sharingId, 'create']
-      );
+      // Sync tracking is now handled automatically by database triggers
 
       // Send realtime notification if socket service is available
       if (safeSocketService && typeof safeSocketService.emitToUser === 'function' && shared_with_user_id) {
@@ -808,12 +770,7 @@ function favoritesControllerFactory(socketService = null) {
       await db.query(deleteQuery, [id, userId]);
 
       // Add to sync tracking
-      await db.query(
-        `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-         VALUES ($1, $2, $3)
-         ON CONFLICT (table_name, record_id) DO NOTHING`,
-        ['favorite_sharing', id, 'delete']
-      );
+      // Sync tracking is now handled automatically by database triggers
 
       // Send realtime notification if socket service is available
       if (safeSocketService && typeof safeSocketService.emitToUser === 'function' && shared_with_user_id) {
@@ -1013,12 +970,7 @@ function favoritesControllerFactory(socketService = null) {
       }
 
       // Add to sync tracking
-      await db.query(
-        `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-         VALUES ($1, $2, $3)
-         ON CONFLICT (table_name, record_id) DO NOTHING`,
-        ['favorite_notification_preferences', preferenceId, 'create']
-      );
+      // Sync tracking is now handled automatically by database triggers
 
       // Get the complete notification preferences
       const preferencesQuery = `

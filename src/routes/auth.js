@@ -4,7 +4,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const axios = require('axios');
 const qs = require('querystring');
-const { body, validationResult } = require('express-validator');
+const { body, validationResult, param } = require('express-validator');
 const AuthController = require('../controllers/AuthController');
 const { authenticateJWT, checkPermissions } = require('../auth/middleware');
 const passport = require('passport');
@@ -596,6 +596,58 @@ if (process.env.NODE_ENV === 'development') {
     });
   });
 }
+
+// ===================== OAuth Account Linking Routes =====================
+
+/**
+ * @route GET /auth/oauth/accounts
+ * @desc Get all linked OAuth accounts for current user
+ * @access Private
+ */
+router.get('/oauth/accounts', authenticateJWT, AuthController.getLinkedAccounts);
+
+/**
+ * @route POST /auth/oauth/link
+ * @desc Link an OAuth provider to current user account
+ * @access Private
+ */
+router.post('/oauth/link', [
+  authenticateJWT,
+  body('provider').isString().notEmpty(),
+  body('providerUserId').isString().notEmpty(),
+  body('accessToken').isString().notEmpty(),
+  body('refreshToken').optional().isString(),
+  body('profileData').optional(),
+  validateRequest
+], AuthController.linkOAuthAccount);
+
+/**
+ * @route DELETE /auth/oauth/unlink/:provider
+ * @desc Unlink an OAuth provider from current user account
+ * @access Private
+ */
+router.delete('/oauth/unlink/:provider', [
+  authenticateJWT,
+  param('provider').isString().notEmpty(),
+  validateRequest
+], AuthController.unlinkOAuthAccount);
+
+/**
+ * @route POST /auth/oauth/:provider/callback
+ * @desc Enhanced OAuth callback that supports manual linking
+ * @access Public
+ */
+router.post('/oauth/:provider/callback', [
+  param('provider').isString().notEmpty(),
+  body('providerUserId').isString().notEmpty(),
+  body('accessToken').isString().notEmpty(),
+  body('refreshToken').optional().isString(),
+  body('profileData').optional(),
+  body('linkToUserId').optional().isUUID(),
+  body('email').optional().isEmail().normalizeEmail(),
+  body('emailVerified').optional().isBoolean(),
+  validateRequest
+], AuthController.enhancedOAuthCallback);
 
 module.exports = router;
 

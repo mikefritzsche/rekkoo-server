@@ -284,20 +284,9 @@ function syncControllerFactory(socketService) {
                     favoriteId = insertResult.rows[0].id;
                   }
 
-                  // Sync tracking (skip for no-op)
+                  // Sync tracking is now handled automatically by database triggers
                   if (recordStatus !== 'noop') {
                     batchResults.push({ clientRecordId: clientFavId, serverId: favoriteId, status: recordStatus });
-                    await client.query(
-                      `INSERT INTO public.sync_tracking (table_name, record_id, operation)
-                       VALUES ($1, $2, $3)
-                       ON CONFLICT (table_name, record_id) DO UPDATE SET
-                         operation = EXCLUDED.operation,
-                         created_at = NOW(),
-                         sync_status = 'pending',
-                         last_sync_attempt = NULL,
-                         sync_error = NULL`,
-                      ['favorites', favoriteId, recordStatus === 'created' ? 'create' : 'update']
-                    );
                   }
 
                   // Queue embedding generation for favorite within batch operation
@@ -328,19 +317,8 @@ function syncControllerFactory(socketService) {
                   console.log('Soft-delete result:', deleteResult.rows); // Debug log
                   if (deleteResult.rows.length > 0) {
                     batchResults.push({ clientRecordId: clientFavId, serverId: deleteResult.rows[0].id, status: 'deleted' });
-                    // Add to sync tracking
-                    await client.query(
-                      `INSERT INTO public.sync_tracking (table_name, record_id, operation)
-                       VALUES ($1, $2, $3)
-                       ON CONFLICT (table_name, record_id) DO UPDATE SET
-                         operation = EXCLUDED.operation,
-                         created_at = NOW(),
-                         sync_status = 'pending',
-                         last_sync_attempt = NULL,
-                         sync_error = NULL`,
-                      ['favorites', deleteResult.rows[0].id, 'delete']
-                    );
-
+                    // Sync tracking is now handled automatically by database triggers
+                    
                     // Soft-delete embedding row (set deleted_at, reduce weight)
                     try {
                       await EmbeddingService.deactivateEmbedding(deleteResult.rows[0].id, 'favorite');
@@ -474,18 +452,7 @@ function syncControllerFactory(socketService) {
                     if (result.status === 'restored' || result.status === 'updated_existing_active') {
                         syncOperation = 'update';
                     }
-                    await client.query(
-                        `INSERT INTO public.sync_tracking (table_name, record_id, operation)
-                         VALUES ($1, $2, $3)
-                         ON CONFLICT (table_name, record_id) DO UPDATE SET
-                           operation = EXCLUDED.operation,
-                           created_at = NOW(),
-                           sync_status = 'pending',
-                           last_sync_attempt = NULL,
-                           sync_error = NULL`,
-                        [tableName, result.serverId, syncOperation]
-                    );
-                    logger.info(`[SyncController] Added/Updated ${syncOperation.toUpperCase()} in sync_tracking for ${tableName}/${result.serverId}`);
+                    // Sync tracking is now handled automatically by database triggers
 
                     // Queue embedding generation for favorite
                     try {
@@ -539,6 +506,12 @@ function syncControllerFactory(socketService) {
           }
 
           if (operation === 'create') {
+            // Skip user_settings as it has special handling above
+            if (tableName === 'user_settings') {
+              logger.warn(`[SyncController] Skipping general create logic for user_settings as it has special handling above.`);
+              continue;
+            }
+            
             const recordToCreate = { ...data };
             // Ensure the client-provided ID is part of the record to be created
             if (!recordToCreate.id) {
@@ -620,19 +593,7 @@ function syncControllerFactory(socketService) {
                             const notificationResult = await client.query(notificationQuery, notificationValues);
                             logger.info(`[SyncController] Created 'new_follower' notification ${notificationResult.rows[0].id} for user ${followedId} (actor: ${followerId})`);
                             
-                            // Add the new notification to sync_tracking so the recipient (followedId) gets it
-                            await client.query(
-                                `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-                                 VALUES ($1, $2, $3)
-                                 ON CONFLICT (table_name, record_id) DO UPDATE SET
-                                   operation = EXCLUDED.operation,
-                                   created_at = NOW(),
-                                   sync_status = 'pending', 
-                                   last_sync_attempt = NULL, 
-                                   sync_error = NULL`,
-                                ['notifications', notificationResult.rows[0].id, 'create']
-                            );
-                            logger.info(`[SyncController] Added CREATE in sync_tracking for notifications/${notificationResult.rows[0].id}`);
+                            // Sync tracking is now handled automatically by database triggers
 
                         } catch (notificationError) {
                             logger.error(`[SyncController] Failed to create 'new_follower' notification for user ${followedId}:`, notificationError);
@@ -781,19 +742,7 @@ function syncControllerFactory(socketService) {
                 }
                 // --- END MOVIE DETAILS LOGIC ---
 
-
-                await client.query(
-                  `INSERT INTO sync_tracking (table_name, record_id, operation) 
-                   VALUES ($1, $2, $3)
-                   ON CONFLICT (table_name, record_id) DO UPDATE SET
-                     operation = EXCLUDED.operation,
-                     created_at = NOW(),
-                     sync_status = 'pending',
-                     last_sync_attempt = NULL,
-                     sync_error = NULL`,
-                  [tableName, newServerId, operation]
-                );
-                logger.info(`[SyncController] Added/Updated CREATE in sync_tracking for ${tableName}/${newServerId}`);
+                // Sync tracking is now handled automatically by database triggers
 
                 // Inside handlePush function, after successful create/update operations for list_items or lists
                 if (tableName === 'list_items' || tableName === 'lists' || tableName === 'favorites' || tableName === 'followers') {
@@ -822,7 +771,6 @@ function syncControllerFactory(socketService) {
             } catch (insertError) {
                 logger.error(`[SyncController CREATE ${tableName}] Error inserting record with client-provided ID ${newServerId}:`, insertError);
                 results.push({ operation, tableName, clientRecordId, serverId: null, status: 'error_insert_failed', error: insertError.message, detail: insertError.detail });
-                // Do not add to sync_tracking if insert failed
                 continue; // move to next change item
             }
             // TODO: Handle list_items with details creation if necessary (simplified for now)
@@ -876,21 +824,8 @@ function syncControllerFactory(socketService) {
             logger.info(`[SyncController] Update result for ${tableName} (Client ID: ${clientRecordId}): ${updateResult.rowCount} row(s) affected.`);
             if (updateResult.rowCount > 0) {
               results.push({ operation, tableName, clientRecordId, status: 'updated', affectedRows: updateResult.rowCount }); // Add to results
-              // Add to sync_tracking
+              // Sync tracking is now handled automatically by database triggers
               const recordIdForSync = isUserSettingsTable ? data.user_id : clientRecordId;
-              if (recordIdForSync) { // Ensure we have an ID to track
-                await client.query(
-                  `INSERT INTO sync_tracking (table_name, record_id, operation) 
-                   VALUES ($1, $2, $3)
-                   ON CONFLICT (table_name, record_id) DO UPDATE SET
-                     operation = EXCLUDED.operation,
-                     created_at = NOW(),
-                     sync_status = 'pending',
-                     last_sync_attempt = NULL,
-                     sync_error = NULL`,
-                  [tableName, recordIdForSync, operation]
-                );
-                logger.info(`[SyncController] Added/Updated UPDATE in sync_tracking for ${tableName}/${recordIdForSync}`);
 
                 // WebSocket notification for user_settings
                 if (isUserSettingsTable && socketService && recordIdForSync === data.user_id) { 
@@ -934,9 +869,6 @@ function syncControllerFactory(socketService) {
                     // Do not interrupt the update flow if queuing fails
                   }
                 }
-              } else {
-                logger.warn(`[SyncController] Could not add UPDATE to sync_tracking for ${tableName} due to missing record_id. Client ID: ${clientRecordId}`);
-              }
             } else if (isUserSettingsTable) {
                 logger.warn(`[SyncController] WARN: User settings update for user_id ${data.user_id} affected 0 rows. Does the record exist?`);
                 // Even if 0 rows affected, consider it 'processed' from client's perspective if no error thrown
@@ -1005,22 +937,9 @@ function syncControllerFactory(socketService) {
             results.push({ operation, tableName, clientRecordId, status: 'deleted', affectedRows: deleteResult.rowCount });
 
             if (deleteResult.rowCount > 0) {
-              // Add to sync_tracking
-              if (recordIdForDeleteSync) { // Ensure we have an ID to track
-                  await client.query(
-                    `INSERT INTO sync_tracking (table_name, record_id, operation) 
-                     VALUES ($1, $2, $3)
-                     ON CONFLICT (table_name, record_id) DO UPDATE SET
-                       operation = EXCLUDED.operation,
-                       created_at = NOW(),
-                       sync_status = 'pending',
-                       last_sync_attempt = NULL,
-                       sync_error = NULL`,
-                    [tableName, recordIdForDeleteSync, operation]
-                  );
-                  logger.info(`[SyncController] Added/Updated DELETE in sync_tracking for ${tableName}/${recordIdForDeleteSync}`);
-
-                  // Mark embedding as inactive (soft delete) for supported entity types
+              // Sync tracking is now handled automatically by database triggers
+              
+              // Mark embedding as inactive (soft delete) for supported entity types
                   if (['list_items', 'lists', 'favorites', 'followers'].includes(tableName)) {
                       try {
                           let embType;
@@ -1053,9 +972,6 @@ function syncControllerFactory(socketService) {
                         logger.error(`[SyncController] Error sending WebSocket notification for user_settings delete to user ${userId}:`, wsError);
                     }
                   }
-              } else {
-                  logger.warn(`[SyncController] Could not add DELETE to sync_tracking for ${tableName} due to missing record_id. Client ID was: ${clientRecordId}`);
-              }
             }
 
             // TODO: Handle list_items with details deletion if necessary (simplified for now)

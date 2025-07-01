@@ -87,12 +87,7 @@ function userControllerFactory(socketService = null) {
       );
       
       // Add sync tracking
-      await db.query(
-        `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-         VALUES ($1, $2, $3)
-         ON CONFLICT (table_name, record_id) DO NOTHING`,
-        ['users', result.rows[0].id, 'create']
-      );
+      // Sync tracking is now handled automatically by database triggers
       
       // Emit real-time update if socket service is available
       if (safeSocketService && typeof safeSocketService.emitToUser === 'function') {
@@ -123,13 +118,7 @@ function userControllerFactory(socketService = null) {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      // Add sync tracking
-      await db.query(
-        `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-         VALUES ($1, $2, $3)
-         ON CONFLICT (table_name, record_id) DO NOTHING`,
-        ['users', result.rows[0].id, 'delete']
-      );
+      // Sync tracking is now handled automatically by database triggers
 
       // Emit real-time update if socket service is available
       if (safeSocketService && typeof safeSocketService.emitToUser === 'function') {
@@ -163,15 +152,7 @@ function userControllerFactory(socketService = null) {
         [ids]
       );
 
-      // Add sync tracking for each deleted user
-      for (const user of result.rows) {
-        await db.query(
-          `INSERT INTO public.sync_tracking (table_name, record_id, operation) 
-           VALUES ($1, $2, $3)
-           ON CONFLICT (table_name, record_id) DO NOTHING`,
-          ['users', user.id, 'delete']
-        );
-      }
+      // Sync tracking is now handled automatically by database triggers
 
       // Emit real-time update if socket service is available
       if (safeSocketService && typeof safeSocketService.emitToUser === 'function') {
