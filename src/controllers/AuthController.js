@@ -332,9 +332,9 @@ const login = async (req, res) => {
 
       // Create session (keep for compatibility)
       await client.query(
-        `INSERT INTO user_sessions (user_id, token, ip_address, user_agent, expires_at)
-         VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 days')`,
-        [user.id, accessToken, req.ip, req.headers['user-agent']]
+        `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
+         VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '30 days')`,
+        [user.id, accessToken, refreshTokenValue, req.ip, req.headers['user-agent']]
       );
 
       // Log successful login
@@ -449,9 +449,9 @@ const refreshToken = async (req, res) => { // This is the function declaration f
 
       if (rowCount === 0) {
         await client.query(
-          `INSERT INTO user_sessions (user_id, token, ip_address, user_agent, expires_at)
-           VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 days')`,
-          [refreshTokenData.user_id, newAccessToken, req.ip, req.headers['user-agent']]
+          `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
+           VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '30 days')`,
+          [refreshTokenData.user_id, newAccessToken, refreshTokenValue, req.ip, req.headers['user-agent']]
         );
       }
 
@@ -530,9 +530,13 @@ const logout = async (req, res) => {
         // Even if token doesn't match/exist, proceed to log out from session if applicable
       }
 
-      // For traditional session-based logout (if applicable) you might clear session here
-      // e.g., req.session.destroy(); 
-      // For JWT, client just needs to discard the token. Server can blacklist it if needed.
+      // Soft delete the user session (set deleted_at)
+      await client.query(
+        `UPDATE user_sessions
+         SET deleted_at = NOW()
+         WHERE refresh_token = $1 AND user_id = $2 AND deleted_at IS NULL`,
+        [refreshToken, userId]
+      );
 
       // Log logout event
       await client.query(
@@ -924,6 +928,18 @@ const oauthCallback = async (req, res) => {
         [user.id]
       );
 
+      // Log successful OAuth login
+      await client.query(
+        `INSERT INTO auth_logs (user_id, event_type, ip_address, user_agent, details)
+         VALUES ($1, 'login', $2, $3, $4)`,
+        [
+          user.id,
+          req.ip,
+          req.headers['user-agent'],
+          JSON.stringify({ method: provider, oauth: true })
+        ]
+      );
+
       // Generate your application's JWTs
       const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
       const appRefreshToken = generateRefreshToken();
@@ -934,6 +950,13 @@ const oauthCallback = async (req, res) => {
         `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)
          ON CONFLICT (user_id, token) DO UPDATE SET expires_at = $3`,
         [user.id, appRefreshToken, appRefreshTokenExpiresAt]
+      );
+
+      await client.query(
+        `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
+         VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '30 days')
+         ON CONFLICT DO NOTHING`,
+        [user.id, appAccessToken, appRefreshToken, req.ip, req.headers['user-agent']]
       );
 
       return { appAccessToken, appRefreshToken, user };
@@ -983,10 +1006,22 @@ const passportCallback = async (req, res) => {
       );
 
       await client.query(
-        `INSERT INTO user_sessions (user_id, token, ip_address, user_agent, expires_at)
-         VALUES ($1,$2,$3,$4, NOW() + INTERVAL '30 days')
+        `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
+         VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '30 days')
          ON CONFLICT DO NOTHING`,
-        [user.id, accessToken, req.ip, req.headers['user-agent']]
+        [user.id, accessToken, refreshTokenValue, req.ip, req.headers['user-agent']]
+      );
+
+      // Log successful OAuth login
+      await client.query(
+        `INSERT INTO auth_logs (user_id, event_type, ip_address, user_agent, details)
+         VALUES ($1, 'login', $2, $3, $4)`,
+        [
+          user.id,
+          req.ip,
+          req.headers['user-agent'],
+          JSON.stringify({ method: 'oauth', oauth: true })
+        ]
       );
 
       return { accessToken, refreshToken: refreshTokenValue };
@@ -1198,6 +1233,18 @@ const mobileOauth = async (req, res) => {
         [user.id]
       );
 
+      // Log successful mobile OAuth login
+      await client.query(
+        `INSERT INTO auth_logs (user_id, event_type, ip_address, user_agent, details)
+         VALUES ($1, 'login', $2, $3, $4)`,
+        [
+          user.id,
+          req.ip,
+          req.headers['user-agent'],
+          JSON.stringify({ method: provider, oauth: true, mobile: true })
+        ]
+      );
+
       const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
       const appRefreshToken = generateRefreshToken();
       const rtExpires = new Date();
@@ -1208,6 +1255,13 @@ const mobileOauth = async (req, res) => {
          VALUES ($1,$2,$3)
          ON CONFLICT (user_id, token) DO UPDATE SET expires_at = $3`,
         [user.id, appRefreshToken, rtExpires]
+      );
+
+      await client.query(
+        `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
+         VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '30 days')
+         ON CONFLICT DO NOTHING`,
+        [user.id, appAccessToken, appRefreshToken, req.ip, req.headers['user-agent']]
       );
 
       return { accessToken: appAccessToken, refreshToken: appRefreshToken, userId: user.id };
@@ -1584,6 +1638,18 @@ const enhancedOAuthCallback = async (req, res) => {
         [user.id]
       );
 
+      // Log successful OAuth login
+      await client.query(
+        `INSERT INTO auth_logs (user_id, event_type, ip_address, user_agent, details)
+         VALUES ($1, 'login', $2, $3, $4)`,
+        [
+          user.id,
+          req.ip,
+          req.headers['user-agent'],
+          JSON.stringify({ method: provider, oauth: true })
+        ]
+      );
+
       // Generate JWT tokens
       const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
       const appRefreshToken = generateRefreshToken();
@@ -1594,6 +1660,13 @@ const enhancedOAuthCallback = async (req, res) => {
         `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)
          ON CONFLICT (user_id, token) DO UPDATE SET expires_at = $3`,
         [user.id, appRefreshToken, appRefreshTokenExpiresAt]
+      );
+
+      await client.query(
+        `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
+         VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '30 days')
+         ON CONFLICT DO NOTHING`,
+        [user.id, appAccessToken, appRefreshToken, req.ip, req.headers['user-agent']]
       );
 
       return { 
