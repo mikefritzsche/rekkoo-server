@@ -461,8 +461,21 @@ router.get('/check', authenticateJWT, (req, res) => {
 });
 
 // ===================== Passport OAuth Routes =====================
-const CLIENT_URL_ADMIN = process.env.CLIENT_URL_ADMIN || (process.env.NODE_ENV === 'production' ? 'https://admin.rekkoo.com' : 'https://admin-dev.rekkoo.com');
-const CLIENT_URL_APP = process.env.CLIENT_URL_APP || (process.env.NODE_ENV === 'production' ? 'https://app.rekkoo.com' : 'http://localhost:8081');
+// Helper function to check if we're in production
+const isProduction = () => ['production', 'prod'].includes(process.env.NODE_ENV);
+
+// Helper function to get environment-aware URLs
+const getClientUrl = (type) => {
+  if (type === 'app') {
+    return process.env.CLIENT_URL_APP || (isProduction() ? 'https://app.rekkoo.com' : 'http://localhost:8081');
+  } else if (type === 'admin') {
+    return process.env.CLIENT_URL_ADMIN || (isProduction() ? 'https://admin.rekkoo.com' : 'https://admin-dev.rekkoo.com');
+  }
+  throw new Error(`Unknown client type: ${type}`);
+};
+
+const CLIENT_URL_ADMIN = getClientUrl('admin');
+const CLIENT_URL_APP = getClientUrl('app');
 
 // Helper functions for OAuth redirect management
 const validateOAuthRedirect = (target) => {

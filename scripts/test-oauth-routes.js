@@ -48,9 +48,12 @@ const validateOAuthRedirect = (target) => {
   return validTargets.includes(target);
 };
 
+// Helper function to check if we're in production
+const isProduction = () => ['production', 'prod'].includes(process.env.NODE_ENV);
+
 const getFailureRedirect = (target, provider) => {
-  const CLIENT_URL_APP = process.env.CLIENT_URL_APP || (process.env.NODE_ENV === 'production' ? 'https://app.rekkoo.com' : 'http://localhost:8081');
-  const CLIENT_URL_ADMIN = process.env.CLIENT_URL_ADMIN || (process.env.NODE_ENV === 'production' ? 'https://admin.rekkoo.com' : 'https://admin-dev.rekkoo.com');
+  const CLIENT_URL_APP = process.env.CLIENT_URL_APP || (isProduction() ? 'https://app.rekkoo.com' : 'http://localhost:8081');
+  const CLIENT_URL_ADMIN = process.env.CLIENT_URL_ADMIN || (isProduction() ? 'https://admin.rekkoo.com' : 'https://admin-dev.rekkoo.com');
   
   if (target === 'app') {
     return `${CLIENT_URL_APP}/oauth/callback?error=authentication_failed`;

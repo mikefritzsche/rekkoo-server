@@ -153,7 +153,15 @@ commands:
             # Create environment-specific .env file
             echo "# Generated from CircleCI environment variables - $(date)" > /tmp/.env
             echo "# Environment: << parameters.environment >>" >> /tmp/.env
-            echo "NODE_ENV=<< parameters.environment >>" >> /tmp/.env
+            
+            # Set NODE_ENV based on environment parameter
+            if [ "<< parameters.environment >>" = "prod" ]; then
+              echo "NODE_ENV=production" >> /tmp/.env
+            elif [ "<< parameters.environment >>" = "staging" ]; then
+              echo "NODE_ENV=staging" >> /tmp/.env
+            else
+              echo "NODE_ENV=development" >> /tmp/.env
+            fi
             echo "" >> /tmp/.env
             
             # Get all environment variables and filter them
