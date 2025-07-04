@@ -644,7 +644,7 @@ const forgotPassword = async (req, res) => {
 
     if (result && result.user && result.resetToken) {
       // Send password reset email
-      const resetLink = `${process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com'}/reset-password?token=${result.resetToken}`;
+      const resetLink = `${process.env.CLIENT_URL_ADMIN || (process.env.NODE_ENV === 'production' ? 'https://admin.rekkoo.com' : 'https://admin-dev.rekkoo.com')}/reset-password?token=${result.resetToken}`;
       await emailService.sendPasswordResetEmail(result.user.email, result.user.username, resetLink);
     }
 
@@ -927,7 +927,7 @@ const oauthCallback = async (req, res) => {
     });
 
     // Redirect to frontend with tokens, or set cookies (legacy - now handled by passportCallback)
-    const adminUrl = process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com';
+    const adminUrl = process.env.CLIENT_URL_ADMIN || (process.env.NODE_ENV === 'production' ? 'https://admin.rekkoo.com' : 'https://admin-dev.rekkoo.com');
     const redirectUrl = `${adminUrl}/oauth/callback?accessToken=${result.appAccessToken}&refreshToken=${result.appRefreshToken}&userId=${result.user.id}`;
     return res.redirect(redirectUrl);
 
@@ -937,7 +937,7 @@ const oauthCallback = async (req, res) => {
       return res.status(error.status).json({ message: error.message });
     }
     // Redirect to an error page on the frontend
-    const adminUrl = process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com';
+    const adminUrl = process.env.CLIENT_URL_ADMIN || (process.env.NODE_ENV === 'production' ? 'https://admin.rekkoo.com' : 'https://admin-dev.rekkoo.com');
     return res.redirect(`${adminUrl}/auth/error?message=oauth_failed`);
   }
 };
@@ -1006,7 +1006,7 @@ const passportCallback = async (req, res) => {
         redirectFlag
       });
       
-      const appUrl = process.env.CLIENT_URL_APP || 'http://localhost:8081';
+      const appUrl = process.env.CLIENT_URL_APP || (process.env.NODE_ENV === 'production' ? 'https://app.rekkoo.com' : 'http://localhost:8081');
       
       if (isWebBrowser) {
         // For web browsers (desktop/laptop), redirect to oauth-callback route
@@ -1018,11 +1018,11 @@ const passportCallback = async (req, res) => {
         console.log('[passportCallback] Using mobile browser approach:', redirectUrl);
       }
     } else if (redirectFlag === 'admin') {
-      const adminUrl = process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com';
+      const adminUrl = process.env.CLIENT_URL_ADMIN || (process.env.NODE_ENV === 'production' ? 'https://admin.rekkoo.com' : 'https://admin-dev.rekkoo.com');
       redirectUrl = `${adminUrl}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
     } else {
       // Default to app client for better UX
-      const appUrl = process.env.CLIENT_URL_APP || 'http://localhost:8081';
+      const appUrl = process.env.CLIENT_URL_APP || (process.env.NODE_ENV === 'production' ? 'https://app.rekkoo.com' : 'http://localhost:8081');
       redirectUrl = `${appUrl}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
     }
     
@@ -1038,10 +1038,10 @@ const passportCallback = async (req, res) => {
     let errorRedirectUrl;
     
     if (redirectFlag === 'app') {
-      const appUrl = process.env.CLIENT_URL_APP || 'http://localhost:8081';
+      const appUrl = process.env.CLIENT_URL_APP || (process.env.NODE_ENV === 'production' ? 'https://app.rekkoo.com' : 'http://localhost:8081');
       errorRedirectUrl = `${appUrl}/oauth/callback?error=authentication_failed`;
     } else {
-      const adminUrl = process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com';
+      const adminUrl = process.env.CLIENT_URL_ADMIN || (process.env.NODE_ENV === 'production' ? 'https://admin.rekkoo.com' : 'https://admin-dev.rekkoo.com');
       errorRedirectUrl = `${adminUrl}/login?oauth=google&error=1`;
     }
     

@@ -102,9 +102,11 @@ app.use(cors({
       'http://localhost:3100',  // Express API itself (for server-to-server requests)
       'http://api-dev.rekkoo.com',
       'https://api-dev.rekkoo.com',
+      // Production URLs
       'https://app.rekkoo.com',
-      'http://rekkoo-admin.localhost',
       'https://admin.rekkoo.com',
+      // Development URLs
+      'http://rekkoo-admin.localhost',
       'http://admin-dev.rekkoo.com',
       'https://admin-dev.rekkoo.com'
     ];

@@ -461,8 +461,8 @@ router.get('/check', authenticateJWT, (req, res) => {
 });
 
 // ===================== Passport OAuth Routes =====================
-const CLIENT_URL_ADMIN = process.env.CLIENT_URL_ADMIN || 'https://admin-dev.rekkoo.com';
-const CLIENT_URL_APP = process.env.CLIENT_URL_APP || 'http://localhost:8081';
+const CLIENT_URL_ADMIN = process.env.CLIENT_URL_ADMIN || (process.env.NODE_ENV === 'production' ? 'https://admin.rekkoo.com' : 'https://admin-dev.rekkoo.com');
+const CLIENT_URL_APP = process.env.CLIENT_URL_APP || (process.env.NODE_ENV === 'production' ? 'https://app.rekkoo.com' : 'http://localhost:8081');
 
 // Helper functions for OAuth redirect management
 const validateOAuthRedirect = (target) => {

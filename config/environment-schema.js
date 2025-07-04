@@ -133,12 +133,12 @@ const environmentSchema = {
   CLIENT_URL_APP: {
     type: 'string',
     default: 'http://localhost:8081',
-    description: 'Mobile app client URL (Expo development server)'
+    description: 'Mobile app client URL (development: http://localhost:8081, production: https://app.rekkoo.com)'
   },
   CLIENT_URL_ADMIN: {
     type: 'string',
     default: 'https://admin-dev.rekkoo.com',
-    description: 'Admin client URL'
+    description: 'Admin client URL (development: https://admin-dev.rekkoo.com, production: https://admin.rekkoo.com)'
   },
 
   // Security
