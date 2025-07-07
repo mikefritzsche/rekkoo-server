@@ -26,7 +26,7 @@ if (MAILJET_ENABLED) {
   console.warn('[AuthController] Mailjet disabled – missing env keys');
 }
 
-const EXPIRES_IN = '30m';
+const EXPIRES_IN = '1m';
 
 // Helper function to generate a refresh token
 const generateRefreshToken = () => {
@@ -377,127 +377,82 @@ const login = async (req, res) => {
  * Refresh JWT token
  * @route POST /auth/refresh-token
  */
-const refreshToken = async (req, res) => { // This is the function declaration for refreshToken
+const refreshToken = async (req, res) => {
   try {
-    let { token } = req.body;
-    if (!token) {
-      // Allow client to send { refreshToken }
-      token = req.body.refreshToken;
-    }
-    if (!token) {
-      return res.status(401).json({ message: 'Refresh token is required' });
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(400).json({ message: 'Refresh token is required' });
     }
 
+    // Use a transaction to ensure atomicity
     const result = await db.transaction(async (client) => {
-      // Find refresh token in database
+      // Find the refresh token in the database
       const tokenResult = await client.query(
-        `SELECT user_id, expires_at FROM refresh_tokens WHERE token = $1`,
-        [token]
+        `SELECT user_id, expires_at, revoked
+         FROM refresh_tokens
+         WHERE token = $1`,
+        [refreshToken]
       );
 
       if (tokenResult.rows.length === 0) {
-        throw { status: 403, message: 'Invalid refresh token' };
+        throw { status: 401, message: 'Invalid refresh token' };
       }
 
-      const refreshTokenData = tokenResult.rows[0];
+      const tokenData = tokenResult.rows[0];
 
-      // Check if refresh token has expired
-      if (new Date(refreshTokenData.expires_at) < new Date()) {
-        // Optionally, delete expired token
-        await client.query(`DELETE FROM refresh_tokens WHERE token = $1`, [token]);
-        throw { status: 403, message: 'Refresh token has expired' };
+      // Check if the token is revoked or expired
+      if (tokenData.revoked) {
+        throw { status: 401, message: 'Refresh token has been revoked' };
+      }
+      if (new Date(tokenData.expires_at) < new Date()) {
+        throw { status: 401, message: 'Refresh token has expired' };
       }
 
-      // --- Account status hardening ---
-      const statusRes = await client.query(
-        `SELECT account_locked, admin_locked, deleted_at FROM users WHERE id = $1`,
-        [refreshTokenData.user_id]
-      );
-
-      if (
-        statusRes.rows.length === 0 ||
-        statusRes.rows[0].account_locked ||
-        statusRes.rows[0].admin_locked ||
-        statusRes.rows[0].deleted_at
-      ) {
-        // Invalidate existing refresh tokens for safety
-        await client.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [refreshTokenData.user_id]);
-        throw { status: 403, message: 'Account is unavailable (locked or deleted)' };
-      }
-
-      // Generate new access token
-      const newAccessToken = jwt.sign({ userId: refreshTokenData.user_id }, process.env.JWT_SECRET, {
-        expiresIn: EXPIRES_IN // New access token expires in 1 hour
-      });
-
-      // --- Update session with new access token so Socket.IO and other services can validate ---
-      // Replace the old session token with the freshly-issued access token (rolling sessions)
+      // Invalidate the old refresh token by revoking it
       await client.query(
-        `UPDATE user_sessions
-         SET token = $1,
-             last_activity_at = NOW(),
-             expires_at = NOW() + INTERVAL '30 days'
-         WHERE user_id = $2 AND token = $3`,
-        [newAccessToken, refreshTokenData.user_id, token]
+        `UPDATE refresh_tokens SET revoked = true WHERE token = $1`,
+        [refreshToken]
       );
 
-      // If no existing session row was updated (e.g., token was removed), create a new one
-      const { rowCount } = await client.query(
-        `SELECT 1 FROM user_sessions WHERE user_id = $1 AND token = $2`,
-        [refreshTokenData.user_id, newAccessToken]
+      // Fetch user data for the new access token payload
+      const userResult = await client.query(
+        `SELECT u.id, u.username, u.email, array_agg(r.name) as roles
+         FROM users u
+         JOIN user_roles ur ON u.id = ur.user_id
+         JOIN roles r ON ur.role_id = r.id
+         WHERE u.id = $1
+         GROUP BY u.id`,
+        [tokenData.user_id]
       );
 
-      if (rowCount === 0) {
-        await client.query(
-          `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
-           VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '30 days')`,
-          [refreshTokenData.user_id, newAccessToken, refreshTokenValue, req.ip, req.headers['user-agent']]
-        );
+      if (userResult.rows.length === 0) {
+        throw { status: 404, message: 'User not found' };
       }
 
-      // Generate new refresh token
-      const newRefreshTokenValue = generateRefreshToken();
-      const newRefreshTokenExpiresAt = new Date();
-      newRefreshTokenExpiresAt.setDate(newRefreshTokenExpiresAt.getDate() + 30); // 30 days
+      const user = userResult.rows[0];
 
-      // Update the existing refresh token with the new one and new expiry
-      // Or, if you prefer a rolling refresh token, insert a new one and delete the old one
+      // Generate a new access token
+      const accessToken = jwt.sign(
+        { userId: user.id, username: user.username, roles: user.roles },
+        process.env.JWT_SECRET,
+        { expiresIn: '15m' } // Short-lived access token
+      );
+
+      // Generate a new refresh token
+      const newRefreshToken = generateRefreshToken();
       await client.query(
-        `UPDATE refresh_tokens 
-         SET token = $1, expires_at = $2 
-         WHERE user_id = $3 AND token = $4`,
-        [newRefreshTokenValue, newRefreshTokenExpiresAt, refreshTokenData.user_id, token]
-      );
-      
-      // Log token refresh event
-      await client.query(
-        `INSERT INTO auth_logs (user_id, event_type, ip_address, user_agent, details)
-         VALUES ($1, 'token_refresh', $2, $3, $4)`,
-        [
-          refreshTokenData.user_id,
-          req.ip,
-          req.headers['user-agent'],
-          JSON.stringify({ new_access_token: newAccessToken, old_refresh_token: token, new_refresh_token: newRefreshTokenValue })
-        ]
+        `INSERT INTO refresh_tokens (token, user_id, expires_at)
+         VALUES ($1, $2, NOW() + INTERVAL '7 days')`,
+        [newRefreshToken, user.id]
       );
 
-      // Fetch user basic profile for response
-      const userRes = await client.query(
-        `SELECT id, username, email, full_name, profile_image_url FROM users WHERE id = $1`,
-        [refreshTokenData.user_id]
-      );
-      const userObj = userRes.rows[0] || { id: refreshTokenData.user_id };
-
-      return { newAccessToken, newRefreshToken: newRefreshTokenValue, userObj }; // Return with user
+      return { accessToken, refreshToken: newRefreshToken };
     });
 
-    return res.status(200).json({
-      accessToken: result.newAccessToken,
-      refreshToken: result.newRefreshToken,
-      user: result.userObj,
-    });
+    return res.status(200).json(result);
   } catch (error) {
-    // console.error('Refresh token error:', error);
+    console.error('Token refresh error:', error);
     if (error.status) {
       return res.status(error.status).json({ message: error.message });
     }
@@ -954,7 +909,7 @@ const oauthCallback = async (req, res) => {
 
       await client.query(
         `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
-         VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '30 days')
+         VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '30 days')
          ON CONFLICT DO NOTHING`,
         [user.id, appAccessToken, appRefreshToken, req.ip, req.headers['user-agent']]
       );

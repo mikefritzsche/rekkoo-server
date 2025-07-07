@@ -137,45 +137,7 @@ router.get('/amazon/spapi-callback', async (req, res) => {
 });
 
 // Refresh access token when it expires
-router.get('/refresh-token', async (req, res) => {
-  // Check if user has refresh token
-  if (!req.session.spApiTokens || !req.session.spApiTokens.refresh_token) {
-    return res.status(401).json({ error: 'No refresh token available. Please authenticate again.' });
-  }
-
-  try {
-    const refreshResponse = await axios.post(amazonTokenUrl, qs.stringify({
-      grant_type: 'refresh_token',
-      refresh_token: req.session.spApiTokens.refresh_token,
-      client_id: AMAZON_CLIENT_ID,
-      client_secret: AMAZON_CLIENT_SECRET,
-    }), {
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      }
-    });
-
-    const { access_token, refresh_token, expires_in } = refreshResponse.data;
-
-    console.log(`refresh access/refresh token: `, [access_token, refresh_token])
-    console.log(`refresh expires in: `, expires_in)
-
-    // Update session with new tokens
-    req.session.spApiTokens = {
-      ...req.session.spApiTokens,
-      access_token,
-      // Amazon might not return a new refresh token every time
-      refresh_token: refresh_token || req.session.spApiTokens.refresh_token,
-      expires_at: Date.now() + expires_in * 1000
-    };
-
-    res.json({ success: true, expires_in });
-
-  } catch (error) {
-    console.error('Error refreshing token:', error.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to refresh access token.' });
-  }
-});
+router.post('/refresh', AuthController.refreshToken);
 
 // https://www.amazon.com/ap/oa?client_id=amzn1.application-oa2-client.4ba4635cf6c941ee9ba658809a50d0c6&scope=profile:user_id%20profile:email%20profile:name%20profile:postal_code&response_type=code&redirect_uri=https%3A%2F%2Fapi.rekkoo.com%2Fauth%2Famazon%2Fcallback
 
