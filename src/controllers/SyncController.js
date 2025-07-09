@@ -115,6 +115,17 @@ function syncControllerFactory(socketService) {
     return { status: 'created', serverId: insertResult.rows[0].id, affectedRows: 1 };
   }
 
+  // Helper function to get valid columns for a table to prevent SQL errors
+  async function getTableColumns(client, tableName) {
+    const query = `
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = $1;
+    `;
+    const result = await client.query(query, [tableName]);
+    return result.rows.map(row => row.column_name);
+  }
+
   /**
    * Handles pushing changes from the client to the server.
    * Processes created, updated, and deleted records for various tables.
@@ -170,24 +181,46 @@ function syncControllerFactory(socketService) {
           let tableUserIdentifierColumn = getUserIdentifierColumn(tableName);
           const isUserSettingsTable = tableName === 'user_settings';
 
+          // Get valid columns for the table
+          const validColumns = await getTableColumns(client, tableName);
+
+          // --- FINAL ATTEMPT TO FIX DOUBLE-ENCODING ---
+          // The entire data payload can arrive as a string. Parse it.
+          let dataPayload = data;
+          if (typeof dataPayload === 'string') {
+            try {
+              dataPayload = JSON.parse(dataPayload);
+            } catch (e) {
+              logger.warn(`[SyncController] Could not parse stringified 'data' payload for record ${clientRecordId}. Skipping.`);
+              results.push({ id: clientRecordId, success: false, error: 'Malformed data payload' });
+              continue; // Skip to the next change in the loop
+            }
+          }
+          // --- END FIX ---
+
+          if (!dataPayload) {
+            logger.warn(`[SyncController] Skipping change with no data for record ${clientRecordId}`);
+            continue;
+          }
+
           // Handle BATCH_LIST_ORDER_UPDATE specifically
           if (operation === 'BATCH_LIST_ORDER_UPDATE') {
-            if (tableName !== 'lists' && data.targetTable !== 'lists') { // Allow data.targetTable for flexibility
-                 logger.warn(`[SyncController] BATCH_LIST_ORDER_UPDATE received for unexpected table: ${tableName || data.targetTable}. Skipping.`);
+            if (tableName !== 'lists' && dataPayload.targetTable !== 'lists') { // Allow data.targetTable for flexibility
+                 logger.warn(`[SyncController] BATCH_LIST_ORDER_UPDATE received for unexpected table: ${tableName || dataPayload.targetTable}. Skipping.`);
                  results.push({
                     operation,
-                    clientRecordId: data.operationId || 'N/A', // Client might send an operationId for the batch
+                    clientRecordId: dataPayload.operationId || 'N/A', // Client might send an operationId for the batch
                     status: 'error_invalid_batch_table',
                     error: `Batch list order update is only for 'lists' table.`
                 });
                 continue;
             }
-            const listOrders = Array.isArray(data.items) ? data.items : (Array.isArray(data) ? data : null);
+            const listOrders = Array.isArray(dataPayload.items) ? dataPayload.items : (Array.isArray(data) ? data : null);
             if (!listOrders) {
-                logger.error('[SyncController] BATCH_LIST_ORDER_UPDATE missing or invalid items array in data:', data);
+                logger.error('[SyncController] BATCH_LIST_ORDER_UPDATE missing or invalid items array in data:', dataPayload);
                 results.push({
                     operation,
-                    clientRecordId: data.operationId || 'N/A',
+                    clientRecordId: dataPayload.operationId || 'N/A',
                     status: 'error_missing_batch_items',
                     error: 'BATCH_LIST_ORDER_UPDATE payload must contain an array of list orders in data.items or directly in data.'
                 });
@@ -198,7 +231,7 @@ function syncControllerFactory(socketService) {
                 await ListService.batchUpdateListOrder(listOrders); // Assumes ListService is imported and available
                 results.push({
                     operation,
-                    clientRecordId: data.operationId || 'batch_success', // Use a general success ID or one from client
+                    clientRecordId: dataPayload.operationId || 'batch_success', // Use a general success ID or one from client
                     status: 'batch_updated',
                     message: `Successfully processed batch order update for ${listOrders.length} lists.`
                 });
@@ -206,7 +239,7 @@ function syncControllerFactory(socketService) {
                 logger.error('[SyncController] Error processing BATCH_LIST_ORDER_UPDATE:', batchError);
                 results.push({
                     operation,
-                    clientRecordId: data.operationId || 'batch_error',
+                    clientRecordId: dataPayload.operationId || 'batch_error',
                     status: 'error_batch_processing',
                     error: batchError.message || 'Failed to process batch list order update.'
                 });
@@ -215,12 +248,12 @@ function syncControllerFactory(socketService) {
           }
           // Handle BATCH_FAVORITES_UPDATE
           else if (operation === 'BATCH_FAVORITES_UPDATE') {
-            const favoriteItems = Array.isArray(data.items) ? data.items : null;
+            const favoriteItems = Array.isArray(dataPayload.items) ? dataPayload.items : null;
             if (!favoriteItems) {
-              logger.error('[SyncController] BATCH_FAVORITES_UPDATE missing or invalid items array in data:', data);
+              logger.error('[SyncController] BATCH_FAVORITES_UPDATE missing or invalid items array in data:', dataPayload);
               results.push({
                 operation,
-                clientRecordId: data.operationId || 'N/A',
+                clientRecordId: dataPayload.operationId || 'N/A',
                 status: 'error_missing_batch_items',
                 error: 'BATCH_FAVORITES_UPDATE payload must contain an array of favorite items in data.items.'
               });
@@ -364,7 +397,7 @@ function syncControllerFactory(socketService) {
             }
             results.push({
               operation,
-              clientRecordId: data.operationId || 'batch_favorites_processed',
+              clientRecordId: dataPayload.operationId || 'batch_favorites_processed',
               status: 'batch_processed',
               itemResults: batchResults
             });
@@ -373,12 +406,12 @@ function syncControllerFactory(socketService) {
           // Handle USER_SETTINGS table (create / update / delete)
           else if (tableName === 'user_settings') {
             try {
-              if (data && data.user_id && data.user_id !== userId) {
-                logger.warn(`[SyncController] Ignoring user_settings change for mismatched user_id ${data.user_id} (auth user ${userId})`);
+              if (dataPayload && dataPayload.user_id && dataPayload.user_id !== userId) {
+                logger.warn(`[SyncController] Ignoring user_settings change for mismatched user_id ${dataPayload.user_id} (auth user ${userId})`);
                 results.push({
                   tableName,
                   operation,
-                  clientRecordId: clientRecordId || data.user_id,
+                  clientRecordId: clientRecordId || dataPayload.user_id,
                   status: 'error_user_mismatch',
                   error: 'user_id in payload does not match authenticated user.'
                 });
@@ -411,10 +444,10 @@ function syncControllerFactory(socketService) {
                 ];
                 const cols = [];
                 const vals = [];
-                Object.keys(data || {}).forEach((k) => {
+                Object.keys(dataPayload || {}).forEach((k) => {
                   if (allowedCols.includes(k)) {
                     cols.push(k);
-                    vals.push(data[k]);
+                    vals.push(dataPayload[k]);
                   }
                 });
                 if (!cols.includes('user_id')) {
@@ -458,7 +491,7 @@ function syncControllerFactory(socketService) {
           else if (tableName === 'favorites' && operation === 'create') {
             logger.info(`[SyncController] Processing single favorite create for clientRecordId: ${clientRecordId}`);
             try {
-                const favoriteDataPayload = { ...data, id: clientRecordId };
+                const favoriteDataPayload = { ...dataPayload, id: clientRecordId };
                 
                 const result = await processSingleFavoriteAddOrRestore(client, userId, favoriteDataPayload);
                 results.push({ 
@@ -513,265 +546,117 @@ function syncControllerFactory(socketService) {
           
           // More general handling for other tables
           if (operation === 'create') {
-            const { id: clientProvidedId, ...recordData } = data;
-            
-            // Ensure owner_id is set for tables that require it
-            if ((tableName === 'lists' || tableName === 'list_items') && !recordData.owner_id) {
-                 if (tableUserIdentifierColumn) {
-                     recordData[tableUserIdentifierColumn] = userId;
-                 } else {
-                      logger.error(`[SyncController] Create: Missing user identifier column for main table ${tableName}. Aborting create for this record.`);
-                      results.push({ operation, tableName, clientRecordId, status: 'error_missing_user_identifier' });
-                      continue;
-                 }
+            const createData = { ...dataPayload };
+            // Ensure ID is present for creation
+            if (!createData.id) {
+              logger.warn(`[SyncController] Skipping create for table '${tableName}': missing 'id'.`, dataPayload);
+              continue;
             }
 
-            // Insert the main record using the client-provided ID
-            const baseRecord = { ...recordData, id: clientProvidedId };
-            delete baseRecord.api_metadata; // Don't insert this into the base record yet
-            
-            const columns = Object.keys(baseRecord).filter(k => baseRecord[k] !== undefined);
-            const values = columns.map(col => baseRecord[col]);
-            const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
-
-            const insertQuery = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders})`;
-            await client.query(insertQuery, values);
-            
-            // ==> START NEW LOGIC FOR LIST ITEM DETAILS
-            if (tableName === 'list_items') {
-                const itemType = recordData.api_source;
-                const detailTableName = getDetailTableName(itemType);
-
-                if (detailTableName && recordData.api_metadata) {
-                    try {
-                        const detailRecord = await ListService.createDetailRecord(client, detailTableName, recordData.api_metadata, clientProvidedId, data);
-                        if (detailRecord) {
-                            const detailIdColumn = `${itemType}_detail_id`;
-                            const updateQuery = `UPDATE list_items SET ${detailIdColumn} = $1 WHERE id = $2`;
-                            await client.query(updateQuery, [detailRecord.id, clientProvidedId]);
-                        }
-                    } catch (detailError) {
-                        logger.error(`[SyncController] Error creating detail record for item type ${itemType}:`, detailError);
-                        // The transaction will be rolled back
-                    }
-                }
+            // For list_items, parse custom_fields if it's a string
+            if (tableName === 'list_items' && typeof createData.custom_fields === 'string') {
+              try {
+                createData.custom_fields = JSON.parse(createData.custom_fields);
+              } catch (e) {
+                logger.error(`[SyncController] Error parsing custom_fields for create in '${tableName}':`, e);
+                // Decide how to handle - skip, or insert with null custom_fields?
+                // For now, we'll set it to null and log the error.
+                createData.custom_fields = null; 
+              }
             }
-            // ==> END NEW LOGIC
-            results.push({ operation, clientRecordId, status: 'created', serverId: clientProvidedId });
+
+            // Filter out fields that don't exist in the table
+            const filteredData = Object.keys(createData)
+              .filter(key => validColumns.includes(key))
+              .reduce((obj, key) => {
+                obj[key] = createData[key];
+                return obj;
+              }, {});
+
+            const fields = Object.keys(filteredData);
+            const values = Object.values(filteredData);
+            const placeholders = fields.map((_, i) => `$${i + 1}`).join(', ');
+            
+            const insertQuery = `INSERT INTO "${tableName}" (${fields.map(f => `"${f}"`).join(', ')}) VALUES (${placeholders}) RETURNING id`;
+            const result = await client.query(insertQuery, values);
+            
+            results.push({
+              operation,
+              clientRecordId,
+              status: 'created',
+              serverId: result.rows[0].id
+            });
+
           } else if (operation === 'update') {
-            const recordToUpdate = { ...data };
-            delete recordToUpdate.id; // Remove 'id' if it's the client's local ID from the data payload
-            delete recordToUpdate._status; delete recordToUpdate._changed; delete recordToUpdate.details; delete recordToUpdate.created_at;
-            
-            recordToUpdate.updated_at = new Date();
-            logger.info(`[SyncController] Updating record in ${tableName} (Client ID: ${clientRecordId}, User PK: ${data.user_id || clientRecordId}): Payload:`, recordToUpdate);
+            const updateData = { ...dataPayload };
+            const recordId = clientRecordId || updateData.id;
 
-            if (Object.keys(recordToUpdate).length === 0) {
-                logger.warn(`[SyncController] No fields to update for ${tableName} (Client ID: ${clientRecordId}). Skipping.`);
+            if (!recordId) {
+                logger.warn(`[SyncController] Skipping update for table '${tableName}': missing 'record_id' or 'data.id'.`, changeItem);
                 continue;
             }
+            
+            // For list_items, parse custom_fields if it's a string
+            if (tableName === 'list_items') {
+                ['custom_fields', 'api_metadata'].forEach(col => {
+                    if (updateData[col] && typeof updateData[col] === 'object') {
+                        updateData[col] = JSON.stringify(updateData[col]);
+                    }
+                });
+            }
 
-            const setClauses = Object.keys(recordToUpdate).map((key, i) => `${client.escapeIdentifier(key)} = $${i + 1}`).join(', ');
-            const values = Object.values(recordToUpdate);
-            let query;
+            // Remove id from the update payload itself
+            delete updateData.id; 
 
-            if (isUserSettingsTable) {
-              if (!data.user_id) {
-                logger.error(`[SyncController] Update for user_settings failed: data.user_id is missing. Client ID: ${clientRecordId}`);
-                continue;
-              }
-              values.push(data.user_id); // Use data.user_id for the WHERE clause
-              query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE ${client.escapeIdentifier('user_id')} = $${values.length}`;
-              logger.info(`[SyncController] UserSettings Update Query: ${query}, Values: `, values);
-            } else {
-              // Generic update logic for other tables (using clientRecordId which should be the server's actual ID for updates)
-              if (!clientRecordId) {
-                  logger.error(`[SyncController] Update for ${tableName} failed: clientRecordId is missing.`);
-                  continue;
-              }
-              values.push(clientRecordId); 
-              if (tableName === 'users') {
-                // For users table, we only allow users to update their own record
-                query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE id = $${values.length} AND id = '${userId}'`;
-              } else if (tableUserIdentifierColumn) {
-                values.push(userId);
-                query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE id = $${values.length - 1} AND ${client.escapeIdentifier(tableUserIdentifierColumn)} = $${values.length}`;
-              } else { // For detail tables assumed to be updated only by their own id, after parent ownership check
-                query = `UPDATE ${client.escapeIdentifier(tableName)} SET ${setClauses} WHERE id = $${values.length}`;
-                logger.warn(`[SyncController] Updating detail table ${tableName} without direct user/owner filter by its ID. Ensure parent ownership was checked.`);
-              }
+            // Filter out fields that don't exist in the table
+            const filteredData = Object.keys(updateData)
+              .filter(key => validColumns.includes(key))
+              .reduce((obj, key) => {
+                obj[key] = updateData[key];
+                return obj;
+              }, {});
+            
+            const fieldsToUpdate = Object.keys(filteredData);
+            if (fieldsToUpdate.length === 0) {
+              logger.warn(`[SyncController] Skipping update for '${tableName}' ID ${recordId}: No valid fields to update after filtering.`);
+              continue;
             }
             
-            logger.info(`[SyncController] Executing Update for ${tableName}: Query: ${query.substring(0, 200)}..., Values Count: ${values.length}`);
-            const updateResult = await client.query(query, values);
-            logger.info(`[SyncController] Update result for ${tableName} (Client ID: ${clientRecordId}): ${updateResult.rowCount} row(s) affected.`);
-            if (updateResult.rowCount > 0) {
-              results.push({ operation, tableName, clientRecordId, status: 'updated', affectedRows: updateResult.rowCount }); // Add to results
-              // Sync tracking is now handled automatically by database triggers
-              const recordIdForSync = isUserSettingsTable ? data.user_id : clientRecordId;
+            const setClauses = fieldsToUpdate.map((field, i) => `"${field}" = $${i + 1}`).join(', ');
+            const queryValues = fieldsToUpdate.map(field => filteredData[field]);
+            
+            const updateQuery = `UPDATE "${tableName}" SET ${setClauses}, updated_at = CURRENT_TIMESTAMP WHERE id = $${fieldsToUpdate.length + 1}`;
+            logger.error(
+              '[DEBUG-JSON] about to UPDATE list_items',
+              JSON.stringify(filteredData, null, 2)
+            );
+            await client.query(updateQuery, [...queryValues, recordId]);
 
-                // WebSocket notification for user_settings
-                if (isUserSettingsTable && socketService && recordIdForSync === data.user_id) { 
-                  try {
-                    logger.info(`[SyncController DEBUG] About to notify user ${data.user_id}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
-                    await socketService.notifyUser(data.user_id, 'sync_update_available', {
-                      message: `User settings updated for user ${data.user_id}`,
-                      source: 'push', 
-                      changes: [{ 
-                          table: 'user_settings', 
-                          id: data.user_id,     
-                          operation: operation
-                      }]
-                    });
-                    logger.info(`[SyncController] Sent 'sync_update_available' (user_settings) to user ${data.user_id}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
-                  } catch (wsError) {
-                    logger.error(`[SyncController] Error sending WebSocket notification for user_settings update to user ${data.user_id}:`, wsError);
-                  }
-                }
-
-                // Queue embedding generation for list_items and lists after successful UPDATE
-                if (tableName === 'list_items' || tableName === 'lists' || tableName === 'favorites' || tableName === 'followers') {
-                  try {
-                    const entityIdForEmbedding = recordIdForSync || clientRecordId;
-                    let entityTypeForEmbedding;
-                    if (tableName === 'list_items') entityTypeForEmbedding = 'list_item';
-                    else if (tableName === 'lists') entityTypeForEmbedding = 'list';
-                    else if (tableName === 'favorites') entityTypeForEmbedding = 'favorite';
-                    else if (tableName === 'followers') entityTypeForEmbedding = 'follower';
-                    await EmbeddingService.queueEmbeddingGeneration(
-                      entityIdForEmbedding,
-                      entityTypeForEmbedding,
-                      {
-                        operation,
-                        priority: 'normal'
-                      }
-                    );
-                    logger.info(`[SyncController] Queued embedding generation (UPDATE) for ${tableName}/${entityIdForEmbedding}`);
-                  } catch (embeddingError) {
-                    logger.error(`[SyncController] Failed to queue embedding generation for ${tableName}/${recordIdForSync}:`, embeddingError);
-                    // Do not interrupt the update flow if queuing fails
-                  }
-                }
-            } else if (isUserSettingsTable) {
-                logger.warn(`[SyncController] WARN: User settings update for user_id ${data.user_id} affected 0 rows. Does the record exist?`);
-                // Even if 0 rows affected, consider it 'processed' from client's perspective if no error thrown
-                results.push({ operation, tableName, clientRecordId, status: 'noop_or_not_found', affectedRows: 0 });
-            } else {
-                 logger.warn(`[SyncController] WARN: Update for ${tableName} ID ${clientRecordId} (User ${userId}) affected 0 rows. Does the record exist and belong to user?`);
-                 results.push({ operation, tableName, clientRecordId, status: 'noop_or_not_found', affectedRows: 0 });
-            }
-
-            // TODO: Handle list_items with details update if necessary (simplified for now)
-            if (tableName === 'list_items' && data.api_metadata) {
-                // Logic to find existing movie_detail_id
-                // Decide to UPDATE existing movie_detail or INSERT new if not found (and maybe delete old)
-                // This is more complex than create.
-            }
+            results.push({
+              operation,
+              clientRecordId: recordId,
+              status: 'updated'
+            });
 
           } else if (operation === 'delete') {
             if (!clientRecordId) {
-                logger.error(`[SyncController] Delete for ${tableName} failed: clientRecordId is missing.`);
-                continue;
+              logger.warn(`[SyncController] Skipping delete for table '${tableName}': missing 'record_id'.`, changeItem);
+              continue;
             }
-            logger.info(`[SyncController] Deleting record from ${tableName} (ID: ${clientRecordId})`);
+            // Soft delete by setting deleted_at
+            const deleteQuery = `UPDATE "${tableName}" SET _deleted = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1`;
+            await client.query(deleteQuery, [clientRecordId]);
             
-            let query;
-            let deleteResult;
-            let recordIdForDeleteSync = clientRecordId;
-
-            // Special case: Favorites should be soft-deleted
-            if (tableName === 'favorites') {
-                query = `
-                  UPDATE ${client.escapeIdentifier(tableName)}
-                  SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                  WHERE id = $1 AND user_id = $2
-                  RETURNING id
-                `;
-                deleteResult = await client.query(query, [clientRecordId, userId]);
-            } 
-            // Special case: Followers should be soft-deleted (identified by 'follower_id' and 'followed_id' ideally, but client sends one ID)
-            // For deletion, the client will send the 'id' of the followers record.
-            // The ownership check is that the 'follower_id' in that record matches the current userId.
-            else if (tableName === 'followers') {
-                query = `
-                  UPDATE ${client.escapeIdentifier(tableName)}
-                  SET deleted_at = CURRENT_TIMESTAMP
-                  WHERE id = $1 AND ${client.escapeIdentifier('follower_id')} = $2
-                  RETURNING id
-                `;
-                deleteResult = await client.query(query, [clientRecordId, userId]);
-            }
-            // Other tables use hard delete (or their own soft delete logic)
-            else if (isUserSettingsTable) {
-                query = `DELETE FROM ${client.escapeIdentifier(tableName)} WHERE ${client.escapeIdentifier('user_id')} = $1`;
-                deleteResult = await client.query(query, [userId]);
-                recordIdForDeleteSync = userId;
-            } else {
-                if (tableUserIdentifierColumn) {
-                    query = `DELETE FROM ${client.escapeIdentifier(tableName)} WHERE id = $1 AND ${client.escapeIdentifier(tableUserIdentifierColumn)} = $2`;
-                    deleteResult = await client.query(query, [clientRecordId, userId]);
-                } else {
-                    query = `DELETE FROM ${client.escapeIdentifier(tableName)} WHERE id = $1`;
-                    deleteResult = await client.query(query, [clientRecordId]);
-                }
-            }
-
-            logger.info(`[SyncController] Delete result for ${tableName} (Client ID: ${clientRecordId}): ${deleteResult.rowCount} row(s) affected.`);
-            results.push({ operation, tableName, clientRecordId, status: 'deleted', affectedRows: deleteResult.rowCount });
-
-            if (deleteResult.rowCount > 0) {
-              // Sync tracking is now handled automatically by database triggers
-              
-              // Mark embedding as inactive (soft delete) for supported entity types
-                  if (['list_items', 'lists', 'favorites', 'followers'].includes(tableName)) {
-                      try {
-                          let embType;
-                          if (tableName === 'list_items') embType = 'list_item';
-                          else if (tableName === 'lists') embType = 'list';
-                          else if (tableName === 'favorites') embType = 'favorite';
-                          else if (tableName === 'followers') embType = 'follower';
-
-                          await EmbeddingService.deactivateEmbedding(recordIdForDeleteSync, embType);
-                      } catch (embErr) {
-                          logger.error(`[SyncController] Failed to deactivate embedding for ${tableName}/${recordIdForDeleteSync}:`, embErr);
-                      }
-                  }
-                  
-                  // WebSocket notification for user_settings deletion
-                  if (isUserSettingsTable && socketService && recordIdForDeleteSync === userId) { 
-                     try {
-                        logger.info(`[SyncController DEBUG] About to notify user (delete) ${userId}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
-                        await socketService.notifyUser(userId, 'sync_update_available', {
-                            message: `User settings deleted for user ${userId}`,
-                            source: 'push',
-                            changes: [{
-                                table: 'user_settings',
-                                id: userId,
-                                operation: operation // 'delete'
-                            }]
-                        });
-                        logger.info(`[SyncController] Sent 'sync_update_available' (user_settings delete) to user ${userId}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
-                    } catch (wsError) {
-                        logger.error(`[SyncController] Error sending WebSocket notification for user_settings delete to user ${userId}:`, wsError);
-                    }
-                  }
-            }
-
-            // TODO: Handle list_items with details deletion if necessary (simplified for now)
-            // Note: For delete operations, we don't have access to the original data.api_metadata
-            // If needed, we could query the database to fetch the list_item before deletion
-            // to get the api_metadata, but for now we skip this complex logic.
-            if (tableName === 'list_items') {
-                // Logic for cleaning up related movie_details/tv_details could go here
-                // For now, we rely on database CASCADE constraints or separate cleanup jobs
-            }
-          } else {
-            logger.warn(`[SyncController] Unknown operation '${operation}' for table '${tableName}'. Skipping.`);
-            results.push({ operation, tableName, clientRecordId, status: 'skipped_unknown_operation' });
+            results.push({
+              operation,
+              clientRecordId,
+              status: 'deleted'
+            });
           }
         }
       });
-      // If transaction is successful
+      
+      // After transaction completes successfully
       socketService.notifyUser(userId, 'syncComplete', { message: 'Push processed', results });
       res.status(200).json({ success: true, message: 'Changes pushed and processed successfully.', results });
     } catch (error) {
