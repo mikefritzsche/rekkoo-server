@@ -5,6 +5,7 @@ require('dotenv').config(); // Ensure environment variables are loaded
 
 // --- Environment Variables & Constants ---
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_API_KEY_DEVONE = process.env.GEMINI_API_KEY_DEVONE;
 if (!GEMINI_API_KEY) {
   console.error("FATAL ERROR: GEMINI_API_KEY environment variable not set.");
   // Consider how your application should behave if the key is missing

@@ -137,6 +137,27 @@ function syncControllerFactory(socketService) {
     // console.log(`[SyncController] User ${userId} pushing ${clientChangesArray.length} changes. Current time: ${new Date().toISOString()}`);
 
     try {
+      // Define the desired order of table operations to avoid foreign key violations
+      const tableOrder = [
+        'users',
+        'lists',
+        'list_items',
+        'favorites',
+        // Add other tables in an order that respects dependencies
+      ];
+
+      // Sort the changes array based on the defined table order
+      clientChangesArray.sort((a, b) => {
+        const aIndex = tableOrder.indexOf(a.table_name);
+        const bIndex = tableOrder.indexOf(b.table_name);
+        
+        // If a table is not in the order list, it gets lower priority
+        const effectiveAIndex = aIndex === -1 ? Infinity : aIndex;
+        const effectiveBIndex = bIndex === -1 ? Infinity : bIndex;
+        
+        return effectiveAIndex - effectiveBIndex;
+      });
+      
       await db.transaction(async (client) => {
         for (const changeItem of clientChangesArray) {
           const { table_name: tableName, operation, record_id: clientRecordId, data } = changeItem;
@@ -146,6 +167,9 @@ function syncControllerFactory(socketService) {
             continue;
           }
           
+          let tableUserIdentifierColumn = getUserIdentifierColumn(tableName);
+          const isUserSettingsTable = tableName === 'user_settings';
+
           // Handle BATCH_LIST_ORDER_UPDATE specifically
           if (operation === 'BATCH_LIST_ORDER_UPDATE') {
             if (tableName !== 'lists' && data.targetTable !== 'lists') { // Allow data.targetTable for flexibility
@@ -487,294 +511,53 @@ function syncControllerFactory(socketService) {
           }
           // END ---- NEW LOGIC FOR SINGLE FAVORITE CREATE ---- END
           
-          // Existing logic for other operations (create, update, delete)
-          if (!tableName) {
-            logger.warn('[SyncController] Skipping invalid change item (missing tableName for non-batch op):', changeItem);
-            continue;
-          }
-
-          logger.debug(`[SyncController] Processing operation '${operation}' for table '${tableName}', clientRecordId '${clientRecordId}'`);
-
-          let tableUserIdentifierColumn = getUserIdentifierColumn(tableName);
-          
-          // Special handling for user_settings table's identifier for WHERE clause
-          const isUserSettingsTable = tableName === 'user_settings';
-
-          if (!tableUserIdentifierColumn && !DETAIL_TABLES_MAP[tableName.replace('_details', '')]) {
-            logger.error(`[SyncController] CRITICAL: No user identifier column defined for non-detail table ${tableName} in getUserIdentifierColumn. Defaulting to user_id but this needs review.`);
-            tableUserIdentifierColumn = 'user_id'; // Fallback, but ideally getUserIdentifierColumn should cover all main tables
-          }
-
+          // More general handling for other tables
           if (operation === 'create') {
-            // Skip user_settings as it has special handling above
-            if (tableName === 'user_settings') {
-              logger.warn(`[SyncController] Skipping general create logic for user_settings as it has special handling above.`);
-              continue;
-            }
+            const { id: clientProvidedId, ...recordData } = data;
             
-            const recordToCreate = { ...data };
-            // Ensure the client-provided ID is part of the record to be created
-            if (!recordToCreate.id) {
-              logger.error(`[SyncController] Create operation for ${tableName} is missing an 'id' in the data payload. ClientRecordId was: ${clientRecordId}. Payload:`, data);
-              results.push({ operation, tableName, clientRecordId, status: 'error_missing_id_payload', error: "Missing 'id' in data payload for create operation." });
-              continue; // Skip this item
-            }
-            
-            // Ensure owner_id is set correctly based on the authenticated user
-            if (!DETAIL_TABLES_MAP[tableName.replace('_details', '')]) { // Not a detail table
-                if (tableUserIdentifierColumn) {
-                    recordToCreate[tableUserIdentifierColumn] = userId;
-                } else {
-                     logger.error(`[SyncController] Create: Missing user identifier column for main table ${tableName}. Aborting create for this record.`);
-                     results.push({ operation, tableName, clientRecordId, status: 'error_missing_user_column', error: `Missing user identifier column for table ${tableName}` });
-                     continue; 
-                }
-            } else { // Is a detail table, ensure user_id/owner_id if present is set
-                if (recordToCreate.hasOwnProperty('user_id')) recordToCreate.user_id = userId;
-                else if (recordToCreate.hasOwnProperty('owner_id')) recordToCreate.owner_id = userId;
+            // Ensure owner_id is set for tables that require it
+            if ((tableName === 'lists' || tableName === 'list_items') && !recordData.owner_id) {
+                 if (tableUserIdentifierColumn) {
+                     recordData[tableUserIdentifierColumn] = userId;
+                 } else {
+                      logger.error(`[SyncController] Create: Missing user identifier column for main table ${tableName}. Aborting create for this record.`);
+                      results.push({ operation, tableName, clientRecordId, status: 'error_missing_user_identifier' });
+                      continue;
+                 }
             }
 
-            recordToCreate.updated_at = new Date();
-            if (!recordToCreate.created_at) recordToCreate.created_at = new Date();
-
-            // Prepare baseRecord for insertion, excluding api_metadata for the main list_items insert
-            const baseRecord = { ...recordToCreate };
-            // Only delete api_metadata and custom_fields if they are NOT actual columns 
-            // in the target table. Assuming list_items might have these as JSON/JSONB columns.
-            // If they are processed into other fields entirely and not stored as blobs, then delete.
-            // For now, let's assume they *could* be columns and avoid deleting if present in data.
-            // The specific INSERT query will only use keys present in baseRecord that match table columns.
+            // Insert the main record using the client-provided ID
+            const baseRecord = { ...recordData, id: clientProvidedId };
+            delete baseRecord.api_metadata; // Don't insert this into the base record yet
             
-            // delete baseRecord.api_metadata; // Conditional deletion or let DB handle unknown columns
-            // delete baseRecord.custom_fields; // Conditional deletion
-            delete baseRecord.details; // This was an example, ensure it's not a real field or handle appropriately
-            
-            const columns = Object.keys(baseRecord).filter(key => key !== '_status' && key !== '_changed'); 
+            const columns = Object.keys(baseRecord).filter(k => baseRecord[k] !== undefined);
             const values = columns.map(col => baseRecord[col]);
             const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+
+            const insertQuery = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders})`;
+            await client.query(insertQuery, values);
             
-            const query = `INSERT INTO ${client.escapeIdentifier(tableName)} (${columns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${placeholders}) RETURNING id`;
-            
-            let newServerId = recordToCreate.id; 
+            // ==> START NEW LOGIC FOR LIST ITEM DETAILS
+            if (tableName === 'list_items') {
+                const itemType = recordData.api_source;
+                const detailTableName = getDetailTableName(itemType);
 
-            try {
-                const result = await client.query(query, values);
-                if (result.rows[0] && result.rows[0].id !== newServerId) {
-                    logger.warn(`[SyncController CREATE ${tableName}] DB returned ID ${result.rows[0].id} which differs from client-provided ID ${newServerId}. Using client's ID as source of truth.`);
-                }
-                logger.info(`[SyncController] Created record in ${tableName} with actual ID used: ${newServerId}`);
-                results.push({ operation, tableName, clientRecordId: newServerId, serverId: newServerId, status: 'created' });
-
-                // --- Create notification for new follower ---
-                if (tableName === 'followers' && operation === 'create') {
-                    const followerId = data.follower_id; // User A (actor)
-                    const followedId = data.followed_id; // User B (recipient)
-
-                    if (followerId && followedId) {
-                        try {
-                            // Fetch follower's username to make the message more informative
-                            const userResult = await client.query('SELECT username FROM users WHERE id = $1', [followerId]);
-                            const followerUsername = userResult.rows.length > 0 ? userResult.rows[0].username : 'Someone';
-
-                            const notificationQuery = `
-                                INSERT INTO public.notifications 
-                                (user_id, actor_id, notification_type, title, body, entity_type, entity_id)
-                                VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id;
-                            `; 
-                            const notificationValues = [
-                                followedId,        // user_id (recipient)
-                                followerId,        // actor_id (who performed the action)
-                                'new_follower',    // notification_type
-                                'New Follower',    // title
-                                `${followerUsername} started following you.`, // body
-                                'user',            // entity_type (indicating the main entity is the actor/user)
-                                followerId         // entity_id (the ID of the actor/user who followed)
-                            ];
-                            const notificationResult = await client.query(notificationQuery, notificationValues);
-                            logger.info(`[SyncController] Created 'new_follower' notification ${notificationResult.rows[0].id} for user ${followedId} (actor: ${followerId})`);
-                            
-                            // Sync tracking is now handled automatically by database triggers
-
-                        } catch (notificationError) {
-                            logger.error(`[SyncController] Failed to create 'new_follower' notification for user ${followedId}:`, notificationError);
-                        }
-                    }
-                }
-                // --- END Create notification for new follower ---
-
-                // --- BEGIN MOVIE DETAILS LOGIC ---
-                if (tableName === 'list_items' && data.api_metadata) {
-                    const apiMetadata = data.api_metadata;
-                    const itemType = apiMetadata.type?.toLowerCase(); // e.g., 'movie', 'book', 'tv'
-                    const rawDetails = apiMetadata.raw_details;
-
-                    logger.info(`[SyncController CREATE list_items] Item type: ${itemType}, Raw details found: ${!!rawDetails}`);
-
-                    if (itemType === 'movie' && rawDetails && typeof rawDetails === 'object') {
-                        const detailTableName = getDetailTableName(itemType); // Should be 'movie_details'
-                        if (detailTableName) {
-                            const movieDetailData = {
-                                list_item_id: newServerId, // Link to the list_item
-                                tmdb_id: rawDetails.tmdb_id || rawDetails.id || apiMetadata.source_id,
-                                title: rawDetails.title || rawDetails.tmdb_title || apiMetadata.title, // Prioritize details, fallback to apiMetadata top level
-                                overview: rawDetails.overview || rawDetails.tmdb_overview || apiMetadata.description,
-                                tagline: rawDetails.tagline || rawDetails.tmdb_tagline,
-                                release_date: rawDetails.release_date || rawDetails.tmdb_release_date || apiMetadata.release_date,
-                                genres: rawDetails.genres || rawDetails.tmdb_genres, // Assuming array of strings
-                                rating: parseFloat(rawDetails.rating || rawDetails.tmdb_vote_average) || null,
-                                vote_count: parseInt(rawDetails.vote_count || rawDetails.tmdb_vote_count) || null,
-                                runtime_minutes: parseInt(rawDetails.runtime || rawDetails.tmdb_runtime) || null,
-                                original_language: rawDetails.original_language || rawDetails.tmdb_original_language,
-                                original_title: rawDetails.original_title || rawDetails.tmdb_original_title,
-                                popularity: parseFloat(rawDetails.popularity || rawDetails.tmdb_popularity) || null,
-                                poster_path: rawDetails.poster_path || rawDetails.tmdb_poster_path,
-                                backdrop_path: rawDetails.backdrop_path || rawDetails.tmdb_backdrop_path,
-                                // budget, revenue, status, production_companies, etc. can be added if available in rawDetails
-                                // Ensure data types match the movie_details DDL (e.g., date, numeric, integer, text[])
-                            };
-                            
-                            // Filter out undefined values to avoid inserting NULL for non-existent keys
-                            Object.keys(movieDetailData).forEach(key => movieDetailData[key] === undefined && delete movieDetailData[key]);
-
-                            if (movieDetailData.release_date && isNaN(new Date(movieDetailData.release_date).getTime())) {
-                                logger.warn(`[SyncController CREATE movie_details] Invalid release_date format: ${movieDetailData.release_date}. Setting to null.`);
-                                movieDetailData.release_date = null;
-                            }
-
-
-                            const detailColumns = Object.keys(movieDetailData);
-                            const detailValues = detailColumns.map(col => movieDetailData[col]);
-                            const detailPlaceholders = detailColumns.map((_, i) => `$${i + 1}`).join(', ');
-
-                            const detailQuery = `INSERT INTO ${client.escapeIdentifier(detailTableName)} (${detailColumns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${detailPlaceholders}) RETURNING id`;
-                            
-                            logger.info(`[SyncController CREATE movie_details] Query: ${detailQuery}, Values:`, detailValues);
-                            try {
-                                const detailResult = await client.query(detailQuery, detailValues);
-                                const movieDetailId = detailResult.rows[0]?.id;
-                                if (movieDetailId) {
-                                    logger.info(`[SyncController] Created record in ${detailTableName} with ID ${movieDetailId}`);
-                                    // Now, update the list_items record with the movie_detail_id
-                                    const updateListItemQuery = `UPDATE ${client.escapeIdentifier(tableName)} SET movie_detail_id = $1 WHERE id = $2`;
-                                    await client.query(updateListItemQuery, [movieDetailId, newServerId]);
-                                    logger.info(`[SyncController] Updated list_items ${newServerId} with movie_detail_id ${movieDetailId}`);
-                                } else {
-                                    logger.error(`[SyncController CREATE movie_details] Failed to get ID from ${detailTableName} insert.`);
-                                }
-                            } catch (detailInsertError) {
-                                logger.error(`[SyncController CREATE movie_details] Error inserting into ${detailTableName} for list_item_id ${newServerId}:`, detailInsertError);
-                                // Decide on error handling: rethrow, log, or mark main item?
-                                // For now, it logs, and the transaction might proceed without the detail link.
-                            }
-                        }
-                    }
-                    // --- BEGIN TV DETAILS LOGIC ---
-                    else if (itemType === 'tv' && rawDetails && typeof rawDetails === 'object') {
-                        const detailTableName = getDetailTableName(itemType); // Should be 'tv_details'
-                        if (detailTableName) {
-                            const tvDetailData = {
-                                list_item_id: newServerId, // Link to the list_item
-                                tmdb_id: rawDetails.tmdb_id || rawDetails.id || apiMetadata.source_id,
-                                name: rawDetails.name || rawDetails.tmdb_name || apiMetadata.title,
-                                overview: rawDetails.overview || rawDetails.tmdb_overview || apiMetadata.description,
-                                tagline: rawDetails.tagline || rawDetails.tmdb_tagline,
-                                first_air_date: rawDetails.first_air_date || rawDetails.tmdb_first_air_date || apiMetadata.release_date,
-                                last_air_date: rawDetails.last_air_date || rawDetails.tmdb_last_air_date,
-                                genres: rawDetails.genres || rawDetails.tmdb_genres, // Assuming array of strings
-                                rating: parseFloat(rawDetails.rating || rawDetails.tmdb_vote_average) || null,
-                                vote_count: parseInt(rawDetails.vote_count || rawDetails.tmdb_vote_count) || null,
-                                episode_run_time: rawDetails.episode_run_time || rawDetails.tmdb_episode_run_time,
-                                number_of_episodes: parseInt(rawDetails.number_of_episodes || rawDetails.tmdb_number_of_episodes) || null,
-                                number_of_seasons: parseInt(rawDetails.number_of_seasons || rawDetails.tmdb_number_of_seasons) || null,
-                                status: rawDetails.status || rawDetails.tmdb_status,
-                                type: rawDetails.type || rawDetails.tmdb_type,
-                                original_language: rawDetails.original_language || rawDetails.tmdb_original_language,
-                                original_name: rawDetails.original_name || rawDetails.tmdb_original_name,
-                                popularity: parseFloat(rawDetails.popularity || rawDetails.tmdb_popularity) || null,
-                                poster_path: rawDetails.poster_path || rawDetails.tmdb_poster_path,
-                                backdrop_path: rawDetails.backdrop_path || rawDetails.tmdb_backdrop_path,
-                                production_companies: rawDetails.production_companies || rawDetails.tmdb_production_companies,
-                                production_countries: rawDetails.production_countries || rawDetails.tmdb_production_countries,
-                                spoken_languages: rawDetails.spoken_languages || rawDetails.tmdb_spoken_languages,
-                                in_production: rawDetails.in_production || rawDetails.tmdb_in_production,
-                            };
-                            
-                            // Filter out undefined values to avoid inserting NULL for non-existent keys
-                            Object.keys(tvDetailData).forEach(key => tvDetailData[key] === undefined && delete tvDetailData[key]);
-
-                            if (tvDetailData.first_air_date && isNaN(new Date(tvDetailData.first_air_date).getTime())) {
-                                logger.warn(`[SyncController CREATE tv_details] Invalid first_air_date format: ${tvDetailData.first_air_date}. Setting to null.`);
-                                tvDetailData.first_air_date = null;
-                            }
-
-                            if (tvDetailData.last_air_date && isNaN(new Date(tvDetailData.last_air_date).getTime())) {
-                                logger.warn(`[SyncController CREATE tv_details] Invalid last_air_date format: ${tvDetailData.last_air_date}. Setting to null.`);
-                                tvDetailData.last_air_date = null;
-                            }
-
-                            const detailColumns = Object.keys(tvDetailData);
-                            const detailValues = detailColumns.map(col => tvDetailData[col]);
-                            const detailPlaceholders = detailColumns.map((_, i) => `$${i + 1}`).join(', ');
-
-                            const detailQuery = `INSERT INTO ${client.escapeIdentifier(detailTableName)} (${detailColumns.map(col => client.escapeIdentifier(col)).join(', ')}) VALUES (${detailPlaceholders}) RETURNING id`;
-                            
-                            logger.info(`[SyncController CREATE tv_details] Query: ${detailQuery}, Values:`, detailValues);
-                            try {
-                                const detailResult = await client.query(detailQuery, detailValues);
-                                const tvDetailId = detailResult.rows[0]?.id;
-                                if (tvDetailId) {
-                                    logger.info(`[SyncController] Created record in ${detailTableName} with ID ${tvDetailId}`);
-                                    // Now, update the list_items record with the tv_detail_id
-                                    const updateListItemQuery = `UPDATE ${client.escapeIdentifier(tableName)} SET tv_detail_id = $1 WHERE id = $2`;
-                                    await client.query(updateListItemQuery, [tvDetailId, newServerId]);
-                                    logger.info(`[SyncController] Updated list_items ${newServerId} with tv_detail_id ${tvDetailId}`);
-                                } else {
-                                    logger.error(`[SyncController CREATE tv_details] Failed to get ID from ${detailTableName} insert.`);
-                                }
-                            } catch (detailInsertError) {
-                                logger.error(`[SyncController CREATE tv_details] Error inserting into ${detailTableName} for list_item_id ${newServerId}:`, detailInsertError);
-                                // Decide on error handling: rethrow, log, or mark main item?
-                                // For now, it logs, and the transaction might proceed without the detail link.
-                            }
-                        }
-                    }
-                    // --- END TV DETAILS LOGIC ---
-                }
-                // --- END MOVIE DETAILS LOGIC ---
-
-                // Sync tracking is now handled automatically by database triggers
-
-                // Inside handlePush function, after successful create/update operations for list_items or lists
-                if (tableName === 'list_items' || tableName === 'lists' || tableName === 'favorites' || tableName === 'followers') {
+                if (detailTableName && recordData.api_metadata) {
                     try {
-                        let entityType;
-                        if (tableName === 'list_items') entityType = 'list_item';
-                        else if (tableName === 'lists') entityType = 'list';
-                        else if (tableName === 'favorites') entityType = 'favorite';
-                        else if (tableName === 'followers') entityType = 'follower';
-                        const entityId = newServerId || clientRecordId;
-                        await EmbeddingService.queueEmbeddingGeneration(
-                            entityId,
-                            entityType,
-                            {
-                                operation,
-                                priority: operation === 'create' ? 'high' : 'normal'
-                            }
-                        );
-                        logger.info(`[SyncController] Queued embedding generation for ${tableName}/${entityId}`);
-                    } catch (embeddingError) {
-                        logger.error(`[SyncController] Failed to queue embedding generation for ${tableName}/${newServerId || clientRecordId}:`, embeddingError);
-                        // Don't fail the sync operation if embedding queueing fails
+                        const detailRecord = await ListService.createDetailRecord(client, detailTableName, recordData.api_metadata, clientProvidedId, data);
+                        if (detailRecord) {
+                            const detailIdColumn = `${itemType}_detail_id`;
+                            const updateQuery = `UPDATE list_items SET ${detailIdColumn} = $1 WHERE id = $2`;
+                            await client.query(updateQuery, [detailRecord.id, clientProvidedId]);
+                        }
+                    } catch (detailError) {
+                        logger.error(`[SyncController] Error creating detail record for item type ${itemType}:`, detailError);
+                        // The transaction will be rolled back
                     }
                 }
-
-            } catch (insertError) {
-                logger.error(`[SyncController CREATE ${tableName}] Error inserting record with client-provided ID ${newServerId}:`, insertError);
-                results.push({ operation, tableName, clientRecordId, serverId: null, status: 'error_insert_failed', error: insertError.message, detail: insertError.detail });
-                continue; // move to next change item
             }
-            // TODO: Handle list_items with details creation if necessary (simplified for now)
-
+            // ==> END NEW LOGIC
+            results.push({ operation, clientRecordId, status: 'created', serverId: clientProvidedId });
           } else if (operation === 'update') {
             const recordToUpdate = { ...data };
             delete recordToUpdate.id; // Remove 'id' if it's the client's local ID from the data payload

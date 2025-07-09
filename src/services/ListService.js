@@ -45,6 +45,170 @@ class ListService {
       logger.info(`[ListService.batchUpdateListOrder] Successfully updated sort_order for ${listOrders.length} lists.`);
     });
   }
+
+  async createDetailRecord(client, tableName, apiMetadata, listItemId, listItemData) {
+    if (!listItemId) {
+      logger.error('[ListService.createDetailRecord] listItemId is required.');
+      throw new Error('listItemId is required to create a detail record.');
+    }
+    
+    // Add debug logging for movie_details
+    if (tableName === 'movie_details') {
+      logger.info(`[ListService.createDetailRecord] Processing movie_details for item ${listItemId}`);
+      logger.info(`[ListService.createDetailRecord] apiMetadata:`, typeof apiMetadata === 'string' ? apiMetadata : JSON.stringify(apiMetadata));
+      logger.info(`[ListService.createDetailRecord] listItemData:`, JSON.stringify(listItemData));
+    }
+    
+    // Add debug logging for book_details
+    if (tableName === 'book_details') {
+      logger.info(`[ListService.createDetailRecord] Processing book_details for item ${listItemId}`);
+      logger.info(`[ListService.createDetailRecord] apiMetadata:`, typeof apiMetadata === 'string' ? apiMetadata : JSON.stringify(apiMetadata));
+      logger.info(`[ListService.createDetailRecord] listItemData:`, JSON.stringify(listItemData));
+    }
+
+    const tableColumnMap = {
+      movie_details: {
+        tmdb_id: 'source_id',
+        release_date: 'release_date',
+        rating: 'raw_details.tmdb_vote_average',
+        genres: 'raw_details.tmdb_genres',
+        tagline: 'subtitle',
+        vote_count: 'raw_details.tmdb_vote_count',
+        runtime_minutes: 'raw_details.tmdb_runtime',
+        original_language: 'raw_details.tmdb_original_language',
+        original_title: 'raw_details.tmdb_original_title',
+        popularity: 'raw_details.tmdb_popularity',
+        backdrop_path: 'raw_details.tmdb_backdrop_path',
+        poster_path: 'raw_details.tmdb_poster_path',
+        budget: 'raw_details.tmdb_budget',
+        revenue: 'raw_details.tmdb_revenue',
+        status: 'raw_details.tmdb_status',
+        production_companies: 'raw_details.tmdb_production_companies',
+        production_countries: 'raw_details.tmdb_production_countries',
+        spoken_languages: 'raw_details.tmdb_spoken_languages',
+        title: 'title',
+        overview: 'raw_details.tmdb_overview',
+      },
+      book_details: {
+        google_book_id: 'source_id',
+        authors: 'raw_details.authors',
+        publisher: 'raw_details.publisher',
+        published_date: 'raw_details.publishedDate',
+        page_count: 'raw_details.pageCount',
+        isbn_13: 'raw_details.industryIdentifiers.ISBN_13',
+        isbn_10: 'raw_details.industryIdentifiers.ISBN_10',
+        categories: 'raw_details.categories',
+        average_rating_google: 'raw_details.averageRating',
+        ratings_count_google: 'raw_details.ratingsCount',
+        language: 'raw_details.language',
+        info_link: 'raw_details.infoLink',
+        canonical_volume_link: 'raw_details.canonicalVolumeLink',
+      },
+      place_details: {
+        google_place_id: 'source_id',
+        address_formatted: 'raw_details.address_formatted',
+        phone_number_international: 'raw_details.international_phone_number',
+        website: 'raw_details.website',
+        rating_google: 'raw_details.rating',
+        user_ratings_total_google: 'raw_details.user_ratings_total',
+        price_level_google: 'raw_details.price_level',
+        latitude: 'raw_details.geometry.location.lat',
+        longitude: 'raw_details.geometry.location.lng',
+        google_maps_url: 'raw_details.url',
+        business_status: 'raw_details.business_status',
+        types: 'raw_details.types',
+      },
+      recipe_details: {
+        title: 'title',
+        summary: 'raw_details.summary',
+        image_url: 'image_url',
+        source_url: 'raw_details.sourceUrl',
+        servings: 'raw_details.servings',
+        cook_time: 'raw_details.readyInMinutes',
+      },
+      tv_details: {
+        tmdb_id: 'source_id',
+        first_air_date: 'release_date', // Mapping release_date to first_air_date
+        rating: 'raw_details.tmdb_vote_average',
+        genres: 'raw_details.tmdb_genres',
+        tagline: 'subtitle',
+        vote_count: 'raw_details.tmdb_vote_count',
+        number_of_seasons: 'raw_details.tmdb_number_of_seasons',
+        number_of_episodes: 'raw_details.tmdb_number_of_episodes',
+        original_language: 'raw_details.tmdb_original_language',
+        original_name: 'raw_details.tmdb_original_name',
+        popularity: 'raw_details.tmdb_popularity',
+        backdrop_path: 'raw_details.tmdb_backdrop_path',
+      },
+      // Add other mappings here as needed
+    };
+
+    const columnMap = tableColumnMap[tableName];
+    if (!columnMap) {
+      logger.warn(`[ListService.createDetailRecord] No column mapping found for table: ${tableName}`);
+      return null;
+    }
+
+    const record = { list_item_id: listItemId };
+    const metadata = typeof apiMetadata === 'string' ? JSON.parse(apiMetadata) : apiMetadata;
+    
+    const getNestedValue = (obj, path) => {
+        if (!path) return undefined;
+        return path.split('.').reduce((acc, part) => acc && acc[part], obj);
+    };
+
+    for (const [column, sourcePath] of Object.entries(columnMap)) {
+      // Prioritize value from metadata (API source)
+      let value = getNestedValue(metadata, sourcePath);
+
+      // If value is not in metadata, try to get it from the base listItemData
+      if ((value === undefined || value === null) && listItemData) {
+        value = getNestedValue(listItemData, sourcePath);
+      }
+
+      if (value !== undefined && value !== null) {
+        if (column === 'genres' && Array.isArray(value)) {
+          // Map array of genre objects to an array of genre names for the text[] column
+          record[column] = value.map(g => g.name).filter(Boolean);
+        } else if (['production_companies', 'production_countries', 'spoken_languages'].includes(column)) {
+          // Handle JSONB columns - ensure they are properly formatted JSON
+          if (typeof value === 'string') {
+            try {
+              // If it's already a JSON string, parse and re-stringify to ensure it's valid
+              const parsed = JSON.parse(value);
+              record[column] = JSON.stringify(parsed);
+            } catch (e) {
+              // If parsing fails, wrap the string value in quotes to make it valid JSON
+              logger.warn(`[ListService.createDetailRecord] Invalid JSON string for ${column}, wrapping as string:`, value);
+              record[column] = JSON.stringify(value);
+            }
+          } else if (typeof value === 'object') {
+            // If it's an object/array, stringify it
+            record[column] = JSON.stringify(value);
+          } else {
+            // For primitive values, stringify them
+            record[column] = JSON.stringify(value);
+          }
+        } else {
+          record[column] = value;
+        }
+      }
+    }
+    
+    if (Object.keys(record).length <= 1) { // Only list_item_id
+        logger.info(`[ListService.createDetailRecord] No mappable data found to insert for ${tableName}`);
+        return null;
+    }
+
+    const insertColumns = Object.keys(record);
+    const insertValues = Object.values(record);
+    const valuePlaceholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
+
+    const query = `INSERT INTO ${tableName} (${insertColumns.join(', ')}) VALUES (${valuePlaceholders}) RETURNING *;`;
+    
+    const { rows } = await client.query(query, insertValues);
+    return rows[0];
+  }
 }
 
 module.exports = new ListService(); 
