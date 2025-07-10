@@ -565,6 +565,16 @@ function syncControllerFactory(socketService) {
               }
             }
 
+            // NEW: Also parse api_metadata if it's a string for list_items
+            if (tableName === 'list_items' && typeof createData.api_metadata === 'string') {
+              try {
+                createData.api_metadata = JSON.parse(createData.api_metadata);
+              } catch (e) {
+                logger.error(`[SyncController] Error parsing api_metadata for create in '${tableName}':`, e);
+                createData.api_metadata = null;
+              }
+            }
+
             // Filter out fields that don't exist in the table
             const filteredData = Object.keys(createData)
               .filter(key => validColumns.includes(key))
