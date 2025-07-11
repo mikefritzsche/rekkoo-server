@@ -753,8 +753,10 @@ function syncControllerFactory(socketService) {
             
             const setClauses = fieldsToUpdate.map((field, i) => `"${field}" = $${i + 1}`).join(', ');
             const queryValues = fieldsToUpdate.map(field => filteredData[field]);
-            
-            const updateQuery = `UPDATE "${tableName}" SET ${setClauses}, updated_at = CURRENT_TIMESTAMP WHERE id = $${fieldsToUpdate.length + 1}`;
+
+            // Only append automatic timestamp update if client did NOT include updated_at
+            const needsTimestamp = !fieldsToUpdate.includes('updated_at');
+            const updateQuery = `UPDATE "${tableName}" SET ${setClauses}${needsTimestamp ? ', updated_at = CURRENT_TIMESTAMP' : ''} WHERE id = $${fieldsToUpdate.length + 1}`;
             logger.error(
               '[DEBUG-JSON] about to UPDATE list_items',
               JSON.stringify(filteredData, null, 2)
