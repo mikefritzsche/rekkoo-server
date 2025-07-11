@@ -198,7 +198,10 @@ function syncControllerFactory(socketService) {
           }
           // --- END FIX ---
 
-          if (!dataPayload) {
+          // For most operations we require a data payload. For 'delete' we only
+          // need the record_id, so allow an empty/undefined dataPayload when
+          // operation === 'delete'.
+          if (!dataPayload && operation !== 'delete') {
             logger.warn(`[SyncController] Skipping change with no data for record ${clientRecordId}`);
             continue;
           }
@@ -546,6 +549,7 @@ function syncControllerFactory(socketService) {
           
           // More general handling for other tables
           if (operation === 'create') {
+            console.log('create', [operation, tableName, changeItem]);
             const createData = { ...dataPayload };
             // Ensure ID is present for creation
             if (!createData.id) {
@@ -763,18 +767,42 @@ function syncControllerFactory(socketService) {
               status: 'updated'
             });
 
-          } else if (operation === 'delete') {
-            if (!clientRecordId) {
-              logger.warn(`[SyncController] Skipping delete for table '${tableName}': missing 'record_id'.`, changeItem);
+          } 
+          // handle delete operation
+          else if (operation === 'delete') {
+            console.log('delete', changeItem);
+            // Determine the record ID to delete. Prefer explicit record_id, but fall back to data.id when provided.
+            let deleteId = clientRecordId;
+            if (!deleteId && dataPayload && typeof dataPayload === 'object' && dataPayload.id) {
+              deleteId = dataPayload.id;
+            }
+
+            if (!deleteId) {
+              logger.warn(`[SyncController] Skipping delete for table '${tableName}': missing 'record_id' and no 'data.id' fallback found.`, changeItem);
               continue;
             }
-            // Soft delete by setting deleted_at
-            const deleteQuery = `UPDATE "${tableName}" SET _deleted = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = $1`;
-            await client.query(deleteQuery, [clientRecordId]);
+            // Soft delete by setting deleted_at timestamp (instead of legacy _deleted flag)
+            const deleteQuery = `UPDATE "${tableName}" SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1`;
+            const deleteRes = await client.query(deleteQuery, [deleteId]);
+
+            if (deleteRes.rowCount === 0) {
+              logger.warn(`[SyncController] Delete operation for ${tableName}/${deleteId} affected 0 rows. Record may not exist or already deleted.`);
+            }
+
+            // Deactivate related embeddings if applicable
+            try {
+              if (tableName === 'list_items') {
+                await EmbeddingService.deactivateEmbedding(deleteId, 'list_item');
+              } else if (tableName === 'lists') {
+                await EmbeddingService.deactivateEmbedding(deleteId, 'list');
+              }
+            } catch (embErr) {
+              logger.error(`[SyncController] Failed to deactivate embedding for ${tableName}/${deleteId}:`, embErr);
+            }
             
             results.push({
               operation,
-              clientRecordId,
+              clientRecordId: deleteId,
               status: 'deleted'
             });
           }
