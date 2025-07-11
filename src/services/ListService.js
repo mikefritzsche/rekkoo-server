@@ -195,17 +195,18 @@ class ListService {
       }
     }
     
-    if (Object.keys(record).length <= 1) { // Only list_item_id
-        logger.info(`[ListService.createDetailRecord] No mappable data found to insert for ${tableName}`);
-        return null;
-    }
+    // Always persist a detail row, even if we only have list_item_id for now.
+    // Additional metadata can be backfilled later once fetched from external APIs.
 
     const insertColumns = Object.keys(record);
     const insertValues = Object.values(record);
     const valuePlaceholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
 
-    const query = `INSERT INTO ${tableName} (${insertColumns.join(', ')}) VALUES (${valuePlaceholders}) RETURNING *;`;
-    
+    const query = `INSERT INTO ${tableName} (${insertColumns.join(', ')}) VALUES (${valuePlaceholders})
+                  ON CONFLICT (list_item_id)
+                  DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+                  RETURNING *;`;
+
     const { rows } = await client.query(query, insertValues);
     return rows[0];
   }

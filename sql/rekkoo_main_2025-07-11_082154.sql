@@ -60,6 +60,7 @@ CREATE FUNCTION public.log_table_changes() RETURNS trigger
 DECLARE
     affected_user_id UUID;
     change_op VARCHAR(20);
+    record_id_text TEXT;
 BEGIN
     -- Determine operation type
     IF TG_OP = 'DELETE' THEN
@@ -70,14 +71,20 @@ BEGIN
         change_op = 'update';
     END IF;
     
-    -- Extract user_id based on table
+    -- Extract user_id and record_id based on table
     CASE TG_TABLE_NAME
         WHEN 'lists', 'list_items' THEN
             affected_user_id = COALESCE(NEW.owner_id, OLD.owner_id);
-        WHEN 'user_settings', 'favorites', 'notifications' THEN
+            record_id_text = COALESCE(NEW.id::text, OLD.id::text);
+        WHEN 'user_settings' THEN
             affected_user_id = COALESCE(NEW.user_id, OLD.user_id);
+            record_id_text = COALESCE(NEW.user_id::text, OLD.user_id::text);
+        WHEN 'favorites', 'notifications' THEN
+            affected_user_id = COALESCE(NEW.user_id, OLD.user_id);
+            record_id_text = COALESCE(NEW.id::text, OLD.id::text);
         WHEN 'users' THEN
             affected_user_id = COALESCE(NEW.id, OLD.id);
+            record_id_text = COALESCE(NEW.id::text, OLD.id::text);
         WHEN 'followers' THEN
             -- Log for both follower and followed user
             IF COALESCE(NEW.follower_id, OLD.follower_id) IS NOT NULL THEN
@@ -91,6 +98,7 @@ BEGIN
                 );
             END IF;
             affected_user_id = COALESCE(NEW.followed_id, OLD.followed_id);
+            record_id_text = COALESCE(NEW.id::text, OLD.id::text);
         ELSE
             RETURN COALESCE(NEW, OLD);
     END CASE;
@@ -101,7 +109,7 @@ BEGIN
         VALUES (
             affected_user_id,
             TG_TABLE_NAME,
-            COALESCE(NEW.id::text, OLD.id::text),
+            record_id_text,
             change_op,
             CASE WHEN TG_OP = 'DELETE' THEN NULL ELSE row_to_json(NEW) END
         );
@@ -408,6 +416,81 @@ CREATE TABLE public.group_members (
 
 
 ALTER TABLE public.group_members OWNER TO admin;
+
+--
+-- Name: invitation_sync_tracking; Type: TABLE; Schema: public; Owner: admin
+--
+
+CREATE TABLE public.invitation_sync_tracking (
+    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
+    invitation_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    action character varying(50) NOT NULL,
+    synced_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
+);
+
+
+ALTER TABLE public.invitation_sync_tracking OWNER TO admin;
+
+--
+-- Name: invitations; Type: TABLE; Schema: public; Owner: admin
+--
+
+CREATE TABLE public.invitations (
+    id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
+    inviter_id uuid NOT NULL,
+    email character varying(255) NOT NULL,
+    phone character varying(20),
+    invitation_code character varying(32) NOT NULL,
+    invitation_token character varying(128) NOT NULL,
+    status character varying(20) DEFAULT 'pending'::character varying NOT NULL,
+    metadata jsonb DEFAULT '{}'::jsonb,
+    expires_at timestamp with time zone NOT NULL,
+    accepted_at timestamp with time zone,
+    accepted_by_user_id uuid,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    deleted_at timestamp with time zone,
+    CONSTRAINT invitations_status_check CHECK (((status)::text = ANY ((ARRAY['pending'::character varying, 'accepted'::character varying, 'expired'::character varying, 'cancelled'::character varying])::text[])))
+);
+
+
+ALTER TABLE public.invitations OWNER TO admin;
+
+--
+-- Name: TABLE invitations; Type: COMMENT; Schema: public; Owner: admin
+--
+
+COMMENT ON TABLE public.invitations IS 'User invitation system for managing app invitations';
+
+
+--
+-- Name: COLUMN invitations.invitation_code; Type: COMMENT; Schema: public; Owner: admin
+--
+
+COMMENT ON COLUMN public.invitations.invitation_code IS 'Short code for manual entry (e.g., ABC123)';
+
+
+--
+-- Name: COLUMN invitations.invitation_token; Type: COMMENT; Schema: public; Owner: admin
+--
+
+COMMENT ON COLUMN public.invitations.invitation_token IS 'Secure token for deep links';
+
+
+--
+-- Name: COLUMN invitations.status; Type: COMMENT; Schema: public; Owner: admin
+--
+
+COMMENT ON COLUMN public.invitations.status IS 'Invitation status: pending, accepted, expired, cancelled';
+
+
+--
+-- Name: COLUMN invitations.metadata; Type: COMMENT; Schema: public; Owner: admin
+--
+
+COMMENT ON COLUMN public.invitations.metadata IS 'Flexible JSON data for custom messages, roles, etc.';
+
 
 --
 -- Name: list_categories; Type: TABLE; Schema: public; Owner: admin
@@ -879,48 +962,6 @@ CREATE TABLE public.spotify_item_details (
 ALTER TABLE public.spotify_item_details OWNER TO admin;
 
 --
--- Name: sync_tracking; Type: TABLE; Schema: public; Owner: admin
---
-
-CREATE TABLE public.sync_tracking (
-    id integer NOT NULL,
-    table_name character varying(50) NOT NULL,
-    record_id uuid NOT NULL,
-    operation character varying(10) NOT NULL,
-    sync_status character varying(20) DEFAULT 'pending'::character varying NOT NULL,
-    sync_error text,
-    last_sync_attempt timestamp with time zone,
-    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    deleted_at timestamp with time zone,
-    data jsonb
-);
-
-
-ALTER TABLE public.sync_tracking OWNER TO admin;
-
---
--- Name: sync_tracking_id_seq; Type: SEQUENCE; Schema: public; Owner: admin
---
-
-CREATE SEQUENCE public.sync_tracking_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
-ALTER SEQUENCE public.sync_tracking_id_seq OWNER TO admin;
-
---
--- Name: sync_tracking_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: admin
---
-
-ALTER SEQUENCE public.sync_tracking_id_seq OWNED BY public.sync_tracking.id;
-
-
---
 -- Name: tags; Type: TABLE; Schema: public; Owner: admin
 --
 
@@ -1092,7 +1133,8 @@ CREATE TABLE public.user_sessions (
     last_activity_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     deleted_at timestamp with time zone,
-    user_id uuid
+    user_id uuid,
+    refresh_token character varying(255)
 );
 
 
@@ -1166,7 +1208,9 @@ CREATE TABLE public.users (
     bio text,
     admin_locked boolean DEFAULT false NOT NULL,
     admin_lock_reason text,
-    admin_lock_expires_at timestamp with time zone
+    admin_lock_expires_at timestamp with time zone,
+    invited_by_user_id uuid,
+    invitation_accepted_at timestamp with time zone
 );
 
 
@@ -1205,13 +1249,6 @@ ALTER TABLE ONLY public.list_categories ALTER COLUMN id SET DEFAULT nextval('pub
 --
 
 ALTER TABLE ONLY public.oauth_providers ALTER COLUMN id SET DEFAULT nextval('public.oauth_providers_id_seq'::regclass);
-
-
---
--- Name: sync_tracking id; Type: DEFAULT; Schema: public; Owner: admin
---
-
-ALTER TABLE ONLY public.sync_tracking ALTER COLUMN id SET DEFAULT nextval('public.sync_tracking_id_seq'::regclass);
 
 
 --
@@ -1332,6 +1369,38 @@ ALTER TABLE ONLY public.gift_reservations
 
 ALTER TABLE ONLY public.group_members
     ADD CONSTRAINT group_members_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: invitation_sync_tracking invitation_sync_tracking_pkey; Type: CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.invitation_sync_tracking
+    ADD CONSTRAINT invitation_sync_tracking_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: invitations invitations_invitation_code_key; Type: CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT invitations_invitation_code_key UNIQUE (invitation_code);
+
+
+--
+-- Name: invitations invitations_invitation_token_key; Type: CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT invitations_invitation_token_key UNIQUE (invitation_token);
+
+
+--
+-- Name: invitations invitations_pkey; Type: CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT invitations_pkey PRIMARY KEY (id);
 
 
 --
@@ -1564,22 +1633,6 @@ ALTER TABLE ONLY public.spotify_item_details
 
 ALTER TABLE ONLY public.spotify_item_details
     ADD CONSTRAINT spotify_item_details_spotify_id_key UNIQUE (spotify_id);
-
-
---
--- Name: sync_tracking sync_tracking_pkey; Type: CONSTRAINT; Schema: public; Owner: admin
---
-
-ALTER TABLE ONLY public.sync_tracking
-    ADD CONSTRAINT sync_tracking_pkey PRIMARY KEY (id);
-
-
---
--- Name: sync_tracking sync_tracking_unique; Type: CONSTRAINT; Schema: public; Owner: admin
---
-
-ALTER TABLE ONLY public.sync_tracking
-    ADD CONSTRAINT sync_tracking_unique UNIQUE (table_name, record_id);
 
 
 --
@@ -1950,6 +2003,69 @@ CREATE INDEX idx_group_members_deleted_at ON public.group_members USING btree (d
 
 
 --
+-- Name: idx_invitation_sync_tracking_invitation_id; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_invitation_sync_tracking_invitation_id ON public.invitation_sync_tracking USING btree (invitation_id);
+
+
+--
+-- Name: idx_invitation_sync_tracking_user_id; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_invitation_sync_tracking_user_id ON public.invitation_sync_tracking USING btree (user_id);
+
+
+--
+-- Name: idx_invitations_code; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_invitations_code ON public.invitations USING btree (invitation_code);
+
+
+--
+-- Name: idx_invitations_deleted_at; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_invitations_deleted_at ON public.invitations USING btree (deleted_at);
+
+
+--
+-- Name: idx_invitations_email; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_invitations_email ON public.invitations USING btree (email);
+
+
+--
+-- Name: idx_invitations_expires_at; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_invitations_expires_at ON public.invitations USING btree (expires_at);
+
+
+--
+-- Name: idx_invitations_inviter_id; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_invitations_inviter_id ON public.invitations USING btree (inviter_id);
+
+
+--
+-- Name: idx_invitations_status; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_invitations_status ON public.invitations USING btree (status);
+
+
+--
+-- Name: idx_invitations_token; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_invitations_token ON public.invitations USING btree (invitation_token);
+
+
+--
 -- Name: idx_list_categories_deleted_at; Type: INDEX; Schema: public; Owner: admin
 --
 
@@ -2251,13 +2367,6 @@ CREATE INDEX idx_spotify_item_specific_metadata_gin ON public.spotify_item_detai
 
 
 --
--- Name: idx_sync_tracking_table_record; Type: INDEX; Schema: public; Owner: admin
---
-
-CREATE INDEX idx_sync_tracking_table_record ON public.sync_tracking USING btree (table_name, record_id);
-
-
---
 -- Name: idx_tags_deleted_at; Type: INDEX; Schema: public; Owner: admin
 --
 
@@ -2342,6 +2451,13 @@ CREATE INDEX idx_user_sessions_expires_at ON public.user_sessions USING btree (e
 
 
 --
+-- Name: idx_user_sessions_refresh_token; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_user_sessions_refresh_token ON public.user_sessions USING btree (refresh_token);
+
+
+--
 -- Name: idx_user_sessions_token; Type: INDEX; Schema: public; Owner: admin
 --
 
@@ -2388,6 +2504,13 @@ CREATE INDEX search_embeddings_trgm ON public.search_embeddings USING gin (raw_q
 --
 
 CREATE UNIQUE INDEX unique_entity_embedding ON public.embeddings USING btree (related_entity_id, entity_type);
+
+
+--
+-- Name: user_roles_user_id_role_id_unique; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE UNIQUE INDEX user_roles_user_id_role_id_unique ON public.user_roles USING btree (user_id, role_id) WHERE (deleted_at IS NULL);
 
 
 --
@@ -2507,6 +2630,13 @@ CREATE TRIGGER update_followers_updated_at BEFORE UPDATE ON public.followers FOR
 --
 
 CREATE TRIGGER update_gift_reservations_updated_at BEFORE UPDATE ON public.gift_reservations FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- Name: invitations update_invitations_updated_at; Type: TRIGGER; Schema: public; Owner: admin
+--
+
+CREATE TRIGGER update_invitations_updated_at BEFORE UPDATE ON public.invitations FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
 --
@@ -2790,6 +2920,38 @@ ALTER TABLE ONLY public.group_members
 
 
 --
+-- Name: invitation_sync_tracking invitation_sync_invitation_fk; Type: FK CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.invitation_sync_tracking
+    ADD CONSTRAINT invitation_sync_invitation_fk FOREIGN KEY (invitation_id) REFERENCES public.invitations(id) ON DELETE CASCADE;
+
+
+--
+-- Name: invitation_sync_tracking invitation_sync_user_fk; Type: FK CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.invitation_sync_tracking
+    ADD CONSTRAINT invitation_sync_user_fk FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: invitations invitations_accepted_by_fk; Type: FK CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT invitations_accepted_by_fk FOREIGN KEY (accepted_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+
+--
+-- Name: invitations invitations_inviter_fk; Type: FK CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.invitations
+    ADD CONSTRAINT invitations_inviter_fk FOREIGN KEY (inviter_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
 -- Name: list_items items_list_id_fk; Type: FK CONSTRAINT; Schema: public; Owner: admin
 --
 
@@ -3067,6 +3229,14 @@ ALTER TABLE ONLY public.user_sessions
 
 ALTER TABLE ONLY public.user_settings
     ADD CONSTRAINT user_settings_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: users users_invited_by_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.users
+    ADD CONSTRAINT users_invited_by_user_id_fkey FOREIGN KEY (invited_by_user_id) REFERENCES public.users(id);
 
 
 --

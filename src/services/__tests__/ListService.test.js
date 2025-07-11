@@ -168,7 +168,7 @@ describe('ListService', () => {
       }
     });
 
-    it('should return null when no mappable data is found', async () => {
+    it('should still create a stub detail row when metadata has no mappable fields', async () => {
       const apiMetadata = {
         raw_details: {
           unmapped_field: 'value'
@@ -183,8 +183,9 @@ describe('ListService', () => {
         {}
       );
 
-      expect(result).toBeNull();
-      expect(mockClient.query).not.toHaveBeenCalled();
+      // Should have inserted a bare record containing at least list_item_id
+      expect(mockClient.query).toHaveBeenCalled();
+      expect(result).toEqual({ id: 'test-detail-id' });
     });
 
     it('should throw error when listItemId is missing', async () => {

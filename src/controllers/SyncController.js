@@ -575,6 +575,22 @@ function syncControllerFactory(socketService) {
               }
             }
 
+            // Immediately after ensuring createData.id exists
+            if (tableName === 'list_items') {
+              // 1) If they’re strings that look like JSON we keep them as-is.
+              // 2) If they’re JS objects/arrays we stringify them.
+              ['custom_fields', 'api_metadata'].forEach(col => {
+                if (createData[col] && typeof createData[col] !== 'string') {
+                  try {
+                    createData[col] = JSON.stringify(createData[col]);
+                  } catch (e) {
+                    logger.error(`[SyncController] Failed to stringify ${col} for list_items:`, e);
+                    createData[col] = 'null';          // valid JSON sentinel
+                  }
+                }
+              });
+            }
+
             // Filter out fields that don't exist in the table
             const filteredData = Object.keys(createData)
               .filter(key => validColumns.includes(key))
@@ -585,16 +601,115 @@ function syncControllerFactory(socketService) {
 
             const fields = Object.keys(filteredData);
             const values = Object.values(filteredData);
-            const placeholders = fields.map((_, i) => `$${i + 1}`).join(', ');
+            const placeholders = fields.map((field, i) => {
+              const base = `$${i + 1}`;
+              if (tableName === 'list_items' && (field === 'custom_fields' || field === 'api_metadata')) {
+                return `${base}::jsonb`;
+              }
+              return base;
+            }).join(', ');
             
             const insertQuery = `INSERT INTO "${tableName}" (${fields.map(f => `"${f}"`).join(', ')}) VALUES (${placeholders}) RETURNING id`;
             const result = await client.query(insertQuery, values);
-            
+            const insertedId = result.rows[0].id;
+
+            // ---- Post-processing specific to list_items ----
+            if (tableName === 'list_items') {
+              try {
+                // Determine detail table based on api_source or list_type
+                let sourceType = (createData.api_source || '').toLowerCase();
+                // If api_source is missing, fall back to the parent list's `type` column
+                if (!sourceType && createData.list_id) {
+                  try {
+                    // Determine which column exists without causing transaction-abort errors
+                    const { rows: colRows } = await client.query(`
+                      SELECT column_name FROM information_schema.columns
+                      WHERE table_name = 'lists' AND column_name IN ('list_type', 'type')
+                    `);
+                    const hasListType = colRows.some(r => r.column_name === 'list_type');
+                    const colName = hasListType ? 'list_type' : 'type';
+                    const { rows: listRows } = await client.query(`SELECT ${colName} AS lstype FROM lists WHERE id = $1`, [createData.list_id]);
+                    if (listRows[0] && listRows[0].lstype) {
+                      sourceType = String(listRows[0].lstype).toLowerCase();
+                      logger.debug(`[SyncController] Derived sourceType "${sourceType}" from parent list ${createData.list_id} (column: ${colName})`);
+                    }
+                  } catch (lookupErr) {
+                    logger.error('[SyncController] Failed to derive sourceType from parent list:', lookupErr);
+                  }
+                }
+                let detailTable = null;
+                let detailIdColumn = null;
+                switch (sourceType) {
+                  case 'movie':
+                  case 'movies':
+                    detailTable = 'movie_details';
+                    detailIdColumn = 'movie_detail_id';
+                    break;
+                  case 'book':
+                  case 'books':
+                    detailTable = 'book_details';
+                    detailIdColumn = 'book_detail_id';
+                    break;
+                  case 'place':
+                  case 'places':
+                    detailTable = 'place_details';
+                    detailIdColumn = 'place_detail_id';
+                    break;
+                  case 'recipe':
+                  case 'recipes':
+                    detailTable = 'recipe_details';
+                    detailIdColumn = 'recipe_detail_id';
+                    break;
+                  case 'tv':
+                  case 'television':
+                    detailTable = 'tv_details';
+                    detailIdColumn = 'tv_detail_id';
+                    break;
+                  default:
+                    // Unknown or custom list types will skip detail creation
+                    break;
+                }
+
+                if (detailTable && detailIdColumn) {
+                  const detailRec = await ListService.createDetailRecord(
+                    client,
+                    detailTable,
+                    createData.api_metadata,
+                    insertedId,
+                    createData
+                  );
+
+                  if (detailRec && detailRec.id) {
+                    // Patch list_items row with the FK to details
+                    await client.query(
+                      `UPDATE list_items SET ${detailIdColumn} = $1 WHERE id = $2`,
+                      [detailRec.id, insertedId]
+                    );
+                  }
+                }
+
+                // Queue embedding generation for the new list item
+                try {
+                  await EmbeddingService.queueEmbeddingGeneration(
+                    insertedId,
+                    'list_item',
+                    { operation: 'create', priority: 'high' }
+                  );
+                  logger.info(`[SyncController] Queued embedding generation for list_items/${insertedId}`);
+                } catch (embErr) {
+                  logger.error(`[SyncController] Failed to queue embedding for list_items/${insertedId}:`, embErr);
+                }
+              } catch (detailErr) {
+                logger.error('[SyncController] Error post-processing list_item create:', detailErr);
+              }
+            }
+            // ---- End list_items post-processing ----
+
             results.push({
               operation,
               clientRecordId,
               status: 'created',
-              serverId: result.rows[0].id
+              serverId: insertedId
             });
 
           } else if (operation === 'update') {
