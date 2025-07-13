@@ -105,8 +105,9 @@ class ListService {
         canonical_volume_link: 'raw_details.canonicalVolumeLink',
       },
       place_details: {
-        google_place_id: 'source_id',
-        address_formatted: 'raw_details.address_formatted',
+        // Prefer explicit source_id but fall back to place_id from raw/metadata
+        google_place_id: 'source_id', // will be normalized below if missing
+        address_formatted: 'raw_details.formatted_address', // correct Google field
         phone_number_international: 'raw_details.international_phone_number',
         website: 'raw_details.website',
         rating_google: 'raw_details.rating',
@@ -117,6 +118,7 @@ class ListService {
         google_maps_url: 'raw_details.url',
         business_status: 'raw_details.business_status',
         types: 'raw_details.types',
+        photos: 'raw_details.photos',
       },
       recipe_details: {
         title: 'title',
@@ -150,7 +152,24 @@ class ListService {
     }
 
     const record = { list_item_id: listItemId };
-    const metadata = typeof apiMetadata === 'string' ? JSON.parse(apiMetadata) : apiMetadata;
+    // --- Normalise metadata keys / shapes ---
+    let metadata = typeof apiMetadata === 'string' ? JSON.parse(apiMetadata) : apiMetadata || {};
+
+    // Alias camelCase rawDetails -> snake_case raw_details for easier mapping
+    if (metadata && metadata.rawDetails && !metadata.raw_details) {
+      metadata.raw_details = metadata.rawDetails;
+    }
+    if (metadata && metadata.raw_details && !metadata.rawDetails) {
+      metadata.rawDetails = metadata.raw_details;
+    }
+
+    // If google_place_id missing but raw_details.place_id exists, set source_id for mapping
+    if (!metadata.source_id) {
+      const placeIdCandidate = (metadata.raw_details && metadata.raw_details.place_id) || (metadata.rawDetails && metadata.rawDetails.place_id);
+      if (placeIdCandidate) {
+        metadata.source_id = placeIdCandidate;
+      }
+    }
     
     const getNestedValue = (obj, path) => {
         if (!path) return undefined;
@@ -189,6 +208,10 @@ class ListService {
             // For primitive values, stringify them
             record[column] = JSON.stringify(value);
           }
+        } else if (column === 'photos' && Array.isArray(value)) {
+          record.photos = value
+            .map(p => p?.photo_reference ?? p?.reference)
+            .filter(Boolean);
         } else {
           record[column] = value;
         }
@@ -207,8 +230,34 @@ class ListService {
                   DO UPDATE SET updated_at = CURRENT_TIMESTAMP
                   RETURNING *;`;
 
-    const { rows } = await client.query(query, insertValues);
-    return rows[0];
+    try {
+      const { rows } = await client.query(query, insertValues);
+      return rows[0];
+    } catch (err) {
+      // Gracefully handle attempts to insert a duplicate google_place_id for place_details.
+      // When this happens we simply fetch the existing row so the caller can link to it
+      // instead of aborting the whole transaction.
+      if (
+        tableName === 'place_details' &&
+        err?.code === '23505' &&
+        (err?.constraint === 'place_details_google_place_id_key' || err?.detail?.includes('(google_place_id)'))
+      ) {
+        try {
+          const { rows } = await client.query(
+            `SELECT * FROM place_details WHERE google_place_id = $1 LIMIT 1`,
+            [record.google_place_id]
+          );
+          if (rows.length) {
+            logger.info('[ListService.createDetailRecord] Reusing existing place_details row due to duplicate google_place_id');
+            return rows[0];
+          }
+        } catch (selectErr) {
+          logger.error('[ListService.createDetailRecord] Failed to fetch existing place_details after duplicate error:', selectErr);
+        }
+      }
+      // Re-throw if it's not the duplicate google_place_id scenario we expect to handle here.
+      throw err;
+    }
   }
 }
 
