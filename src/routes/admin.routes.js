@@ -2,6 +2,15 @@ const express = require('express');
 const { authenticateJWT } = require('../auth/middleware');
 const db = require('../config/db');
 const invitationService = require('../services/invitationService');
+const { 
+  getStats: getCacheStats, 
+  listKeys, 
+  getKey, 
+  deleteKey, 
+  clearCache, 
+  getCacheSettings, 
+  updateCacheSettings 
+} = require('../controllers/CacheController');
 
 const router = express.Router();
 
@@ -425,5 +434,44 @@ router.get('/users/:userId/invitations', authenticateJWT, async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
+
+// GET /v1.0/admin/cache/stats – Valkey cache statistics
+router.get('/cache/stats', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    await getCacheStats(req, res);
+  } catch (err) {
+    console.error('Admin cache stats error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// GET /v1.0/admin/cache/keys
+router.get('/cache/keys', authenticateJWT, async (req, res) => {
+  if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+  await listKeys(req, res);
+});
+
+// GET /v1.0/admin/cache/keys/:key
+router.get('/cache/keys/:key', authenticateJWT, async (req, res) => {
+  if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+  await getKey(req, res);
+});
+
+router.delete('/cache/keys/:key', authenticateJWT, async (req, res) => {
+  if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+  await deleteKey(req, res);
+});
+
+router.post('/cache/clear', authenticateJWT, async (req, res) => {
+  if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+  await clearCache(req, res);
+});
+
+router.get('/cache/settings', authenticateJWT, getCacheSettings);
+router.post('/cache/settings', authenticateJWT, updateCacheSettings);
 
 module.exports = router; 

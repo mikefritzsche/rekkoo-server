@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { logger } = require('../utils/logger');
+const { cacheFetch } = require('../utils/cache');
 
 class SpotifyService {
   constructor() {
@@ -43,31 +44,36 @@ class SpotifyService {
     }
   }
 
-  async search(query, offset = 0, limit = 24) {
-    try {
-      const token = await this.getToken();
-      const types = ['album', 'artist', 'playlist', 'track', 'show', 'episode', 'audiobook'];
-      
-      const response = await axios.get(`${this.baseUrl}/search`, {
-        params: {
-          q: query,
-          type: types.join(','),
-          limit,
-          offset,
-        },
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
+  async search(query, offset = 0, limit = 24, typeParam = null) {
+    // Respect client-provided type list if supplied, otherwise default to all types
+    const types = typeParam
+      ? typeParam.split(',').map((t) => t.trim()).filter(Boolean)
+      : ['album', 'artist', 'playlist', 'track', 'show', 'episode', 'audiobook'];
 
-      return {
-        items: response.data,
-        next: response.data.tracks?.next || response.data.artists?.next || null,
-      };
-    } catch (error) {
-      logger.error('Spotify search error:', error);
-      throw new Error('Failed to search Spotify');
-    }
+    const payload = { q: query, type: types.join(','), limit, offset };
+
+    return cacheFetch(
+      'spotify',
+      payload,
+      async () => {
+        try {
+          const token = await this.getToken();
+          const { data } = await axios.get(`${this.baseUrl}/search`, {
+            params: payload,
+            headers: { Authorization: `Bearer ${token}` },
+          });
+
+          return {
+            items: data,
+            next: data.tracks?.next || data.artists?.next || null,
+          };
+        } catch (error) {
+          logger.error('Spotify search error:', error);
+          throw new Error('Failed to search Spotify');
+        }
+      },
+      60 * 60 // 1-hour TTL
+    );
   }
 }
 

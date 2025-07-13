@@ -19,7 +19,9 @@ services:
     image: valkey/valkey:8.0-alpine
     container_name: rekkoo-valkey
     restart: unless-stopped
-    command: valkey-server /usr/local/etc/valkey/valkey.conf
+    # Configure maxmemory (512 MB) and LRU eviction; fall back to valkey.conf for the rest
+    command: valkey-server /usr/local/etc/valkey/valkey.conf --maxmemory 512mb --maxmemory-policy allkeys-lru
+    mem_limit: 600m
     volumes:
       - ./valkey.conf:/usr/local/etc/valkey/valkey.conf:ro
       - valkey_data:/data

@@ -54,7 +54,7 @@ class SpotifyService {
     }
   }
 
-  async search(query: string, offset: number = 0, limit: number = 24) {
+  async search(query: string, offset: number = 0, limit: number = 50) {
     try {
       const token = await this.getToken();
       const types = ['album', 'artist', 'playlist', 'track', 'show', 'episode', 'audiobook'];
@@ -63,6 +63,7 @@ class SpotifyService {
         params: {
           q: query,
           type: types.join(','),
+          market: 'US',
           limit,
           offset,
         },

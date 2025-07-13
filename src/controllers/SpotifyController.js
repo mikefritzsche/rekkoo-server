@@ -31,7 +31,7 @@ function spotifyControllerFactory(socketService = null) {
    */
   const search = async (req, res) => {
     try {
-      const { q: query, offset = 0, limit = 24 } = req.query;
+      const { q: query, offset = 0, limit = 50, type } = req.query;
       
       if (!query) {
         return res.status(400).json({ error: 'Query parameter is required' });
@@ -40,7 +40,8 @@ function spotifyControllerFactory(socketService = null) {
       const result = await spotifyService.search(
         query,
         parseInt(offset),
-        parseInt(limit)
+        parseInt(limit),
+        type // pass through; may be undefined
       );
 
       await safeStoreSearchEmbedding(req, query);

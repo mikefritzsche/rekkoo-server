@@ -7,6 +7,7 @@
     "test": "jest",
     "start": "node src/index.js",
     "build:dev": "docker compose --env-file=.env.common --env-file=.env.development -f docker-compose.yml -f docker-compose.override.yml up -d --build",
+    "start:dev": "docker compose --env-file=.env.common --env-file=.env.development -f docker-compose.yml -f docker-compose.override.yml up -d",
     "stop:dev": "docker compose --env-file=.env.common --env-file=.env.development -f docker-compose.yml -f docker-compose.override.yml down",
     "dev": "nodemon src/index.js",
     "codemod:remove-console": "jscodeshift -t scripts/transform-remove-console.js --extensions=js,jsx,ts,tsx --ignore-pattern=**/node_modules/** .",
@@ -54,6 +55,7 @@
     "qs": "^6.14.0",
     "querystring": "^0.2.1",
     "redis": "^4.6.10",
+    "ioredis": "^5.3.2",
     "socket.io": "^4.8.1",
     "uuid": "^11.1.0",
     "ytmusic-api": "^5.3.0"
