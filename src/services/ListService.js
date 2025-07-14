@@ -70,24 +70,25 @@ class ListService {
       movie_details: {
         tmdb_id: 'source_id',
         release_date: 'release_date',
-        rating: 'raw_details.tmdb_vote_average',
-        genres: 'raw_details.tmdb_genres',
+        rating: 'raw_details.vote_average',
+        genres: 'raw_details.genres',
         tagline: 'subtitle',
-        vote_count: 'raw_details.tmdb_vote_count',
-        runtime_minutes: 'raw_details.tmdb_runtime',
-        original_language: 'raw_details.tmdb_original_language',
-        original_title: 'raw_details.tmdb_original_title',
-        popularity: 'raw_details.tmdb_popularity',
-        backdrop_path: 'raw_details.tmdb_backdrop_path',
-        poster_path: 'raw_details.tmdb_poster_path',
-        budget: 'raw_details.tmdb_budget',
-        revenue: 'raw_details.tmdb_revenue',
-        status: 'raw_details.tmdb_status',
-        production_companies: 'raw_details.tmdb_production_companies',
-        production_countries: 'raw_details.tmdb_production_countries',
-        spoken_languages: 'raw_details.tmdb_spoken_languages',
+        vote_count: 'raw_details.vote_count',
+        runtime_minutes: 'raw_details.runtime',
+        original_language: 'raw_details.original_language',
+        original_title: 'raw_details.original_title',
+        popularity: 'raw_details.popularity',
+        backdrop_path: 'raw_details.backdrop_path',
+        poster_path: 'raw_details.poster_path',
+        budget: 'raw_details.budget',
+        revenue: 'raw_details.revenue',
+        status: 'raw_details.status',
+        production_companies: 'raw_details.production_companies',
+        production_countries: 'raw_details.production_countries',
+        spoken_languages: 'raw_details.spoken_languages',
+        watch_providers: 'raw_details.watch_providers',
         title: 'title',
-        overview: 'raw_details.tmdb_overview',
+        overview: 'raw_details.overview',
       },
       book_details: {
         google_book_id: 'source_id',
@@ -131,16 +132,17 @@ class ListService {
       tv_details: {
         tmdb_id: 'source_id',
         first_air_date: 'release_date', // Mapping release_date to first_air_date
-        rating: 'raw_details.tmdb_vote_average',
-        genres: 'raw_details.tmdb_genres',
+        rating: 'raw_details.vote_average',
+        genres: 'raw_details.genres',
         tagline: 'subtitle',
-        vote_count: 'raw_details.tmdb_vote_count',
-        number_of_seasons: 'raw_details.tmdb_number_of_seasons',
-        number_of_episodes: 'raw_details.tmdb_number_of_episodes',
-        original_language: 'raw_details.tmdb_original_language',
-        original_name: 'raw_details.tmdb_original_name',
-        popularity: 'raw_details.tmdb_popularity',
-        backdrop_path: 'raw_details.tmdb_backdrop_path',
+        vote_count: 'raw_details.vote_count',
+        number_of_seasons: 'raw_details.number_of_seasons',
+        number_of_episodes: 'raw_details.number_of_episodes',
+        original_language: 'raw_details.original_language',
+        original_name: 'raw_details.original_name',
+        popularity: 'raw_details.popularity',
+        backdrop_path: 'raw_details.backdrop_path',
+        watch_providers: 'raw_details.watch_providers',
       },
       // Add other mappings here as needed
     };
@@ -163,6 +165,11 @@ class ListService {
       metadata.rawDetails = metadata.raw_details;
     }
 
+    // Expose TMDB watch providers under a stable key for column mapping
+    if (metadata && metadata.raw_details && metadata.raw_details['watch/providers'] && !metadata.raw_details.tmdb_watch_providers) {
+      metadata.raw_details.tmdb_watch_providers = metadata.raw_details['watch/providers'];
+    }
+    
     // If google_place_id missing but raw_details.place_id exists, set source_id for mapping
     if (!metadata.source_id) {
       const placeIdCandidate = (metadata.raw_details && metadata.raw_details.place_id) || (metadata.rawDetails && metadata.rawDetails.place_id);
