@@ -50,9 +50,6 @@ function userControllerFactory(socketService = null) {
    * Get a user by ID
    */
   const getUserById = async (req, res) => {
-    console.log('!!!!!!!!!!!!!!!!! USERCONTROLLER.GETUSERBYID CALLED !!!!!!!!!!!!!!!!!');
-    console.log('!!!!!!!!!!!!!!!!! req.params: ', JSON.stringify(req.params));
-    console.log('!!!!!!!!!!!!!!!!! req.originalUrl: ', req.originalUrl);
     try {
       const { id } = req.params;
 
