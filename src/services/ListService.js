@@ -169,6 +169,11 @@ class ListService {
     if (metadata && metadata.raw_details && metadata.raw_details['watch/providers'] && !metadata.raw_details.tmdb_watch_providers) {
       metadata.raw_details.tmdb_watch_providers = metadata.raw_details['watch/providers'];
     }
+
+    // Normalize spoken_languages field from TMDB
+    if (metadata && metadata.raw_details && metadata.raw_details.tmdb_spoken_languages && !metadata.raw_details.spoken_languages) {
+      metadata.raw_details.spoken_languages = metadata.raw_details.tmdb_spoken_languages;
+    }
     
     // If google_place_id missing but raw_details.place_id exists, set source_id for mapping
     if (!metadata.source_id) {

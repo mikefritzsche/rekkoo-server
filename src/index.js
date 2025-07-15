@@ -40,7 +40,9 @@ const createStockImagesRouter = require('./routes/stock-images.routes');
 const createYTMusicRouter = require('./routes/ytmusic.routes');
 const createUploadRouter = require('./routes/upload.routes');
 const createEmbeddingsRouter = require('./routes/embeddings.routes');
+const createSearchRouter = require('./routes/search.routes');
 const createRecipeRouter = require('./routes/recipe.routes');
+const createPublicListsRouter = require('./routes/public-lists.routes');
 
 // Import controllers that need initialization
 const favoritesControllerFactory = require('./controllers/FavoritesController');
@@ -52,7 +54,9 @@ const stockImagesControllerFactory = require('./controllers/StockImagesControlle
 const ytMusicControllerFactory = require('./controllers/YTMusicController');
 const uploadControllerFactory = require('./controllers/UploadController');
 const embeddingsControllerFactory = require('./controllers/EmbeddingsController');
+const searchControllerFactory = require('./controllers/SearchController');
 const recipeControllerFactory = require('./controllers/RecipeController');
+const publicListsControllerFactory = require('./controllers/PublicListsController');
 
 // Import standard routes
 const claudeRoutes = require('./routes/claude');
@@ -84,7 +88,9 @@ const stockImagesController = stockImagesControllerFactory(socketService);
 const ytMusicController = ytMusicControllerFactory(socketService);
 const uploadController = uploadControllerFactory(socketService);
 const embeddingsController = embeddingsControllerFactory(socketService);
+const searchController = searchControllerFactory(socketService);
 const recipeController = recipeControllerFactory(socketService);
+const publicListsController = publicListsControllerFactory();
 
 console.log('CORS_ORIGIN', process.env.CORS_ORIGIN);
 
@@ -208,8 +214,16 @@ app.use('/uploads', uploadRouter);
 const embeddingsRouter = createEmbeddingsRouter(embeddingsController);
 app.use('/v1.0/embeddings', embeddingsRouter);
 
+// Unified search router
+const searchRouter = createSearchRouter(searchController);
+app.use('/v1.0/search', searchRouter);
+
 const recipeRouter = createRecipeRouter(recipeController);
 app.use('/v1.0/recipe', recipeRouter);
+
+// Public lists route
+const publicListsRouter = createPublicListsRouter(publicListsController);
+app.use('/v1.0/lists', publicListsRouter);
 
 app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
