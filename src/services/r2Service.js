@@ -43,19 +43,33 @@ if (isR2Configured()) {
 }
 
 /**
- * Generates a unique object key including user ID.
- * Example: user-uploads/user-123/timestamp-random.jpg
- * @param {string} userId - ID of the user uploading the file.
- * @param {string} mimeType - The MIME type of the file (e.g., 'image/jpeg').
- * @returns {string} A unique object key.
+ * Generates a unique object key including user ID and, optionally, a sub-folder
+ * that represents the list type (e.g. "places", "movies").
+ * Resulting path → user-uploads/user-{id}/[subFolder/]<timestamp>-<random>.ext
+ * The optional folder is sanitised to allow only simple a–z characters to
+ * protect against path-traversal or accidental nesting.
+ *
+ * @param {string} userId   User ID string
+ * @param {string} mimeType Mime type (e.g. image/jpeg)
+ * @param {string} [folder] Optional sub-folder name (list type)
+ * @returns {string} The key path for the upload
  */
-const generateUniqueKey = (userId, mimeType) => {
+const generateUniqueKey = (userId, mimeType, folder) => {
   const randomBytes = crypto.randomBytes(16).toString('hex');
   const timestamp = Date.now();
-  const fileExtension = mimeType.split('/')[1]?.toLowerCase() || 'bin'; // Ensure extension is lowercase
-  // Use user-specific path
-  return `user-uploads/user-${userId}/${timestamp}-${randomBytes}.${fileExtension}`;
-  // return `uploads/${timestamp}-${randomBytes}.${fileExtension}`; // Old path
+  const fileExtension = mimeType.split('/')[1]?.toLowerCase() || 'bin';
+
+  // Basic sanitisation – letters, numbers, dashes only
+  let safeFolder = typeof folder === 'string' ? folder.trim().toLowerCase() : '';
+  if (safeFolder && !/^[a-z0-9_-]+$/.test(safeFolder)) {
+    // If invalid, discard to avoid security issues
+    safeFolder = '';
+  }
+
+  const basePath = `user-uploads/user-${userId}`;
+  const folderPath = safeFolder ? `/${safeFolder}` : '';
+
+  return `${basePath}${folderPath}/${timestamp}-${randomBytes}.${fileExtension}`;
 };
 
 /**
@@ -65,7 +79,7 @@ const generateUniqueKey = (userId, mimeType) => {
  * @param {number} expiresIn - URL validity duration in seconds (default: 300).
  * @returns {Promise<{presignedUrl: string, key: string}>} An object containing the presigned URL and the generated object key.
  */
-const generatePresignedPutUrl = async (userId, contentType, expiresIn = 300) => {
+const generatePresignedPutUrl = async (userId, contentType, expiresIn = 300, folder) => {
   if (!isR2Configured()) {
     throw new Error("R2 service is not configured. File upload is currently unavailable.");
   }
@@ -74,7 +88,7 @@ const generatePresignedPutUrl = async (userId, contentType, expiresIn = 300) => 
       throw new Error("User ID and Content Type are required to generate a presigned URL.");
   }
 
-  const key = generateUniqueKey(userId, contentType);
+  const key = generateUniqueKey(userId, contentType, folder);
   console.log(`[R2 Service] Generating presigned PUT URL for key: ${key}, contentType: ${contentType}`);
 
   const command = new PutObjectCommand({
@@ -98,10 +112,29 @@ const generatePresignedPutUrl = async (userId, contentType, expiresIn = 300) => 
   }
 };
 
+/**
+ * Deletes an object from the bucket.
+ * @param {string} key Full object key (path inside bucket)
+ */
+const deleteR2Object = async (key) => {
+  if (!isR2Configured()) {
+    throw new Error('R2 not configured');
+  }
+  if (!key) {
+    throw new Error('Key is required');
+  }
+  const { DeleteObjectCommand } = require('@aws-sdk/client-s3');
+  const client = getS3Client();
+  const command = new DeleteObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key });
+  await client.send(command);
+  console.log(`[R2 Service] Deleted object ${key}`);
+};
+
 module.exports = {
   generatePresignedPutUrl,
   generateUniqueKey,
   isR2Configured,
+  deleteR2Object,
   get s3Client() {
     return getS3Client();
   }

@@ -48,6 +48,14 @@
          */
         router.post('/r2', authenticateJWT, upload.single('file'), uploadController.uploadFile);
 
+        /**
+         * @route DELETE /r2-object/:key
+         * @desc Delete an existing R2 object (must belong to the authenticated user)
+         * @access Private
+         * The :key param uses a wildcard to allow slashes in the path.
+         */
+        router.delete('/r2-object/:key(*)', authenticateJWT, uploadController.deleteFile);
+
         return router;
     }
 
