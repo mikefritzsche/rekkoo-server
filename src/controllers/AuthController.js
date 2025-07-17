@@ -26,7 +26,7 @@ if (MAILJET_ENABLED) {
   console.warn('[AuthController] Mailjet disabled – missing env keys');
 }
 
-const EXPIRES_IN = '1m';
+const EXPIRES_IN = '15m';
 
 // Helper function to generate a refresh token
 const generateRefreshToken = () => {

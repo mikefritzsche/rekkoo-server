@@ -19,7 +19,7 @@ function stockImagesControllerFactory(socketService = null) {
     const {query, pagingQuery = '', perPage} = req.query;
     const queryParams = {
       query,
-      orientation: 'landscape',
+      orientation: 'Landscape',
       per_page: perPage || 18
     };
 
@@ -29,9 +29,12 @@ function stockImagesControllerFactory(socketService = null) {
     if (!pagingQuery) {
       url = `${baseUrl}?${querystring.stringify(queryParams)}`;
     } else {
-      console.log(`has pagingQuery: `, pagingQuery);
-      url = pagingQuery;
+      // pagingQuery may arrive URI-encoded from the client. Decode it so that node-fetch receives a valid URL.
+      const decodedPagingQuery = decodeURIComponent(pagingQuery);
+      console.log(`has pagingQuery (decoded): `, decodedPagingQuery);
+      url = decodedPagingQuery;
     }
+    console.log(`url: `, url);
 
     try {
       const resp = await fetch(url, {
@@ -41,6 +44,12 @@ function stockImagesControllerFactory(socketService = null) {
         }
       });
       const data = await resp.json();
+      // Ensure the response is never cached so the browser doesn’t receive 304 (empty body) on repeated queries.
+      res.set({
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        Pragma: 'no-cache',
+        Expires: '0',
+      });
       res.json(data);
     } catch (e) {
       console.log(`error: `, e);
