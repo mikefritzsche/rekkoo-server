@@ -607,12 +607,20 @@ function syncControllerFactory(socketService) {
             const values = Object.values(filteredData);
             const placeholders = fields.map((field, i) => {
               const base = `$${i + 1}`;
-              if (tableName === 'list_items' && (field === 'custom_fields' || field === 'api_metadata')) {
+              if (
+                (tableName === 'list_items' && (field === 'custom_fields' || field === 'api_metadata')) ||
+                (tableName === 'lists' && field === 'background')
+              ) {
                 return `${base}::jsonb`;
               }
               return base;
             }).join(', ');
             
+            // For lists.background ensure value is stringified JSON
+            if (tableName === 'lists' && filteredData.background && typeof filteredData.background !== 'string') {
+              filteredData.background = JSON.stringify(filteredData.background);
+            }
+
             const insertQuery = `INSERT INTO "${tableName}" (${fields.map(f => `"${f}"`).join(', ')}) VALUES (${placeholders}) RETURNING id`;
             const result = await client.query(insertQuery, values);
             const insertedId = result.rows[0].id;
@@ -751,7 +759,23 @@ function syncControllerFactory(socketService) {
               continue;
             }
             
-            const setClauses = fieldsToUpdate.map((field, i) => `"${field}" = $${i + 1}`).join(', ');
+            // For lists, cast background as jsonb when updating
+            const setClauses = fieldsToUpdate.map((field, i) => {
+                const base = `$${i + 1}`;
+                if (tableName === 'lists' && field === 'background') {
+                    return `"${field}" = ${base}::jsonb`;
+                }
+                if (tableName === 'list_items' && (field === 'custom_fields' || field === 'api_metadata')) {
+                    return `"${field}" = ${base}::jsonb`;
+                }
+                return `"${field}" = ${base}`;
+            }).join(', ');
+
+            // Stringify lists.background for update
+            if (tableName === 'lists' && updateData.background && typeof updateData.background !== 'string') {
+              updateData.background = JSON.stringify(updateData.background);
+            }
+
             const queryValues = fieldsToUpdate.map(field => filteredData[field]);
 
             // Only append automatic timestamp update if client did NOT include updated_at
