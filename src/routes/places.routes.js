@@ -2,8 +2,65 @@ const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
 const axios = require('axios');
+const LRU = require('lru-cache');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 
-const API_KEY = process.env.GOOGLE_API_KEY_WEB;
+const API_KEY = process.env.GOOGLE_PLACES_KEY;
+
+// Simple in-memory cache – 500 images, 7-day TTL
+const photoCache = new LRU({
+  max: 500,
+  ttl: 1000 * 60 * 60 * 24 * 7 // 1 week
+});
+
+// Disk cache root
+const PHOTO_CACHE_DIR = process.env.PHOTO_CACHE_DIR || path.join(__dirname, '../../photo-cache');
+if (!fs.existsSync(PHOTO_CACHE_DIR)) {
+  fs.mkdirSync(PHOTO_CACHE_DIR, { recursive: true });
+}
+
+/**
+ * Generates a file path on disk for a given cache key and mime type.
+ */
+function getCachedFilePath(cacheKey, mime = 'image/jpeg') {
+  const hash = crypto.createHash('sha1').update(cacheKey).digest('hex');
+  const ext = mime.includes('png') ? 'png' : 'jpg';
+  return path.join(PHOTO_CACHE_DIR, `${hash}.${ext}`);
+}
+
+/**
+ * Attempts to read a cached image from disk.
+ */
+function readFromDisk(cacheKey) {
+  const possibleExtensions = ['jpg', 'jpeg', 'png'];
+  for (const ext of possibleExtensions) {
+    const p = path.join(PHOTO_CACHE_DIR, `${crypto.createHash('sha1').update(cacheKey).digest('hex')}.${ext}`);
+    if (fs.existsSync(p)) {
+      try {
+        const buffer = fs.readFileSync(p);
+        const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+        return { buffer, mime };
+      } catch (e) {
+        console.warn('Failed to read cached image from disk', e);
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Writes image buffer to disk cache.
+ */
+function writeToDisk(cacheKey, buffer, mime) {
+  try {
+    const filePath = getCachedFilePath(cacheKey, mime);
+    fs.writeFileSync(filePath, buffer);
+  } catch (e) {
+    console.warn('Failed to write image to disk cache', e);
+  }
+}
 
 // --- Field Mapping Configuration ---
 // Keys are the exact API response field names.
@@ -140,7 +197,7 @@ router.post('/search/legacy', async (req, res) => {
     const { query } = req.query;
     if (!query) return res.status(400).json({error: "Query is required"});
 
-    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${process.env.GOOGLE_API_KEY_WEB}`;
+    const url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&key=${API_KEY}`;
     const response = await fetch(url);
     const data = await response.json();
 
@@ -231,8 +288,8 @@ router.post('/search', async (req, res) => {
 
 router.get('/detail/:id', async (req, res) => {
   const {id} = req.params
-  // let url = `https://places.googleapis.com/v1/places/${id}?key=${process.env.GOOGLE_API_KEY_WEB}`
-  let url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${id}&key=${process.env.GOOGLE_API_KEY_WEB}`
+  
+  let url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${id}&key=${API_KEY}`
   const fields = [
     'website',
     'formatted_phone_number',
@@ -251,6 +308,7 @@ router.get('/detail/:id', async (req, res) => {
   ]
   // url = `${url}&fields=${fields.join(',')}`
   // res.json({id, url})
+
   try {
     const response = await fetch(url);
 
@@ -273,7 +331,7 @@ router.get('/details-new/:id', async (req, res) => {
   const {id} = req.params
 
   let url = `https://places.googleapis.com/v1/places/${id}`
-  // let url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${id}&key=${process.env.GOOGLE_API_KEY_WEB}`
+  
   const fields = [
     'website',
     'formatted_phone_number',
@@ -317,7 +375,7 @@ router.get('/details-new/:id', async (req, res) => {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json',
-        'X-Goog-Api-Key': process.env.GOOGLE_API_KEY_WEB,
+        'X-Goog-Api-Key': API_KEY,
         'X-Goog-FieldMask': fieldsNew
       }
     });
@@ -342,13 +400,10 @@ router.get('/details-new/:id', async (req, res) => {
  * @access  Public
  */
 router.get('/photo', async (req, res) => {
-  const { photoUri } = req.query;
+  const { photoUri, maxWidth = 4000, maxHeight } = req.query;
+
   try {
-    const { maxWidth, maxHeight } = req.query;
-
-    // return res.json({photoUri, maxWidth, maxHeight});
-
-    // Check if photoUri is provided
+    // --- Validate input ---
     if (!photoUri) {
       return res.status(400).json({
         success: false,
@@ -357,31 +412,51 @@ router.get('/photo', async (req, res) => {
       });
     }
 
-    // Make request to the new Google Places API photo endpoint
+    // --- Try cache first ---
+    const cacheKey = `${photoUri}|${maxWidth}|${maxHeight}`;
+    const cachedMemory = photoCache.get(cacheKey);
+    if (cachedMemory) {
+      res.set('Content-Type', cachedMemory.mime);
+      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+      return res.end(cachedMemory.buffer);
+    }
+
+    const cachedDisk = readFromDisk(cacheKey);
+    if (cachedDisk) {
+      photoCache.set(cacheKey, cachedDisk);
+      res.set('Content-Type', cachedDisk.mime);
+      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+      return res.end(cachedDisk.buffer);
+    }
+
+    // --- Fetch from Google once ---
     const response = await axios({
       method: 'GET',
       url: `https://places.googleapis.com/v1/${photoUri}/media`,
       params: {
-        maxWidthPx: maxWidth || 4000,
+        maxWidthPx: maxWidth,
         maxHeightPx: maxHeight,
         skipHttpRedirect: false
       },
       headers: {
-        'X-Goog-Api-Key': process.env.GOOGLE_API_KEY_WEB,
-        'Accept': 'image/*'
+        'X-Goog-Api-Key': API_KEY,
+        Accept: 'image/*'
       },
-      responseType: 'stream'
+      responseType: 'arraybuffer'
     });
 
-    // Set appropriate content type
-    res.set('Content-Type', response.headers['content-type']);
+    const mime = response.headers['content-type'] || 'image/jpeg';
+    const buffer = Buffer.from(response.data, 'binary');
 
-    // Pipe the image data directly to the response
-    response.data.pipe(res);
+    // Cache and respond
+    photoCache.set(cacheKey, { buffer, mime });
+    writeToDisk(cacheKey, buffer, mime);
+    res.set('Content-Type', mime);
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    return res.end(buffer);
 
   } catch (error) {
     console.error('Error fetching place photo:', error);
-
     // Handle specific API errors
     if (error.response) {
       return res.status(error.response.status).json({
@@ -393,7 +468,6 @@ router.get('/photo', async (req, res) => {
       });
     }
 
-    // Generic error handling
     return res.status(500).json({
       success: false,
       error: 'Server Error',
@@ -409,10 +483,8 @@ router.get('/photo', async (req, res) => {
  */
 router.get('/photo/legacy', async (req, res) => {
   try {
-    const { photoReference } = req.query;
-    const { maxWidth = 1000, maxHeight } = req.query;
+    const { photoReference, maxWidth = 1000, maxHeight } = req.query;
 
-    // Check if photoReference is provided
     if (!photoReference) {
       return res.status(400).json({
         success: false,
@@ -421,34 +493,52 @@ router.get('/photo/legacy', async (req, res) => {
       });
     }
 
+    // --- Try cache first ---
+    const cacheKey = `${photoReference}|${maxWidth}|${maxHeight}`;
+    const cachedMemory = photoCache.get(cacheKey);
+    if (cachedMemory) {
+      res.set('Content-Type', cachedMemory.mime);
+      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+      return res.end(cachedMemory.buffer);
+    }
+
+    const cachedDisk = readFromDisk(cacheKey);
+    if (cachedDisk) {
+      photoCache.set(cacheKey, cachedDisk);
+      res.set('Content-Type', cachedDisk.mime);
+      res.set('Cache-Control', 'public, max-age=31536000, immutable');
+      return res.end(cachedDisk.buffer);
+    }
+
     // Set up query parameters
     const params = {
       photoreference: photoReference,
-      key: process.env.GOOGLE_API_KEY_WEB
+      key: API_KEY,
+      maxwidth: maxWidth,
+      ...(maxHeight ? { maxheight: maxHeight } : {})
     };
-
-    // Add optional size parameters
-    if (maxWidth) params.maxwidth = maxWidth;
-    if (maxHeight) params.maxheight = maxHeight;
 
     // Fetch the photo from legacy Google Places API
     const response = await axios({
       method: 'GET',
       url: 'https://maps.googleapis.com/maps/api/place/photo',
       params,
-      responseType: 'stream'
+      responseType: 'arraybuffer'
     });
 
-    // Set appropriate content type
-    res.set('Content-Type', response.headers['content-type']);
+    const mime = response.headers['content-type'] || 'image/jpeg';
+    const buffer = Buffer.from(response.data, 'binary');
 
-    // Pipe the image data directly to the response
-    response.data.pipe(res);
+    // Cache & respond
+    photoCache.set(cacheKey, { buffer, mime });
+    writeToDisk(cacheKey, buffer, mime);
+    res.set('Content-Type', mime);
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    return res.end(buffer);
 
   } catch (error) {
     console.error('Error fetching legacy place photo:', error);
 
-    // Handle specific API errors
     if (error.response) {
       return res.status(error.response.status).json({
         success: false,
@@ -457,7 +547,6 @@ router.get('/photo/legacy', async (req, res) => {
       });
     }
 
-    // Generic error handling
     return res.status(500).json({
       success: false,
       error: 'Server Error',
@@ -466,6 +555,20 @@ router.get('/photo/legacy', async (req, res) => {
   }
 });
 
+router.get('/nearby', async (req, res) => {
+  try {
+    const { lat, lng, radius = 2000 } = req.query;
+    if (!lat || !lng) {
+      return res.status(400).json({ error: 'lat and lng query parameters are required' });
+    }
+    const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&key=${API_KEY}`;
+    const response = await axios.get(url);
+    return res.json(response.data.results || []);
+  } catch (error) {
+    console.error('Nearby places error:', error?.response?.data || error);
+    return res.status(500).json({ error: 'Failed to fetch nearby places' });
+  }
+});
 
 /**
  * Sets a value on an object using a dot-notation path.
