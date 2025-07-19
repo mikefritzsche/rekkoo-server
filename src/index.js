@@ -43,7 +43,6 @@ const createEmbeddingsRouter = require('./routes/embeddings.routes');
 const createSearchRouter = require('./routes/search.routes');
 const createRecipeRouter = require('./routes/recipe.routes');
 const createPublicListsRouter = require('./routes/public-lists.routes');
-const osmRoutes = require('./routes/osm.routes');
 
 // Import controllers that need initialization
 const favoritesControllerFactory = require('./controllers/FavoritesController');
@@ -70,6 +69,7 @@ const openlibraryRoutes = require('./routes/openlibrary.routes');
 const adminRoutes = require('./routes/admin.routes');
 const invitationRoutes = require('./routes/invitations.routes');
 const { log } = require('console');
+const osmRoutes = require('./routes/osm.routes');
 
 // --- 2. Initialize Express App and HTTP Server ---
 const app = express();
