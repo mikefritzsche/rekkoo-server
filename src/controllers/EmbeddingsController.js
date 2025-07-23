@@ -49,6 +49,16 @@ const embeddingsControllerFactory = (socketService) => {
                 logger.error('Error getting embedding service status:', error);
                 res.status(500).json({ error: 'Failed to get status' });
             }
+        },
+
+        async getDebugInfo(req, res) {
+            try {
+                const debugInfo = await embeddingService.getEmbeddingDebugInfo();
+                res.json(debugInfo);
+            } catch (error) {
+                logger.error('Error getting embedding debug info:', error);
+                res.status(500).json({ error: 'Failed to get embedding debug info' });
+            }
         }
     };
 };

@@ -72,12 +72,13 @@ function tmdbControllerFactory(socketService = null) {
    */
   const getMediaDetails = async (req, res) => {
     const { mediaType, id } = req.params;
+    console.log('getMediaDetails mediaType', mediaType);
 
     const appendToResponseString = 'append_to_response';
     // Include watch provider availability in the same request
     const appendToResponse = 'recommendations,similar,videos,external_ids,people,images,credits,watch/providers';
     const searchUrl = `${TMDB_CONFIG.baseUrl}/${mediaType}/${id}?api_key=${TMDB_CONFIG.apiKey}&language=en-US&${appendToResponseString}=${appendToResponse}`;
-    
+    console.log('searchUrl', searchUrl);
     try {
       const response = await fetch(searchUrl);
       const data = await response.json();

@@ -305,8 +305,11 @@ router.get('/detail/:id', async (req, res) => {
     'serves_wine',
     'takeout',
     'url',
+    'price_level',
+    'rating',
+    'user_ratings_total'
   ]
-  // url = `${url}&fields=${fields.join(',')}`
+  url = `${url}&fields=${fields.join(',')}`
   // res.json({id, url})
 
   try {

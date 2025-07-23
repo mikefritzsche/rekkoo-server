@@ -23,6 +23,9 @@ const createEmbeddingsRouter = (controller) => {
   // Get model status
   router.get('/status', controller.getStatus);
 
+  // Get debug info
+  router.get('/debug-info', controller.getDebugInfo);
+
   return router;
 };
 
