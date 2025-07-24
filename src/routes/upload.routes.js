@@ -54,7 +54,7 @@
          * @access Private
          * The :key param uses a wildcard to allow slashes in the path.
          */
-        router.delete('/r2-object/:key(*)', authenticateJWT, uploadController.deleteFile);
+        router.delete('/r2-object/:key', authenticateJWT, uploadController.deleteFile);
 
         return router;
     }
