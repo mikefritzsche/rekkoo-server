@@ -43,6 +43,7 @@ const createEmbeddingsRouter = require('./routes/embeddings.routes');
 const createSearchRouter = require('./routes/search.routes');
 const createRecipeRouter = require('./routes/recipe.routes');
 const createPublicListsRouter = require('./routes/public-lists.routes');
+const collaborationRoutes = require('./routes/collaboration.routes.js');
 
 // Import controllers that need initialization
 const favoritesControllerFactory = require('./controllers/FavoritesController');
@@ -229,6 +230,7 @@ app.use('/v1.0/lists', publicListsRouter);
 
 app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
+app.use('/v1.0/collaboration', collaborationRoutes);
 
 // --- 7. Basic/Utility Routes ---
 app.get('/api/v1.0/health', (req, res) => {
