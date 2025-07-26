@@ -44,6 +44,7 @@ const createSearchRouter = require('./routes/search.routes');
 const createRecipeRouter = require('./routes/recipe.routes');
 const createPublicListsRouter = require('./routes/public-lists.routes');
 const collaborationRoutes = require('./routes/collaboration.routes.js');
+const createListTypesRouter = require('./routes/list-types.routes');
 
 // Import controllers that need initialization
 const favoritesControllerFactory = require('./controllers/FavoritesController');
@@ -58,6 +59,7 @@ const embeddingsControllerFactory = require('./controllers/EmbeddingsController'
 const searchControllerFactory = require('./controllers/SearchController');
 const recipeControllerFactory = require('./controllers/RecipeController');
 const publicListsControllerFactory = require('./controllers/PublicListsController');
+const listTypesControllerFactory = require('./controllers/ListTypesController');
 
 // Import standard routes
 const claudeRoutes = require('./routes/claude');
@@ -93,6 +95,7 @@ const embeddingsController = embeddingsControllerFactory(socketService);
 const searchController = searchControllerFactory(socketService);
 const recipeController = recipeControllerFactory(socketService);
 const publicListsController = publicListsControllerFactory();
+const listTypesController = listTypesControllerFactory();
 
 console.log('CORS_ORIGIN', process.env.CORS_ORIGIN);
 
@@ -227,6 +230,8 @@ app.use('/v1.0/recipe', recipeRouter);
 // Public lists route
 const publicListsRouter = createPublicListsRouter(publicListsController);
 app.use('/v1.0/lists', publicListsRouter);
+
+app.use('/v1.0/list-types', createListTypesRouter(listTypesController));
 
 app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
