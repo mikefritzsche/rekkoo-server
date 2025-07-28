@@ -130,8 +130,7 @@ function uploadControllerFactory(socketService = null) {
     }
 
     const userId = req.user.id;
-    // Express wildcard param includes the entire remainder of path
-    const objectKey = req.params.key;
+    const objectKey = decodeURIComponent(req.params.key);
 
     if (!objectKey) {
       return res.status(400).json({ error: 'Object key is required.' });
