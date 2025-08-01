@@ -621,9 +621,23 @@ function syncControllerFactory(socketService) {
               filteredData.background = JSON.stringify(filteredData.background);
             }
 
-            const insertQuery = `INSERT INTO "${tableName}" (${fields.map(f => `"${f}"`).join(', ')}) VALUES (${placeholders}) RETURNING id`;
-            const result = await client.query(insertQuery, values);
-            const insertedId = result.rows[0].id;
+            let insertResult;
+            if (tableName === 'list_item_categories') {
+              // Expecting item_id unique. Build ordered values [item_id, category_id, deleted_at]
+              const idxItem = fields.indexOf('item_id');
+              const idxCat = fields.indexOf('category_id');
+              const idxDel = fields.indexOf('deleted_at');
+              const orderedVals = [values[idxItem], values[idxCat] ?? null, values[idxDel] ?? null];
+              const upsertQuery = `INSERT INTO "list_item_categories" (item_id, category_id, deleted_at)
+                VALUES ($1,$2,$3)
+                ON CONFLICT (item_id) DO UPDATE SET category_id = EXCLUDED.category_id, deleted_at = EXCLUDED.deleted_at
+                RETURNING item_id`;
+              insertResult = await client.query(upsertQuery, orderedVals);
+            } else {
+              const insertQuery = `INSERT INTO "${tableName}" (${fields.map(f => `"${f}"`).join(', ')}) VALUES (${placeholders}) RETURNING id`;
+              insertResult = await client.query(insertQuery, values);
+            }
+            const insertedId = insertResult.rows[0].id || insertResult.rows[0].item_id;
 
             // ---- Post-processing specific to list_items ----
             if (tableName === 'list_items') {
