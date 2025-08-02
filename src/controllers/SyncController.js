@@ -692,6 +692,27 @@ function syncControllerFactory(socketService) {
             }
             const insertedId = insertResult.rows[0].id || insertResult.rows[0].item_id;
 
+            // --- Spotify raw details persistence ---
+            if (tableName === 'list_items') {
+              try {
+                if (createData && createData.api_source === 'spotify') {
+                  const spotifyId = createData.source_id || createData.item_id_from_api;
+                  if (spotifyId) {
+                    const raw = createData.api_metadata ? (typeof createData.api_metadata === 'string' ? createData.api_metadata : JSON.stringify(createData.api_metadata)) : null;
+                    await client.query(
+                      `INSERT INTO public.spotify_item_details (id, spotify_id, raw_json)
+                       VALUES ($1,$2,$3)
+                       ON CONFLICT (spotify_id) DO UPDATE
+                         SET raw_json = EXCLUDED.raw_json, updated_at = CURRENT_TIMESTAMP`,
+                      [insertedId, spotifyId, raw]
+                    );
+                  }
+                }
+              } catch (spErr) {
+                logger.error('[SyncController] Failed upserting spotify_item_details:', spErr);
+              }
+            }
+
             // ----- Embedding queue hooks -----
             try {
               if (['list_items', 'item_tags'].includes(tableName)) {
@@ -894,6 +915,100 @@ function syncControllerFactory(socketService) {
               JSON.stringify(filteredData, null, 2)
             );
             await client.query(updateQuery, [...queryValues, recordId]);
+
+            // ---- Spotify raw-details upsert on UPDATE ----
+            if (tableName === 'list_items' && updateData.api_source === 'spotify') {
+              const spotifyId = updateData.source_id || updateData.item_id_from_api;
+              if (spotifyId) {
+                const rawJson = updateData.api_metadata
+                  ? (typeof updateData.api_metadata === 'string'
+                      ? updateData.api_metadata
+                      : JSON.stringify(updateData.api_metadata))
+                  : null;
+
+                await client.query(
+                  `INSERT INTO public.spotify_item_details (id, spotify_id, raw_json)
+                   VALUES ($1, $2, $3)
+                   ON CONFLICT (spotify_id)
+                   DO UPDATE SET raw_json = EXCLUDED.raw_json, updated_at = CURRENT_TIMESTAMP`,
+                  [updateData.id, spotifyId, rawJson]
+                );
+              }
+            }
+
+            // ---- Generic detail record ensure/upsert (any api_source) ----
+            if (tableName === 'list_items') {
+              try {
+                let sourceType = (updateData.api_source || '').toLowerCase();
+
+                // If api_source missing fall back to the parent list's list_type/type
+                if (!sourceType && updateData.list_id) {
+                  try {
+                    const { rows: colRows } = await client.query(
+                      `SELECT column_name FROM information_schema.columns
+                       WHERE table_name = 'lists' AND column_name IN ('list_type','type')`
+                    );
+                    const hasListType = colRows.some(r => r.column_name === 'list_type');
+                    const colName = hasListType ? 'list_type' : 'type';
+                    const { rows: listRows } = await client.query(
+                      `SELECT ${colName} AS lstype FROM lists WHERE id = $1`,
+                      [updateData.list_id]
+                    );
+                    if (listRows[0] && listRows[0].lstype) {
+                      sourceType = String(listRows[0].lstype).toLowerCase();
+                    }
+                  } catch (lookupErr) {
+                    logger.error('[SyncController] Failed to derive sourceType in update branch:', lookupErr);
+                  }
+                }
+
+                // Map to detail table / fk column
+                let detailTable = null;
+                switch (sourceType) {
+                  case 'movie':
+                  case 'movies':
+                    detailTable = 'movie_details';
+                    break;
+                  case 'book':
+                  case 'books':
+                    detailTable = 'book_details';
+                    break;
+                  case 'music':
+                  case 'songs':
+                  case 'track':
+                  case 'tracks':
+                    detailTable = 'music_details';
+                    break;
+                  case 'place':
+                  case 'places':
+                    detailTable = 'place_details';
+                    break;
+                  case 'recipe':
+                  case 'recipes':
+                    detailTable = 'recipe_details';
+                    break;
+                  case 'tv':
+                  case 'television':
+                    detailTable = 'tv_details';
+                    break;
+                  default:
+                    break; // Unknown/custom types => skip
+                }
+
+                if (detailTable) {
+                  // Ensure a detail row exists – ListService.createDetailRecord is idempotent (ON CONFLICT list_item_id)
+                  await ListService.createDetailRecord(
+                    client,
+                    detailTable,
+                    updateData.api_metadata,
+                    recordId,
+                    updateData
+                  );
+                }
+              } catch (detailErr) {
+                logger.error('[SyncController] Failed ensuring detail record on update:', detailErr);
+              }
+            }
 
             results.push({
               operation,
