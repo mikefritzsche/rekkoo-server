@@ -22,6 +22,9 @@ function createSpotifyRouter(spotifyController) {
    */
   router.get('/search', spotifyController.search);
 
+  // generic detail route: /spotify/:type/:id  (type validated in controller)
+  router.get('/:type/:id', spotifyController.getDetail);
+
   // Add more routes as needed
   // router.get('/tracks/:id', spotifyController.getTrack);
   // router.get('/artists/:id', spotifyController.getArtist);

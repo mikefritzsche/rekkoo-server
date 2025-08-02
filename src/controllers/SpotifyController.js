@@ -53,6 +53,40 @@ function spotifyControllerFactory(socketService = null) {
     }
   };
 
+  /**
+   * Generic detail fetch: /v1.0/spotify/:type/:id
+   * Supported type values: track | album | artist | show
+   */
+  const getDetail = async (req, res) => {
+    const { type, id } = req.params;
+    if (!type || !id) {
+      return res.status(400).json({ error: 'type and id are required' });
+    }
+
+    try {
+      const token = await spotifyService.getToken();
+      const axios = require('axios');
+      const { data: obj } = await axios.get(`https://api.spotify.com/v1/${type}s/${id}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+
+      // If track/album lacks genres, derive from its artists
+      if ((type === 'track' || type === 'album') && (!obj.genres || obj.genres.length === 0)) {
+        const artistIds = (obj.artists || []).map(a => a.id).filter(Boolean);
+        if (artistIds.length) {
+          const { data } = await axios.get('https://api.spotify.com/v1/artists', { params: { ids: artistIds.join(',') }, headers: { Authorization: `Bearer ${token}` } });
+          const genres = (data.artists || []).flatMap(a => a.genres);
+          obj.genres = [...new Set(genres)];
+        }
+      }
+
+      return res.json(obj);
+    } catch (error) {
+      logger.error('[SpotifyController] getDetail error:', error.message);
+      return res.status(500).json({ error: 'Failed to fetch detail from Spotify' });
+    }
+  };
+
   // Add more controller methods as needed
   // const getTrack = async (req, res) => { ... }
   // const getArtist = async (req, res) => { ... }
@@ -61,7 +95,8 @@ function spotifyControllerFactory(socketService = null) {
   // Return all controller methods
   return {
     getToken,
-    search
+    search,
+    getDetail
     // Add additional methods here when implemented
     // getTrack,
     // getArtist,

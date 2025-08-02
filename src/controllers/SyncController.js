@@ -3,6 +3,7 @@ const db = require('../config/db'); // Ensure this path is correct
 const ListService = require('../services/ListService'); // Import ListService
 const { logger } = require('../utils/logger'); // Assuming logger is in utils
 const EmbeddingService = require('../services/embeddingService'); // Import EmbeddingService
+const spotifyService = require('../services/spotify-service');
 
 // Define detail tables that are associated with records in the 'list_items' table
 const DETAIL_TABLES_MAP = {
@@ -739,6 +740,35 @@ function syncControllerFactory(socketService) {
                   case 'books':
                     detailTable = 'book_details';
                     detailIdColumn = 'book_detail_id';
+                    break;
+                  case 'music':
+                  case 'songs':
+                  case 'track':
+                  case 'tracks':
+                    detailTable = 'music_details';
+                    detailIdColumn = 'music_detail_id';
+
+                    // --- NEW: enrich api_metadata with genres from Spotify ---
+                    try {
+                      let metaObj = {};
+                      if (createData.api_metadata) {
+                        metaObj = typeof createData.api_metadata === 'string' ? JSON.parse(createData.api_metadata) : createData.api_metadata;
+                      }
+                      if (!metaObj.genres || metaObj.genres.length === 0) {
+                        const sourceId = metaObj.source_id || createData.source_id || null;
+                        if (sourceId) {
+                          const genres = await spotifyService.fetchGenres(sourceId, 'track');
+                          if (genres && genres.length) {
+                            metaObj.genres = genres.map(g => ({ name: g }));
+                            const str = JSON.stringify(metaObj);
+                            await client.query('UPDATE list_items SET api_metadata = $1 WHERE id = $2', [str, insertedId]);
+                            createData.api_metadata = str; // keep consistency for detail record creation
+                          }
+                        }
+                      }
+                    } catch (spotifyErr) {
+                      logger.error('[SyncController] Spotify genre fetch failed:', spotifyErr);
+                    }
                     break;
                   case 'place':
                   case 'places':

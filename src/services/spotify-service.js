@@ -75,6 +75,23 @@ class SpotifyService {
       60 * 60 // 1-hour TTL
     );
   }
+
+  // fetchGenres(id: string, kind: 'track' | 'album' | 'artist' | 'show' = 'track')
+  async fetchGenres(id, kind = 'track') {
+    // 1. fetch the primary object
+    const obj = await axios.get(`${this.baseUrl}/${kind}s/${id}`).then(r => r.data);
+    let genres = obj.genres ?? [];
+
+    // 2. handle tracks or albums that have no genres → look up artists
+    if (genres.length === 0 && (kind === 'track' || kind === 'album')) {
+      const artistIds = (obj.artists || []).map(a => a.id).filter(Boolean);
+      if (artistIds.length) {
+        const res = await axios.get(`${this.baseUrl}/artists`, { params: { ids: artistIds.join(',') } });
+        genres = res.data.artists.flatMap(a => a.genres);
+      }
+    }
+    return [...new Set(genres)];          // dedupe
+  }
 }
 
 module.exports = {
