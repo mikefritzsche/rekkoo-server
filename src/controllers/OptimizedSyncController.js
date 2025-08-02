@@ -51,8 +51,8 @@ function optimizedSyncControllerFactory(socketService) {
               (SELECT row_to_json(n.*) FROM public.notifications n WHERE n.id = cl.record_id::uuid AND n.user_id = $1 AND n.deleted_at IS NULL)
             WHEN cl.operation != 'delete' AND cl.table_name = 'list_categories' THEN
               (SELECT row_to_json(c.*) FROM public.list_categories c WHERE c.id = cl.record_id::uuid AND c.deleted_at IS NULL)
-            WHEN cl.operation != 'delete' AND cl.table_name = 'list_item_categories' THEN
-              (SELECT row_to_json(ic.*) FROM public.list_item_categories ic WHERE ic.item_id = cl.record_id::uuid AND ic.deleted_at IS NULL)
+            WHEN cl.operation != 'delete' AND cl.table_name = 'item_tags' THEN
+              (SELECT row_to_json(it.*) FROM public.item_tags it WHERE it.item_id = cl.record_id::uuid AND it.deleted_at IS NULL)
             ELSE cl.change_data::json
           END as current_data
         FROM public.change_log cl
@@ -74,7 +74,7 @@ function optimizedSyncControllerFactory(socketService) {
         followers: { created: [], updated: [], deleted: [] },
         notifications: { created: [], updated: [], deleted: [] },
         list_categories: { created: [], updated: [], deleted: [] },
-        list_item_categories: { created: [], updated: [], deleted: [] }
+        item_tags: { created: [], updated: [], deleted: [] }
       };
 
       // Process each change record
@@ -105,12 +105,13 @@ function optimizedSyncControllerFactory(socketService) {
       // --- Baseline data: if this is the very first sync (no lastPulledAt) include all non-deleted categories ---
       if (lastPulledAt === 0) {
         try {
-          const catRes = await db.query(`SELECT * FROM public.list_categories WHERE deleted_at IS NULL`);
+          const catRes = await db.query(`SELECT * FROM public.tags WHERE deleted_at IS NULL`);
           for (const row of catRes.rows) {
             // normalise timestamps to millis to stay consistent with client-side inserts
             if (row.created_at) row.created_at = new Date(row.created_at).getTime();
             if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
-            changes.list_categories.created.push(row);
+            changes.tags = changes.tags || { created: [], updated: [], deleted: [] };
+            changes.tags.created.push(row);
           }
         } catch (err) {
           logger.error('[OptimizedSyncController] Failed to fetch baseline categories:', err);

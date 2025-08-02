@@ -622,8 +622,31 @@ function syncControllerFactory(socketService) {
             }
 
             let insertResult;
-            if (tableName === 'list_item_categories') {
-              // Expecting item_id unique. Build ordered values [item_id, category_id, deleted_at]
+            if (tableName === 'item_tags') {
+              // Expecting composite pk (item_id, tag_id) plus optional source column
+              const idxItem   = fields.indexOf('item_id');
+              const idxTag    = fields.indexOf('tag_id');
+              const idxSource = fields.indexOf('source');
+              const idxDel    = fields.indexOf('deleted_at');
+
+              const hasSource = idxSource !== -1;
+              const orderedVals = hasSource
+                ? [values[idxItem], values[idxTag] ?? null, values[idxSource] ?? 'user', values[idxDel] ?? null]
+                : [values[idxItem], values[idxTag] ?? null, values[idxDel] ?? null];
+
+              const upsertQuery = hasSource
+                ? `INSERT INTO "item_tags" (item_id, tag_id, source, deleted_at)
+                   VALUES ($1,$2,$3,$4)
+                   ON CONFLICT (item_id, tag_id) DO UPDATE SET source = EXCLUDED.source, deleted_at = EXCLUDED.deleted_at
+                   RETURNING item_id`
+                : `INSERT INTO "item_tags" (item_id, tag_id, deleted_at)
+                   VALUES ($1,$2,$3)
+                   ON CONFLICT (item_id, tag_id) DO UPDATE SET deleted_at = EXCLUDED.deleted_at
+                   RETURNING item_id`;
+
+              insertResult = await client.query(upsertQuery, orderedVals);
+            } else if (tableName === 'list_item_categories') {
+              // unique by item_id
               const idxItem = fields.indexOf('item_id');
               const idxCat = fields.indexOf('category_id');
               const idxDel = fields.indexOf('deleted_at');
@@ -633,11 +656,52 @@ function syncControllerFactory(socketService) {
                 ON CONFLICT (item_id) DO UPDATE SET category_id = EXCLUDED.category_id, deleted_at = EXCLUDED.deleted_at
                 RETURNING item_id`;
               insertResult = await client.query(upsertQuery, orderedVals);
+            } else if (tableName === 'tags') {
+              // Maintain id from client; upsert to avoid duplicate key on primary id
+              const idxId       = fields.indexOf('id');
+              const idxListType = fields.indexOf('list_type');
+              const idxName     = fields.indexOf('name');
+              const idxType     = fields.indexOf('tag_type');
+              const idxSystem   = fields.indexOf('is_system');
+              const idxDeleted  = fields.indexOf('deleted_at');
+
+              const ordered = [
+                values[idxId],
+                values[idxListType] ?? null,
+                values[idxName],
+                values[idxType] ?? 'tag',
+                values[idxSystem] ?? false,
+                values[idxDeleted] ?? null,
+              ];
+
+              const upsertSql = `INSERT INTO public.tags (id, list_type, name, tag_type, is_system, deleted_at)
+                VALUES ($1,$2,$3,$4,$5,$6)
+                ON CONFLICT (id) DO UPDATE SET
+                  list_type = EXCLUDED.list_type,
+                  name      = EXCLUDED.name,
+                  tag_type  = EXCLUDED.tag_type,
+                  is_system = EXCLUDED.is_system,
+                  deleted_at= EXCLUDED.deleted_at,
+                  updated_at = CURRENT_TIMESTAMP
+                RETURNING id`;
+              insertResult = await client.query(upsertSql, ordered);
             } else {
               const insertQuery = `INSERT INTO "${tableName}" (${fields.map(f => `"${f}"`).join(', ')}) VALUES (${placeholders}) RETURNING id`;
               insertResult = await client.query(insertQuery, values);
             }
             const insertedId = insertResult.rows[0].id || insertResult.rows[0].item_id;
+
+            // ----- Embedding queue hooks -----
+            try {
+              if (['list_items', 'item_tags'].includes(tableName)) {
+                const targetItemId = tableName === 'list_items' ? insertedId : (createData.item_id || values[fields.indexOf('item_id')]);
+                if (targetItemId) {
+                  await EmbeddingService.queueEmbeddingGeneration(targetItemId, 'list_item', { reason: `${tableName}_${operation}` });
+                }
+              }
+            } catch (embedErr) {
+              logger.error('[SyncController] Failed to enqueue embedding generation:', embedErr);
+            }
 
             // ---- Post-processing specific to list_items ----
             if (tableName === 'list_items') {
