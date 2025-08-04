@@ -31,18 +31,22 @@ function spotifyControllerFactory(socketService = null) {
    */
   const search = async (req, res) => {
     try {
-      const { q: query, offset = 0, limit = 50, type } = req.query;
-      
-      if (!query) {
-        return res.status(400).json({ error: 'Query parameter is required' });
+      const { q: query, nextUrl, offset = 0, limit = 50, type, market } = req.query;
+
+      // must supply either q (first page) or nextUrl (paging)
+      if (!query && !nextUrl) {
+        return res.status(400).json({ error: 'Either q or nextUrl is required' });
       }
 
-      const result = await spotifyService.search(
-        query,
-        parseInt(offset),
-        parseInt(limit),
-        type // pass through; may be undefined
-      );
+      const result = nextUrl
+        ? await spotifyService.searchWithNext(nextUrl)
+        : await spotifyService.search(
+            query,
+            parseInt(offset),
+            parseInt(limit),
+            type,
+            market
+          );
 
       await safeStoreSearchEmbedding(req, query);
 

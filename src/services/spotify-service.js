@@ -76,6 +76,23 @@ class SpotifyService {
     );
   }
 
+  /**
+   * Fetch next page using Spotify-provided next URL.
+   * Simply proxies with auth header and returns same wrapper shape { items, next }
+   */
+  async searchWithNext(nextUrl) {
+    try {
+      const token = await this.getToken();
+      const { data } = await axios.get(nextUrl, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      return { items: data, next: data.next };
+    } catch (error) {
+      logger.error('Spotify paging error:', error);
+      throw new Error('Failed to fetch next page from Spotify');
+    }
+  }
+
   // fetchGenres(id: string, kind: 'track' | 'album' | 'artist' | 'show' = 'track')
   async fetchGenres(id, kind = 'track') {
     // 1. fetch the primary object
