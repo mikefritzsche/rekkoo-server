@@ -389,13 +389,15 @@ const refreshToken = async (req, res) => {
     const result = await db.transaction(async (client) => {
       // Find the refresh token in the database
       const tokenResult = await client.query(
-        `SELECT user_id, expires_at, revoked
+        `SELECT user_id, expires_at, revoked, created_at
          FROM refresh_tokens
          WHERE token = $1`,
         [refreshToken]
       );
 
       if (tokenResult.rows.length === 0) {
+        // Log this attempt for security monitoring
+        console.warn(`[Auth] Refresh token not found: ${refreshToken.substring(0, 10)}...`);
         throw { status: 401, message: 'Invalid refresh token' };
       }
 
@@ -403,8 +405,27 @@ const refreshToken = async (req, res) => {
 
       // Check if the token is revoked or expired
       if (tokenData.revoked) {
+        // IMPLEMENTATION OF GRACE PERIOD:
+        // If a revoked token is used, it could be a sign of token theft or a race condition.
+        // A simple grace period can help with race conditions where a client makes multiple
+        // requests with the same token before receiving the new one.
+        const gracePeriod = 10000; // 10 seconds
+        const tokenAge = Date.now() - new Date(tokenData.created_at).getTime();
+
+        if (tokenAge > gracePeriod) {
+            // If the token is old, it's more likely a security issue. Invalidate all user's tokens.
+            await client.query(`UPDATE refresh_tokens SET revoked = true WHERE user_id = $1`, [tokenData.user_id]);
+             console.error(`[Auth] Attempted reuse of revoked refresh token for user ${tokenData.user_id}. All tokens revoked.`);
+            throw { status: 401, message: 'Refresh token has been revoked. Please log in again.' };
+        }
+        
+        // If within grace period, it might be a race condition.
+        // We can choose to re-send the latest active token if one exists.
+        // For now, we will still treat it as an error but with a less severe message.
+        console.warn(`[Auth] Revoked refresh token used within grace period for user ${tokenData.user_id}. Potential race condition.`);
         throw { status: 401, message: 'Refresh token has been revoked' };
       }
+
       if (new Date(tokenData.expires_at) < new Date()) {
         throw { status: 401, message: 'Refresh token has expired' };
       }
@@ -1118,6 +1139,27 @@ const mobileOauth = async (req, res) => {
     // Re-use logic from oauthCallback (manual copy) to find/create user and issue tokens
 
     const result = await db.transaction(async (client) => {
+      // Ensure required OAuth tables exist (development convenience)
+      await client.query(`CREATE TABLE IF NOT EXISTS oauth_providers (
+        id SERIAL PRIMARY KEY,
+        provider_name TEXT UNIQUE NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );`);
+
+      await client.query(`CREATE TABLE IF NOT EXISTS user_oauth_connections (
+        id SERIAL PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider_id INTEGER NOT NULL REFERENCES oauth_providers(id) ON DELETE CASCADE,
+        provider_user_id TEXT NOT NULL,
+        access_token TEXT,
+        refresh_token TEXT,
+        token_expires_at TIMESTAMPTZ,
+        profile_data JSONB,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE (user_id, provider_id)
+      );`);
+
       // Look up provider row
       let providerRes = await client.query(`SELECT id FROM oauth_providers WHERE provider_name = $1`, [provider]);
       let providerRowId = providerRes.rows.length ? providerRes.rows[0].id : null;

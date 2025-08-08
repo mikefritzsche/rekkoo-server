@@ -1084,237 +1084,97 @@ function syncControllerFactory(socketService) {
    */
   const handleGetChanges = async (req, res) => {
     const lastPulledAtString = req.query.last_pulled_at;
-    // logger.info(`[SyncController] Received req.query.last_pulled_at: '${lastPulledAtString}' (type: ${typeof lastPulledAtString})`);
     let lastPulledAt = 0;
 
     if (lastPulledAtString) {
-      const parsedDate = Date.parse(lastPulledAtString);
-      if (!isNaN(parsedDate)) {
-        lastPulledAt = parsedDate;
-      } else {
-        const parsedInt = parseInt(lastPulledAtString, 10);
-        if (!isNaN(parsedInt)) {
-          lastPulledAt = parsedInt;
-        } else {
-          logger.warn(`[SyncController] Could not parse last_pulled_at value: "${lastPulledAtString}". Defaulting to 0.`);
-        }
+      const parsed = parseInt(lastPulledAtString, 10);
+      if (!isNaN(parsed)) {
+        lastPulledAt = parsed;
       }
-    } else {
-      // logger.info(`[SyncController] req.query.last_pulled_at was not provided or was empty. Defaulting to 0.`);
     }
-    // logger.info(`[SyncController] Final parsed lastPulledAt timestamp before use: ${lastPulledAt}`);
 
     const userId = req.user?.id;
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    // logger.info(`[SyncController] User ${userId} pulling changes since: ${new Date(lastPulledAt).toISOString()} (timestamp: ${lastPulledAt})`);
+
+    const serverNow = Date.now();
 
     try {
+      // This single, optimized query replaces the previous multi-query loop.
+      const query = `
+        WITH change_log_updates AS (
+          SELECT
+            table_name,
+            record_id,
+            operation,
+            created_at,
+            change_data
+          FROM public.change_log
+          WHERE user_id = $1 AND created_at > to_timestamp($2 / 1000.0)
+        )
+        SELECT
+          cl.table_name,
+          cl.record_id,
+          cl.operation,
+          cl.created_at,
+          cl.change_data,
+          -- Efficiently fetch current data using LEFT JOINs
+          COALESCE(
+            l.json_build_object,
+            li.json_build_object,
+            f.json_build_object,
+            us.json_build_object,
+            u.json_build_object,
+            flw.json_build_object,
+            n.json_build_object,
+            lc.json_build_object,
+            it.json_build_object,
+            cl.change_data::json
+          ) AS current_data
+        FROM change_log_updates cl
+        LEFT JOIN (SELECT id, row_to_json(lists.*) as json_build_object FROM public.lists WHERE owner_id = $1 AND deleted_at IS NULL) l ON cl.table_name = 'lists' AND cl.operation != 'delete' AND l.id = cl.record_id::uuid
+        LEFT JOIN (SELECT id, row_to_json(list_items.*) as json_build_object FROM public.list_items WHERE owner_id = $1 AND deleted_at IS NULL) li ON cl.table_name = 'list_items' AND cl.operation != 'delete' AND li.id = cl.record_id::uuid
+        LEFT JOIN (SELECT id, row_to_json(favorites.*) as json_build_object FROM public.favorites WHERE user_id = $1 AND deleted_at IS NULL) f ON cl.table_name = 'favorites' AND cl.operation != 'delete' AND f.id = cl.record_id::uuid
+        LEFT JOIN (SELECT user_id, row_to_json(user_settings.*) as json_build_object FROM public.user_settings WHERE user_id = $1) us ON cl.table_name = 'user_settings' AND cl.operation != 'delete' AND us.user_id = $1
+        LEFT JOIN (SELECT id, row_to_json(users.*) as json_build_object FROM public.users) u ON cl.table_name = 'users' AND cl.operation != 'delete' AND u.id = cl.record_id::uuid
+        LEFT JOIN (SELECT id, row_to_json(followers.*) as json_build_object FROM public.followers WHERE (follower_id = $1 OR followed_id = $1) AND deleted_at IS NULL) flw ON cl.table_name = 'followers' AND cl.operation != 'delete' AND flw.id = cl.record_id::uuid
+        LEFT JOIN (SELECT id, row_to_json(notifications.*) as json_build_object FROM public.notifications WHERE user_id = $1 AND deleted_at IS NULL) n ON cl.table_name = 'notifications' AND cl.operation != 'delete' AND n.id = cl.record_id::uuid
+        LEFT JOIN (SELECT id, row_to_json(list_categories.*) as json_build_object FROM public.list_categories WHERE deleted_at IS NULL) lc ON cl.table_name = 'list_categories' AND cl.operation != 'delete' AND lc.id = cl.record_id::uuid
+        LEFT JOIN (SELECT item_id, row_to_json(item_tags.*) as json_build_object FROM public.item_tags WHERE deleted_at IS NULL) it ON cl.table_name = 'item_tags' AND cl.operation != 'delete' AND it.item_id = cl.record_id::uuid
+        ORDER BY cl.created_at ASC
+        LIMIT 1000;
+      `;
+
+      const { rows } = await db.query(query, [userId, lastPulledAt]);
+
       const changes = {
-        list_items: { created: [], updated: [], deleted: [] },
         lists: { created: [], updated: [], deleted: [] },
+        list_items: { created: [], updated: [], deleted: [] },
+        favorites: { created: [], updated: [], deleted: [] },
         user_settings: { created: [], updated: [], deleted: [] },
         users: { created: [], updated: [], deleted: [] },
-        movie_details: { created: [], updated: [], deleted: [] },
-        tv_details: { created: [], updated: [], deleted: [] },
-        favorites: { created: [], updated: [], deleted: [] },
         followers: { created: [], updated: [], deleted: [] },
-        notifications: { created: [], updated: [], deleted: [] }
+        notifications: { created: [], updated: [], deleted: [] },
+        list_categories: { created: [], updated: [], deleted: [] },
+        item_tags: { created: [], updated: [], deleted: [] },
       };
-      const serverNow = Date.now();
-      const allSyncableTables = ['list_items', 'lists', 'user_settings', 'users', 'movie_details', 'tv_details', 'favorites', 'followers', 'notifications']; 
-      
-      const relatedUserIds = new Set();
 
-      await db.transaction(async (client) => {
-        for (const table of allSyncableTables) {
-          const userIdentifierColumn = getUserIdentifierColumn(table);
-          let createdRecords = [];
-          let updatedRecords = [];
-          let deletedRecordIds = [];
+      for (const row of rows) {
+        const { table_name, record_id, operation, current_data } = row;
 
-          if (table === 'movie_details') {
-            const updatedQuery = `
-              SELECT md.* FROM ${client.escapeIdentifier(table)} md
-              JOIN list_items li ON md.list_item_id = li.id
-              WHERE li.owner_id = $1 AND md.updated_at >= to_timestamp($2 / 1000.0)
-            `;
-            const updatedResult = await client.query(updatedQuery, [userId, lastPulledAt]);
-            updatedResult.rows.forEach(record => {
-              record.updated_at = new Date(record.updated_at).getTime();
-              record.created_at = new Date(record.created_at).getTime();
-              if (record.created_at >= lastPulledAt) {
-                createdRecords.push(record);
-              } else {
-                updatedRecords.push(record);
-              }
-            });
-            deletedRecordIds = []; 
-          } else if (userIdentifierColumn) { 
-            if (table === 'followers') {
-                const createdQuery = `
-                    SELECT * FROM ${client.escapeIdentifier(table)}
-                    WHERE (${client.escapeIdentifier('follower_id')} = $1 OR ${client.escapeIdentifier('followed_id')} = $1)
-                      AND created_at >= to_timestamp($2 / 1000.0) 
-                      AND deleted_at IS NULL`;
-                const createdResult = await client.query(createdQuery, [userId, lastPulledAt]);
-                createdResult.rows.forEach(record => {
-                    record.created_at = new Date(record.created_at).getTime();
-                    if (record.updated_at) record.updated_at = new Date(record.updated_at).getTime(); else record.updated_at = record.created_at;
-                    createdRecords.push(record);
-                });
-                // For followers, also check for updates to existing records (e.g. if a deleted_at was set then cleared - restoration)
-                // For this, we look at updated_at. A follow action itself might not update 'updated_at' unless specified.
-                // The client logic primarily uses created_at for new follows and deleted_at for unfollows.
-                // We will primarily rely on 'created' and 'deleted' for followers.
-                // However, if a follow record *is* updated (e.g. restoring a soft-deleted one), send it.
-                 const updatedFollowersQuery = `
-                    SELECT * FROM ${client.escapeIdentifier(table)}
-                    WHERE (${client.escapeIdentifier('follower_id')} = $1 OR ${client.escapeIdentifier('followed_id')} = $1)
-                    AND updated_at >= to_timestamp($2 / 1000.0)
-                    AND created_at < to_timestamp($2 / 1000.0) -- Only consider as 'updated' if not already 'created'
-                    AND deleted_at IS NULL`; // Only send active, updated follows
-                const updatedFollowersResult = await client.query(updatedFollowersQuery, [userId, lastPulledAt]);
-                updatedFollowersResult.rows.forEach(record => {
-                    record.created_at = new Date(record.created_at).getTime();
-                    record.updated_at = new Date(record.updated_at).getTime();
-                    updatedRecords.push(record);
-                });
-
-            } else if (table === 'notifications') {
-                const createdQuery = `
-                    SELECT * FROM ${client.escapeIdentifier(table)}
-                    WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 
-                      AND created_at >= to_timestamp($2 / 1000.0)
-                      AND deleted_at IS NULL`;
-                const createdResult = await client.query(createdQuery, [userId, lastPulledAt]);
-                createdResult.rows.forEach(record => {
-                    record.created_at = new Date(record.created_at).getTime();
-                    if (record.updated_at) record.updated_at = new Date(record.updated_at).getTime(); else record.updated_at = record.created_at;
-                    createdRecords.push(record);
-                });
-                 const updatedNotificationsQuery = `
-                    SELECT * FROM ${client.escapeIdentifier(table)}
-                    WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1
-                    AND updated_at >= to_timestamp($2 / 1000.0)
-                    AND created_at < to_timestamp($2 / 1000.0)
-                    AND deleted_at IS NULL`;
-                const updatedNotificationsResult = await client.query(updatedNotificationsQuery, [userId, lastPulledAt]);
-                updatedNotificationsResult.rows.forEach(record => {
-                    record.created_at = new Date(record.created_at).getTime();
-                    record.updated_at = new Date(record.updated_at).getTime();
-                    updatedRecords.push(record);
-                });
-            } else { // General case for other tables with userIdentifierColumn
-                const query = `
-                  SELECT * FROM ${client.escapeIdentifier(table)} 
-                  WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND updated_at >= to_timestamp($2 / 1000.0)
-                `;
-                const result = await client.query(query, [userId, lastPulledAt]);
-                result.rows.forEach(record => {
-                  if (record.updated_at) record.updated_at = new Date(record.updated_at).getTime();
-                  record.created_at = new Date(record.created_at).getTime();
-                  if (record.created_at >= lastPulledAt) {
-                    createdRecords.push(record);
-                  } else { // Already checked updated_at in query
-                    updatedRecords.push(record);
-                  }
-                });
-            }
-            
-            if (await columnExists(client, table, 'deleted_at')) {
-              let selectIdColumnForDeleted = 'id'; 
-              if (table === 'user_settings') { selectIdColumnForDeleted = `${client.escapeIdentifier('user_id')} AS id`; }
-              const deletedQuery = `
-                SELECT ${selectIdColumnForDeleted} FROM ${client.escapeIdentifier(table)} 
-                WHERE ${client.escapeIdentifier(userIdentifierColumn)} = $1 AND deleted_at IS NOT NULL AND deleted_at >= to_timestamp($2 / 1000.0)
-              `;
-              try {
-                const deletedResult = await client.query(deletedQuery, [userId, lastPulledAt]);
-                deletedRecordIds = deletedResult.rows.map(r => r.id); 
-              } catch (e) {
-                 logger.warn(`[SyncController] Could not query deleted records for table ${table}. Error: ${e.message}`);
-              }
-            }
-          } else if (table !== 'movie_details' && table !== 'tv_details') { // Skip if no user identifier and not a detail table handled above
-            logger.warn(`[SyncController] Skipping table ${table} in pull changes as it has no direct user identifier column and no special handling defined.`);
-            changes[table] = { created: [], updated: [], deleted: [] }; // Ensure it has an entry
-            continue;
-          }
-          // END OF PLACEHOLDER for per-table fetching logic
-
-          // Collect related user IDs
-          if (table === 'followers') {
-            createdRecords.forEach(record => {
-              if (record.follower_id) relatedUserIds.add(record.follower_id);
-              if (record.followed_id) relatedUserIds.add(record.followed_id);
-            });
-            updatedRecords.forEach(record => {
-              if (record.follower_id) relatedUserIds.add(record.follower_id);
-              if (record.followed_id) relatedUserIds.add(record.followed_id);
-            });
-          } else if (table === 'lists' || table === 'list_items') { // list_items also has owner_id
-            createdRecords.forEach(record => { if (record.owner_id) relatedUserIds.add(record.owner_id); });
-            updatedRecords.forEach(record => { if (record.owner_id) relatedUserIds.add(record.owner_id); });
-          } else if (table === 'notifications') {
-            createdRecords.forEach(record => {
-              if (record.user_id) relatedUserIds.add(record.user_id);
-              if (record.actor_id) relatedUserIds.add(record.actor_id);
-            });
-            updatedRecords.forEach(record => {
-              if (record.user_id) relatedUserIds.add(record.user_id);
-              if (record.actor_id) relatedUserIds.add(record.actor_id);
-            });
-          } else if (table === 'favorites') { // Favorites are user-specific
-             createdRecords.forEach(record => { if (record.user_id) relatedUserIds.add(record.user_id); });
-             updatedRecords.forEach(record => { if (record.user_id) relatedUserIds.add(record.user_id); });
-          }
-          // For 'users' table itself, the main query handles the current user.
-          // If other users are modified directly and should be synced, they'd be caught here
-          // but primary user sync for current user is usually more direct.
-          // We are mostly interested in related users from *other* tables.
-
-          changes[table] = {
-            created: createdRecords,
-            updated: updatedRecords,
-            deleted: deletedRecordIds,
-          };
+        if (!changes[table_name]) {
+          changes[table_name] = { created: [], updated: [], deleted: [] };
         }
 
-        if (relatedUserIds.size > 0) {
-          relatedUserIds.delete(userId); 
-          if (relatedUserIds.size > 0) {
-            const userIdsToFetch = Array.from(relatedUserIds);
-            logger.info(`[SyncController handleGetChanges] Need to fetch profiles for related user IDs: ${userIdsToFetch.join(', ')}`);
-            const placeholders = userIdsToFetch.map((_, i) => `$${i + 1}`).join(',');
-            const usersQuery = `
-              SELECT * FROM public.users
-              WHERE id IN (${placeholders}) 
-              AND updated_at >= to_timestamp($${userIdsToFetch.length + 1} / 1000.0)
-            `;
-            const userResults = await client.query(usersQuery, [...userIdsToFetch, lastPulledAt]);
-            userResults.rows.forEach(userRecord => {
-              userRecord.created_at = new Date(userRecord.created_at).getTime();
-              userRecord.updated_at = new Date(userRecord.updated_at).getTime();
-              // Check if this user record is already in changes.users from the main 'users' table processing
-              const existingCreated = changes.users.created.find(u => u.id === userRecord.id);
-              const existingUpdated = changes.users.updated.find(u => u.id === userRecord.id);
-
-              if (!existingCreated && !existingUpdated) { // Only add if not already processed
-                if (userRecord.created_at >= lastPulledAt) {
-                  changes.users.created.push(userRecord);
-                } else {
-                  changes.users.updated.push(userRecord);
-                }
-              } else {
-                logger.info(`[SyncController handleGetChanges] User ${userRecord.id} was already processed in the main 'users' table sync. Skipping duplicate add from related IDs.`);
-              }
-            });
-            logger.info(`[SyncController handleGetChanges] Added ${userResults.rows.length} distinct related user profiles to the sync payload (if not already present).`);
-          }
+        if (operation === 'delete') {
+          changes[table_name].deleted.push(record_id);
+        } else if (operation === 'create') {
+          changes[table_name].created.push(current_data);
+        } else {
+          changes[table_name].updated.push(current_data);
         }
-      });
+      }
 
       res.status(200).json({
         changes: changes,
