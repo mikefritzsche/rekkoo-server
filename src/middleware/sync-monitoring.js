@@ -12,7 +12,9 @@ class SyncMonitor {
       memoryUsage: 0
     };
     
+    // Keep separate arrays for durations and timestamps
     this.requestTimes = [];
+    this.requestTimestamps = [];
     this.errors = [];
     this.startTime = Date.now();
     this.isThrottling = false;
@@ -50,6 +52,11 @@ class SyncMonitor {
         if (self.requestTimes.length > 100) {
           self.requestTimes.shift();
         }
+        // Record timestamp of completed request for RPS calculation
+        self.requestTimestamps.push(endTime);
+        if (self.requestTimestamps.length > 1000) {
+          self.requestTimestamps = self.requestTimestamps.slice(-1000);
+        }
         
         self.metrics.activeConnections--;
         self.metrics.avgResponseTime = self.requestTimes.reduce((a, b) => a + b, 0) / self.requestTimes.length;
@@ -76,6 +83,11 @@ class SyncMonitor {
    * Determine if requests should be throttled
    */
   async shouldThrottle(req) {
+    // Allow disabling throttling in local development or via env flag
+    if (process.env.DISABLE_SYNC_THROTTLE === 'true' || process.env.NODE_ENV === 'development') {
+      this.isThrottling = false;
+      return false;
+    }
     const userId = req.user?.id;
     
     // Check rate limiting per user
@@ -91,7 +103,8 @@ class SyncMonitor {
       return true;
     }
 
-    if (this.metrics.avgResponseTime > 10000) {
+    // Only throttle on high response time if there is some concurrent activity
+    if (this.metrics.avgResponseTime > 10000 && (this.metrics.activeConnections > 10 || this.metrics.requestsPerSecond > 2)) {
       this.isThrottling = true;
       logger.warn('[SyncMonitor] Throttling due to high response times');
       return true;
@@ -146,8 +159,9 @@ class SyncMonitor {
     
     // Calculate requests per second
     const now = Date.now();
-    const recentRequests = this.requestTimes.filter(time => now - time < 60000);
-    this.metrics.requestsPerSecond = recentRequests.length / 60;
+    // Use timestamps, not durations
+    this.requestTimestamps = this.requestTimestamps.filter(ts => now - ts < 60000);
+    this.metrics.requestsPerSecond = this.requestTimestamps.length / 60;
   }
 
   /**

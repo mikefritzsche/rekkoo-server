@@ -108,6 +108,9 @@ app.use(cors({
     const allowedOrigins = [
       'http://localhost:3000',
       'http://localhost:8081',
+      'http://localhost:8082',
+      'https://app-dev.rekkoo.com',
+      'http://app-dev.rekkoo.com',
       // Local development
       'http://localhost:5173',  // Vite dev server (admin SPA)
       'http://localhost:3100',  // Express API itself (for server-to-server requests)
@@ -144,15 +147,23 @@ app.use(cors({
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '5mb', extended: true }));
 
+
 // ---- Session Middleware (must come before passport to allow passport to access session) ----
+// When serving the app over HTTPS on a different subdomain (e.g., app-dev.rekkoo.com ↔ api-dev.rekkoo.com),
+// the cookie must be SameSite=None and Secure=true for the browser to accept it.
+app.set('trust proxy', 1); // respect X-Forwarded-Proto from Traefik
+
+const appUrl = process.env.CLIENT_URL_APP || 'http://localhost:8081';
+const isHttpsApp = appUrl.startsWith('https://');
+
 app.use(expressSession({
   secret: process.env.SESSION_SECRET || 'rekkoo_session_secret',
   resave: false,
   saveUninitialized: false,
   cookie: {
     httpOnly: true,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'lax',
+    secure: isHttpsApp || process.env.FORCE_SECURE_COOKIE === 'true',
+    sameSite: (isHttpsApp || process.env.FORCE_SAMESITE_NONE === 'true') ? 'none' : 'lax',
   },
 }));
 
@@ -258,7 +269,6 @@ app.use((err, req, res, next) => {
 
 // --- 9. Start Server ---
 server.listen(PORT, () => {
-  console.log(`env: `, process.env.CLIENT_URL_APP, process.env.CLIENT_URL_ADMIN, process.env.AI_SERVER_ENV, process.env.AI_SERVER_URL_LOCAL, process.env.AI_SERVER_URL_REMOTE)
   console.log(`Server running on http://localhost:${PORT}`);
   console.log(`Socket.IO listening on port ${PORT}`);
 

@@ -499,6 +499,46 @@ router.get(
   AuthController.passportCallback
 );
 
+// Facebook OAuth Routes
+router.get('/oauth/facebook', (req, res, next) => {
+  try {
+    if (!process.env.FACEBOOK_CLIENT_ID || !process.env.FACEBOOK_CLIENT_SECRET) {
+      console.error('[Facebook OAuth] Missing FACEBOOK_APP_ID/SECRET env vars');
+      return res.status(400).json({ error: 'Facebook OAuth not configured on server' });
+    }
+    const target = req.query.redirect || 'app';
+    setupOAuthRedirect(req, target, 'Facebook');
+    passport.authenticate('facebook', { scope: ['email'], state: target })(req, res, next);
+  } catch (error) {
+    console.error('[Facebook OAuth] Setup error:', error.message);
+    return res.status(400).json({ error: error.message });
+  }
+});
+
+router.get('/oauth/facebook/callback', (req, res, next) => {
+  const configured = (process.env.FACEBOOK_CLIENT_ID && process.env.FACEBOOK_CLIENT_SECRET) || (process.env.FACEBOOK_APP_ID && process.env.FACEBOOK_APP_SECRET);
+  if (!configured) {
+    const target = req.session?.oauthRedirect || req.query.state || 'app';
+    console.error('[Facebook OAuth] Missing client id/secret at callback');
+    return res.redirect(getFailureRedirect(target, 'facebook'));
+  }
+
+  passport.authenticate('facebook', { session: false }, (err, user, info) => {
+    const target = req.session?.oauthRedirect || req.query.state || 'app';
+    if (err) {
+      console.error('[Facebook OAuth] authenticate error:', err);
+      return res.redirect(getFailureRedirect(target, 'facebook'));
+    }
+    if (!user) {
+      console.warn('[Facebook OAuth] no user returned from passport', info);
+      return res.redirect(getFailureRedirect(target, 'facebook'));
+    }
+    // Hand off to our success handler
+    req.user = user;
+    return AuthController.passportCallback(req, res);
+  })(req, res, next);
+});
+
 // GitHub OAuth Routes
 router.get('/oauth/github', (req, res, next) => {
   try {

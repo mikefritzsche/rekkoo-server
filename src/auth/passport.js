@@ -2,6 +2,7 @@ const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
 const GitHubStrategy = require('passport-github2').Strategy;
 const AppleStrategy = require('passport-apple').Strategy;
+const FacebookStrategy = require('passport-facebook').Strategy;
 const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
 const db = require('../config/db');
@@ -138,6 +139,25 @@ if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
         scope: ['user:email'],
       },
       makeVerify('github')
+    )
+  );
+}
+
+// Facebook (web) -----------------------------------------------------------
+const FB_CLIENT_ID = process.env.FACEBOOK_CLIENT_ID || process.env.FACEBOOK_APP_ID;
+const FB_CLIENT_SECRET = process.env.FACEBOOK_CLIENT_SECRET || process.env.FACEBOOK_APP_SECRET;
+console.log('FB_CLIENT_ID', FB_CLIENT_ID);
+console.log('FB_CLIENT_SECRET', FB_CLIENT_SECRET);
+if (FB_CLIENT_ID && FB_CLIENT_SECRET) {
+  passport.use(
+    new FacebookStrategy(
+      {
+        clientID: FB_CLIENT_ID,
+        clientSecret: FB_CLIENT_SECRET,
+        callbackURL: process.env.FACEBOOK_CALLBACK_URL || '/v1.0/auth/oauth/facebook/callback',
+        profileFields: ['id', 'displayName', 'emails', 'photos'],
+      },
+      makeVerify('facebook')
     )
   );
 }

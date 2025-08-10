@@ -1091,7 +1091,7 @@ const getAllUsers = [ // Array for multiple middleware + handler
 // --- New: mobile OAuth token exchange (installed-app flow) ---
 const mobileOauth = async (req, res) => {
   const { provider } = req.params;
-  if (!['google', 'apple'].includes(provider)) {
+  if (!['google', 'apple', 'facebook'].includes(provider)) {
     return res.status(400).json({ message: 'Unsupported provider' });
   }
 
@@ -1134,6 +1134,21 @@ const mobileOauth = async (req, res) => {
       emailVerified = !!email; // Apple emails are verified
       name = userInfo?.name ? `${userInfo.name.firstName || ''} ${userInfo.name.lastName || ''}`.trim() : null;
       profileImageUrl = null; // Apple doesn't provide profile images
+    } else if (provider === 'facebook') {
+      // Verify via Graph API
+      if (!accessToken) {
+        return res.status(400).json({ message: 'Facebook accessToken is required' });
+      }
+      const resp = await fetch(`https://graph.facebook.com/me?fields=id,name,email,picture&access_token=${accessToken}`);
+      if (!resp.ok) {
+        return res.status(401).json({ message: 'Invalid Facebook access token' });
+      }
+      const fb = await resp.json();
+      providerId = fb.id;
+      email = fb.email || null;
+      emailVerified = !!email; // Facebook emails are verified when present
+      name = fb.name;
+      profileImageUrl = fb?.picture?.data?.url || null;
     }
 
     // Re-use logic from oauthCallback (manual copy) to find/create user and issue tokens

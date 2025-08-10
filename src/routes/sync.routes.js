@@ -16,8 +16,12 @@ module.exports = (socketService) => {
   const syncController = syncControllerFactory(socketService);
   const optimizedSyncController = optimizedSyncControllerFactory(socketService);
 
-  // Apply monitoring middleware to all sync routes
-  router.use(syncMonitor.monitor());
+  // Apply monitoring middleware to all sync routes, unless disabled for local dev
+  if (process.env.DISABLE_SYNC_THROTTLE === 'true' || process.env.NODE_ENV === 'development') {
+    // Skip monitoring to avoid 429s in local workflows
+  } else {
+    router.use(syncMonitor.monitor());
+  }
 
   // Get sync state (pull changes) - NEW OPTIMIZED VERSION
   router.get('/changes', authenticateJWT, optimizedSyncController.handleGetChangesOptimized);
