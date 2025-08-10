@@ -26,7 +26,7 @@ if (MAILJET_ENABLED) {
   console.warn('[AuthController] Mailjet disabled – missing env keys');
 }
 
-const EXPIRES_IN = '15m';
+const { jwtExpiresIn } = require('../auth/config');
 
 // Helper function to generate a refresh token
 const generateRefreshToken = () => {
@@ -315,7 +315,7 @@ const login = async (req, res) => {
 
       // Generate JWT token (short-lived access token)
       const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, {
-        expiresIn: EXPIRES_IN
+        expiresIn: jwtExpiresIn
       });
 
       // Generate refresh token
@@ -438,10 +438,11 @@ const refreshToken = async (req, res) => {
 
       // Fetch user data for the new access token payload
       const userResult = await client.query(
-        `SELECT u.id, u.username, u.email, array_agg(r.name) as roles
+        `SELECT u.id, u.username, u.email,
+                COALESCE(array_agg(r.name) FILTER (WHERE r.name IS NOT NULL), '{}') AS roles
          FROM users u
-         JOIN user_roles ur ON u.id = ur.user_id
-         JOIN roles r ON ur.role_id = r.id
+         LEFT JOIN user_roles ur ON u.id = ur.user_id
+         LEFT JOIN roles r ON ur.role_id = r.id
          WHERE u.id = $1
          GROUP BY u.id`,
         [tokenData.user_id]
@@ -457,7 +458,7 @@ const refreshToken = async (req, res) => {
       const accessToken = jwt.sign(
         { userId: user.id, username: user.username, roles: user.roles },
         process.env.JWT_SECRET,
-        { expiresIn: '15m' } // Short-lived access token
+        { expiresIn: jwtExpiresIn }
       );
 
       // Generate a new refresh token
@@ -917,7 +918,7 @@ const oauthCallback = async (req, res) => {
       );
 
       // Generate your application's JWTs
-      const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
+      const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: jwtExpiresIn });
       const appRefreshToken = generateRefreshToken();
       const appRefreshTokenExpiresAt = new Date();
       appRefreshTokenExpiresAt.setDate(appRefreshTokenExpiresAt.getDate() + 30);
@@ -968,7 +969,7 @@ const passportCallback = async (req, res) => {
     const user = req.user;
 
     const result = await db.transaction(async (client) => {
-      const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
+      const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: jwtExpiresIn });
 
       const refreshTokenValue = generateRefreshToken();
       const rtExpires = new Date();
@@ -1257,7 +1258,7 @@ const mobileOauth = async (req, res) => {
         ]
       );
 
-      const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
+      const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: jwtExpiresIn });
       const appRefreshToken = generateRefreshToken();
       const rtExpires = new Date();
       rtExpires.setDate(rtExpires.getDate() + 30);
@@ -1663,7 +1664,7 @@ const enhancedOAuthCallback = async (req, res) => {
       );
 
       // Generate JWT tokens
-      const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: EXPIRES_IN });
+      const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: jwtExpiresIn });
       const appRefreshToken = generateRefreshToken();
       const appRefreshTokenExpiresAt = new Date();
       appRefreshTokenExpiresAt.setDate(appRefreshTokenExpiresAt.getDate() + 30);
