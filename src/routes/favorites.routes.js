@@ -37,6 +37,8 @@ function createFavoritesRouter(favoritesController) {
    * @access Private
    */
   router.get('/status', authenticateJWT, favoritesController.checkFavoriteStatus);
+  router.get('/count', authenticateJWT, favoritesController.getFavoriteCount);
+  router.get('/likers', authenticateJWT, favoritesController.getLikersForTarget);
 
   /**
    * @route GET /shared

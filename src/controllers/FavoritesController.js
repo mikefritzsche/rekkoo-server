@@ -355,6 +355,134 @@ function favoritesControllerFactory(socketService = null) {
   };
 
   /**
+   * Get total count of favorites for a given target (list or list_item)
+   */
+  const getFavoriteCount = async (req, res) => {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    const { list_id, list_item_id } = req.query;
+    if ((!list_id && !list_item_id) || (list_id && list_item_id)) {
+      return res.status(400).json({ error: 'Either list_id or list_item_id must be provided, but not both' });
+    }
+    try {
+      // Detect schema: legacy uses target_type/target_id; new uses list_id/list_item_id
+      const colCheck = await db.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='favorites'`
+      );
+      const columnNames = colCheck.rows.map(r => r.column_name);
+      const hasListColumns = columnNames.includes('list_id') && columnNames.includes('list_item_id');
+
+      let result;
+      if (hasListColumns) {
+        const query = `
+          SELECT COUNT(*)::int as count
+          FROM public.favorites
+          WHERE ${list_id ? 'list_id = $1' : 'list_item_id = $1'}
+            AND deleted_at IS NULL
+        `;
+        const params = [list_id || list_item_id];
+        result = await db.query(query, params);
+      } else {
+        // Legacy schema
+        const isList = !!list_id;
+        const query = `
+          SELECT COUNT(*)::int as count
+          FROM public.favorites
+          WHERE target_type = $1 AND target_id = $2 AND deleted_at IS NULL
+        `;
+        const params = [isList ? 'list' : 'item', list_id || list_item_id];
+        result = await db.query(query, params);
+      }
+      return res.status(200).json({ count: result.rows?.[0]?.count ?? 0 });
+    } catch (error) {
+      console.error('[FavoritesController] Error getting favorite count:', error);
+      return res.status(500).json({ error: 'Failed to get favorite count' });
+    }
+  };
+
+  /**
+   * Get users who liked/favorited a target (owner-only)
+   */
+  const getLikersForTarget = async (req, res) => {
+    const userId = req.user?.id;
+    if (!userId) {
+      return res.status(401).json({ error: 'User not authenticated' });
+    }
+    const { list_id, list_item_id } = req.query;
+    if ((!list_id && !list_item_id) || (list_id && list_item_id)) {
+      return res.status(400).json({ error: 'Either list_id or list_item_id must be provided, but not both' });
+    }
+    try {
+      // Verify ownership
+      if (list_id) {
+        const ownQ = `SELECT owner_id FROM public.lists WHERE id = $1 AND deleted_at IS NULL`;
+        const ownRes = await db.query(ownQ, [list_id]);
+        if (ownRes.rows.length === 0) return res.status(404).json({ error: 'List not found' });
+        if (String(ownRes.rows[0].owner_id) !== String(userId)) return res.status(403).json({ error: 'Forbidden' });
+      } else if (list_item_id) {
+        const ownQ = `
+          SELECT l.owner_id
+          FROM public.list_items li
+          JOIN public.lists l ON l.id = li.list_id
+          WHERE li.id = $1 AND li.deleted_at IS NULL AND l.deleted_at IS NULL
+        `;
+        const ownRes = await db.query(ownQ, [list_item_id]);
+        if (ownRes.rows.length === 0) return res.status(404).json({ error: 'List item not found' });
+        if (String(ownRes.rows[0].owner_id) !== String(userId)) return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      // Detect schema
+      const colCheck = await db.query(
+        `SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name='favorites'`
+      );
+      const columnNames = colCheck.rows.map(r => r.column_name);
+      const hasListColumns = columnNames.includes('list_id') && columnNames.includes('list_item_id');
+
+      let result;
+      if (hasListColumns) {
+        const query = `
+          SELECT f.id,
+                 f.user_id,
+                 f.created_at,
+                 u.username,
+                 u.display_name,
+                 u.avatar_url
+          FROM public.favorites f
+          JOIN public.users u ON u.id = f.user_id
+          WHERE ${list_id ? 'f.list_id = $1' : 'f.list_item_id = $1'}
+            AND f.deleted_at IS NULL
+          ORDER BY f.created_at DESC
+        `;
+        const params = [list_id || list_item_id];
+        result = await db.query(query, params);
+      } else {
+        const isList = !!list_id;
+        const query = `
+          SELECT f.id,
+                 f.user_id,
+                 f.created_at,
+                 u.username,
+                 u.display_name,
+                 u.avatar_url
+          FROM public.favorites f
+          JOIN public.users u ON u.id = f.user_id
+          WHERE f.target_type = $1 AND f.target_id = $2 AND f.deleted_at IS NULL
+          ORDER BY f.created_at DESC
+        `;
+        const params = [isList ? 'list' : 'item', list_id || list_item_id];
+        result = await db.query(query, params);
+      }
+      
+      return res.status(200).json({ data: result.rows });
+    } catch (error) {
+      console.error('[FavoritesController] Error getting likers:', error);
+      return res.status(500).json({ error: 'Failed to get likers' });
+    }
+  };
+
+  /**
    * Manage favorite categories (CRUD operations)
    */
   const createCategory = async (req, res) => {
@@ -991,6 +1119,8 @@ function favoritesControllerFactory(socketService = null) {
     removeFromFavorites,
     getUserFavorites,
     checkFavoriteStatus,
+    getFavoriteCount,
+    getLikersForTarget,
     createCategory,
     updateCategory,
     deleteCategory,
