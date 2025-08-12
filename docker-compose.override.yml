@@ -8,7 +8,7 @@ services:
       - AI_SERVER_URL_REMOTE=https://ai.rekkoo.com
       - AI_SERVER_ENV=local
       - VALKEY_URL=redis://valkey:6379
-      - CLIENT_URL_APP=https://app-dev.rekkoo.com
+      - CLIENT_URL_APP=${CLIENT_URL_APP:-http://localhost:8081}
       - CLIENT_URL_ADMIN=https://admin-dev.rekkoo.com
       - GOOGLE_CALLBACK_URL=https://api-dev.rekkoo.com/v1.0/auth/oauth/google/callback
     env_file:

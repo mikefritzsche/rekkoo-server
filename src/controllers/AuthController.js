@@ -1031,7 +1031,10 @@ const passportCallback = async (req, res) => {
         redirectFlag
       });
       
-      const appUrl = getClientUrl('app');
+      // Prefer the origin we captured at the start of the flow (domain user used to initiate login)
+      // Fallback to configured CLIENT_URL_APP
+      const detectedOrigin = req.session?.oauthOrigin;
+      const appUrl = detectedOrigin || getClientUrl('app');
       
       if (isWebBrowser) {
         // For web browsers (desktop/laptop), redirect to oauth-callback route
@@ -1047,7 +1050,8 @@ const passportCallback = async (req, res) => {
       redirectUrl = `${adminUrl}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
     } else {
       // Default to app client for better UX
-      const appUrl = getClientUrl('app');
+      const detectedOrigin = req.session?.oauthOrigin;
+      const appUrl = detectedOrigin || getClientUrl('app');
       redirectUrl = `${appUrl}/oauth/callback?accessToken=${result.accessToken}&refreshToken=${result.refreshToken}&userId=${user.id}`;
     }
     
@@ -1063,7 +1067,8 @@ const passportCallback = async (req, res) => {
     let errorRedirectUrl;
     
     if (redirectFlag === 'app') {
-      const appUrl = getClientUrl('app');
+      const detectedOrigin = req.session?.oauthOrigin;
+      const appUrl = detectedOrigin || getClientUrl('app');
       errorRedirectUrl = `${appUrl}/oauth/callback?error=authentication_failed`;
     } else {
       const adminUrl = getClientUrl('admin');

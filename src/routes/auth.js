@@ -474,6 +474,19 @@ router.get('/oauth/google', (req, res, next) => {
   try {
     const target = req.query.redirect || 'app'; // Default to app for better UX
     setupOAuthRedirect(req, target, 'Google');
+    // Try to capture the requesting origin so the success callback can
+    // redirect back to the same domain (localhost:8081 vs app-dev.rekkoo.com)
+    try {
+      const headerOrigin = req.headers.origin;
+      const ref = req.headers.referer || req.headers.referrer;
+      const refererOrigin = (() => {
+        try { return ref ? new URL(ref).origin : undefined; } catch { return undefined; }
+      })();
+      const detected = headerOrigin || refererOrigin;
+      if (req.session && detected) {
+        req.session.oauthOrigin = detected;
+      }
+    } catch {}
 
     // Pass target as state parameter for additional security
     passport.authenticate('google', { 
@@ -508,6 +521,17 @@ router.get('/oauth/facebook', (req, res, next) => {
     }
     const target = req.query.redirect || 'app';
     setupOAuthRedirect(req, target, 'Facebook');
+    try {
+      const headerOrigin = req.headers.origin;
+      const ref = req.headers.referer || req.headers.referrer;
+      const refererOrigin = (() => {
+        try { return ref ? new URL(ref).origin : undefined; } catch { return undefined; }
+      })();
+      const detected = headerOrigin || refererOrigin;
+      if (req.session && detected) {
+        req.session.oauthOrigin = detected;
+      }
+    } catch {}
     passport.authenticate('facebook', { scope: ['email'], state: target })(req, res, next);
   } catch (error) {
     console.error('[Facebook OAuth] Setup error:', error.message);
