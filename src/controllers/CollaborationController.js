@@ -2,6 +2,209 @@ const db = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 
 const CollaborationController = {
+  // Get groups attached to a list with roles
+  getListGroupsWithRoles: async (req, res) => {
+    const { listId } = req.params;
+    const requester_id = req.user.id;
+    try {
+      // Ensure requester is owner or admin of the list
+      const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+      if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
+      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+
+      const { rows } = await db.query(
+        `SELECT ls.shared_with_group_id as group_id,
+                cg.name, cg.description,
+                lgr.role, lgr.permissions
+         FROM list_sharing ls
+         JOIN collaboration_groups cg ON cg.id = ls.shared_with_group_id
+         LEFT JOIN list_group_roles lgr ON lgr.list_id = ls.list_id AND lgr.group_id = ls.shared_with_group_id AND lgr.deleted_at IS NULL
+         WHERE ls.list_id = $1 AND ls.deleted_at IS NULL
+         ORDER BY cg.name ASC`,
+        [listId]
+      );
+      return res.json(rows);
+    } catch (e) {
+      console.error('Error fetching list groups:', e);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // Attach group to list with role
+  attachGroupToList: async (req, res) => {
+    const { listId, groupId } = req.params;
+    const { role = 'editor', permissions = null } = req.body || {};
+    const requester_id = req.user.id;
+    try {
+      const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+      if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
+      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+
+      // Ensure list_sharing link exists
+      await db.query(
+        `INSERT INTO list_sharing (list_id, shared_with_group_id)
+         VALUES ($1, $2)
+         ON CONFLICT DO NOTHING`,
+        [listId, groupId]
+      );
+
+      // Upsert role
+      const upsert = await db.query(
+        `INSERT INTO list_group_roles (list_id, group_id, role, permissions)
+         VALUES ($1, $2, $3, $4::jsonb)
+         ON CONFLICT (list_id, group_id)
+         DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions, updated_at = CURRENT_TIMESTAMP
+         RETURNING *`,
+        [listId, groupId, role, permissions ? JSON.stringify(permissions) : null]
+      );
+      return res.status(201).json(upsert.rows[0]);
+    } catch (e) {
+      console.error('Error attaching group to list:', e);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // Update group role on list
+  updateGroupRoleOnList: async (req, res) => {
+    const { listId, groupId } = req.params;
+    const { role, permissions = null } = req.body || {};
+    const requester_id = req.user.id;
+    try {
+      const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+      if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
+      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+      if (!role) return res.status(400).json({ error: 'role is required' });
+
+      const { rows } = await db.query(
+        `UPDATE list_group_roles SET role = $3, permissions = $4::jsonb, updated_at = CURRENT_TIMESTAMP
+         WHERE list_id = $1 AND group_id = $2
+         RETURNING *`,
+        [listId, groupId, role, permissions ? JSON.stringify(permissions) : null]
+      );
+      if (rows.length === 0) return res.status(404).json({ error: 'Group not attached to list' });
+      return res.json(rows[0]);
+    } catch (e) {
+      console.error('Error updating group role:', e);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // Detach group from list (and soft-delete role mapping)
+  detachGroupFromList: async (req, res) => {
+    const { listId, groupId } = req.params;
+    const requester_id = req.user.id;
+    try {
+      const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+      if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
+      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+
+      await db.query('UPDATE list_sharing SET deleted_at = CURRENT_TIMESTAMP WHERE list_id = $1 AND shared_with_group_id = $2 AND deleted_at IS NULL', [listId, groupId]);
+      await db.query('UPDATE list_group_roles SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE list_id = $1 AND group_id = $2 AND deleted_at IS NULL', [listId, groupId]);
+      return res.status(204).send();
+    } catch (e) {
+      console.error('Error detaching group from list:', e);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // List: get per-user overrides (owner/admin only)
+  getListUserOverrides: async (req, res) => {
+    const { listId } = req.params;
+    const requester_id = req.user.id;
+    try {
+      const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+      if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
+      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+
+      const { rows } = await db.query(
+        `SELECT luo.list_id, luo.user_id, luo.role, luo.permissions, u.username, u.email, u.full_name
+         FROM public.list_user_overrides luo
+         JOIN public.users u ON u.id = luo.user_id
+         WHERE luo.list_id = $1 AND luo.deleted_at IS NULL
+         ORDER BY u.username ASC NULLS LAST, u.email ASC NULLS LAST`,
+        [listId]
+      );
+      return res.json(rows);
+    } catch (e) {
+      console.error('Error fetching list user overrides:', e);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // List: set/remove per-user override
+  setUserRoleOverrideOnList: async (req, res) => {
+    const { listId, userId } = req.params;
+    const { role, permissions = null } = req.body || {};
+    const requester_id = req.user.id;
+    try {
+      const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+      if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
+      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+
+      if (!role) return res.status(400).json({ error: 'role is required (or use "inherit" to remove override)' });
+
+      if (role === 'inherit') {
+        const { rowCount } = await db.query(
+          `UPDATE public.list_user_overrides
+             SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           WHERE list_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+          [listId, userId]
+        );
+        return rowCount > 0 ? res.status(204).send() : res.status(204).send();
+      }
+
+      const upsert = await db.query(
+        `INSERT INTO public.list_user_overrides (list_id, user_id, role, permissions)
+           VALUES ($1, $2, $3, $4::jsonb)
+         ON CONFLICT (list_id, user_id)
+           DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions, deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
+         RETURNING *`,
+        [listId, userId, role, permissions ? JSON.stringify(permissions) : null]
+      );
+      return res.status(201).json(upsert.rows[0]);
+    } catch (e) {
+      console.error('Error setting user override:', e);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // List + Group: set/remove per-user role within a group on a list
+  setUserRoleForGroupOnList: async (req, res) => {
+    const { listId, groupId, userId } = req.params;
+    const { role, permissions = null } = req.body || {};
+    const requester_id = req.user.id;
+    try {
+      // Only list owner can set roles per group for now
+      const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+      if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
+      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+
+      if (!role) return res.status(400).json({ error: 'role is required (or use "inherit" to remove)' });
+
+      if (role === 'inherit') {
+        const { rowCount } = await db.query(
+          `UPDATE public.list_group_user_roles
+             SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+           WHERE list_id = $1 AND group_id = $2 AND user_id = $3 AND deleted_at IS NULL`,
+          [listId, groupId, userId]
+        );
+        return rowCount > 0 ? res.status(204).send() : res.status(204).send();
+      }
+
+      const upsert = await db.query(
+        `INSERT INTO public.list_group_user_roles (list_id, group_id, user_id, role, permissions)
+           VALUES ($1, $2, $3, $4, $5::jsonb)
+         ON CONFLICT (list_id, group_id, user_id)
+           DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions, deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
+         RETURNING *`,
+        [listId, groupId, userId, role, permissions ? JSON.stringify(permissions) : null]
+      );
+      return res.status(201).json(upsert.rows[0]);
+    } catch (e) {
+      console.error('Error setting user role for group on list:', e);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
   // Create a new collaboration group
   createGroup: async (req, res) => {
     const { name, description } = req.body;
@@ -68,6 +271,61 @@ const CollaborationController = {
     }
   },
 
+  // Get members of a group (owner only)
+  getGroupMembers: async (req, res) => {
+    const { groupId } = req.params;
+    const requester_id = req.user.id;
+    try {
+      // Ensure requester is owner of the group
+      const groupResult = await db.query('SELECT owner_id FROM collaboration_groups WHERE id = $1', [groupId]);
+      if (groupResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Group not found' });
+      }
+      if (groupResult.rows[0].owner_id !== requester_id) {
+        return res.status(403).json({ error: 'Only the group owner can view members' });
+      }
+
+      const { rows } = await db.query(
+        `SELECT m.group_id, m.user_id, m.role, m.joined_at, u.username, u.email, u.full_name,
+                u.profile_image_url AS avatar_url
+         FROM collaboration_group_members m
+         JOIN users u ON u.id = m.user_id
+         WHERE m.group_id = $1
+         ORDER BY m.joined_at ASC`,
+        [groupId]
+      );
+      res.status(200).json(rows);
+    } catch (error) {
+      console.error('Error fetching group members:', error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // List + Group: get per-user roles for members (and any user) within a group on a list
+  getGroupUserRolesOnList: async (req, res) => {
+    const { listId, groupId } = req.params;
+    const requester_id = req.user.id;
+    try {
+      const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+      if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
+      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+
+      const { rows } = await db.query(
+        `SELECT lgur.list_id, lgur.group_id, lgur.user_id, lgur.role, lgur.permissions,
+                u.username, u.email, u.full_name
+           FROM public.list_group_user_roles lgur
+           JOIN public.users u ON u.id = lgur.user_id
+          WHERE lgur.list_id = $1 AND lgur.group_id = $2 AND lgur.deleted_at IS NULL
+          ORDER BY u.username ASC NULLS LAST, u.email ASC NULLS LAST`,
+        [listId, groupId]
+      );
+      return res.json(rows);
+    } catch (e) {
+      console.error('Error fetching per-group user roles:', e);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
   // Remove a member from a group
   removeMemberFromGroup: async (req, res) => {
     const { groupId, userId } = req.params;
@@ -99,26 +357,11 @@ const CollaborationController = {
     }
 
     try {
-        // We will add the logic to send an email with the invitation link later
-        // For now, we will just create the invitation in the database
-
-        const expires_at = new Date();
-        expires_at.setDate(expires_at.getDate() + 7); // Invitation expires in 7 days
-
-        const invitation_token = uuidv4();
-        const invitation_code = Math.random().toString(36).substring(2, 8).toUpperCase();
-
-        const metadata = {
-            invite_type: 'group',
-            group_id: groupId,
-        };
-
-        const { rows } = await db.query(
-            'INSERT INTO invitations (inviter_id, email, invitation_code, invitation_token, status, metadata, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-            [inviter_id, email, invitation_code, invitation_token, 'pending', metadata, expires_at]
-        );
-
-        res.status(201).json(rows[0]);
+        // Use invitationService to create and email the invite
+        const invitationService = require('../services/invitationService');
+        const metadata = { invite_type: 'group', group_id: groupId };
+        const invite = await invitationService.createInvitation(inviter_id, email, metadata);
+        res.status(201).json(invite);
     } catch (error) {
       console.error('Error inviting user to group:', error);
       res.status(500).json({ error: 'Internal Server Error' });
@@ -128,6 +371,7 @@ const CollaborationController = {
   // Share a list with a group
   shareListWithGroup: async (req, res) => {
     const { listId, groupId } = req.params;
+    const { permissions } = req.body || {};
     const owner_id = req.user.id;
 
     try {
@@ -139,13 +383,32 @@ const CollaborationController = {
 
       // Verify the current user owns the group
       const groupResult = await db.query('SELECT owner_id FROM collaboration_groups WHERE id = $1', [groupId]);
-        if (groupResult.rows.length === 0 || groupResult.rows[0].owner_id !== owner_id) {
-            return res.status(403).json({ error: 'You can only share lists with groups you own' });
-        }
+      if (groupResult.rows.length === 0 || groupResult.rows[0].owner_id !== owner_id) {
+        return res.status(403).json({ error: 'You can only share lists with groups you own' });
+      }
+
+      // If a share already exists, update permissions; else insert
+      const existing = await db.query(
+        `SELECT id FROM list_sharing 
+         WHERE list_id = $1 AND shared_with_group_id = $2 AND deleted_at IS NULL 
+         LIMIT 1`,
+        [listId, groupId]
+      );
+
+      if (existing.rows.length > 0) {
+        const { rows } = await db.query(
+          `UPDATE list_sharing 
+           SET permissions = COALESCE($3, permissions), updated_at = CURRENT_TIMESTAMP 
+           WHERE id = $1 
+           RETURNING *`,
+          [existing.rows[0].id, owner_id, permissions || null]
+        );
+        return res.status(200).json(rows[0]);
+      }
 
       const { rows } = await db.query(
-        'INSERT INTO list_sharing (list_id, shared_with_group_id) VALUES ($1, $2) RETURNING *',
-        [listId, groupId]
+        'INSERT INTO list_sharing (list_id, shared_with_group_id, permissions) VALUES ($1, $2, $3) RETURNING *',
+        [listId, groupId, permissions || 'edit']
       );
       res.status(201).json(rows[0]);
     } catch (error) {
@@ -170,6 +433,33 @@ const CollaborationController = {
             res.status(204).send();
         } catch (error) {
             console.error('Error unsharing list from group:', error);
+            res.status(500).json({ error: 'Internal Server Error' });
+        }
+    },
+
+    // Get current shares for a list (groups and users)
+    getListShares: async (req, res) => {
+        const { listId } = req.params;
+        const owner_id = req.user.id;
+
+        try {
+            // Verify the current user owns the list
+            const listResult = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+            if (listResult.rows.length === 0 || listResult.rows[0].owner_id !== owner_id) {
+                return res.status(403).json({ error: 'You can only view shares for lists you own' });
+            }
+
+            const { rows } = await db.query(
+              `SELECT ls.*, cg.name as group_name
+               FROM list_sharing ls
+               LEFT JOIN collaboration_groups cg ON cg.id = ls.shared_with_group_id
+               WHERE ls.list_id = $1 AND ls.deleted_at IS NULL
+               ORDER BY ls.created_at ASC`,
+              [listId]
+            );
+            res.status(200).json(rows);
+        } catch (error) {
+            console.error('Error fetching list shares:', error);
             res.status(500).json({ error: 'Internal Server Error' });
         }
     },

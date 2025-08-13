@@ -26,7 +26,7 @@ const validateListData = (req, res, next) => {
           if (!data.list_type) {
             return res.status(400).json({ error: 'List type is required' });
           }
-          if (!data.owner_id) {
+           if (!data.owner_id) {
             return res.status(400).json({ error: 'Owner ID is required' });
           }
 
@@ -87,6 +87,16 @@ const validateListData = (req, res, next) => {
             //     return res.status(400).json({ error: 'Each item in BATCH_LIST_ORDER_UPDATE must have an id and sort_order.' });
             //   }
             // }
+        }
+      } else if (change.table_name === 'list_sharing') {
+        // Basic validation for list_sharing records coming through sync
+        const { data, operation } = change;
+        if (operation !== 'delete') {
+          if (!data) return res.status(400).json({ error: 'Data is required for list_sharing changes' });
+          if (!data.list_id) return res.status(400).json({ error: 'list_id is required for list_sharing' });
+          if (!data.shared_with_user_id && !data.shared_with_group_id) {
+            return res.status(400).json({ error: 'Either shared_with_user_id or shared_with_group_id must be provided' });
+          }
         }
       }
     }

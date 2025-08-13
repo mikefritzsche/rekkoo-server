@@ -3,7 +3,20 @@ const db = require('../config/db'); // Ensure this path is correct
 const ListService = require('../services/ListService'); // Import ListService
 const { logger } = require('../utils/logger'); // Assuming logger is in utils
 const EmbeddingService = require('../services/embeddingService'); // Import EmbeddingService
-const spotifyService = require('../services/spotify-service');
+// Lazy-load spotifyService only when needed to avoid ESM import issues in tests
+let spotifyService = null;
+function getSpotifyServiceLazy() {
+  if (!spotifyService) {
+    try {
+      // eslint-disable-next-line global-require
+      spotifyService = require('../services/spotify-service');
+    } catch (err) {
+      // In test or environments without spotify deps, keep null
+      spotifyService = null;
+    }
+  }
+  return spotifyService;
+}
 
 // Define detail tables that are associated with records in the 'list_items' table
 const DETAIL_TABLES_MAP = {
@@ -15,6 +28,62 @@ const DETAIL_TABLES_MAP = {
 };
 
 function syncControllerFactory(socketService) {
+  // Permission check: can user edit items on list?
+  async function userCanEditList(client, userId, listId) {
+    // Owner can edit
+    const { rows: ownerRows } = await client.query('SELECT owner_id FROM public.lists WHERE id = $1 AND deleted_at IS NULL', [listId]);
+    if (ownerRows.length === 0) return false;
+    if (ownerRows[0].owner_id === userId) return true;
+
+    // Per-user override grants edit if role is editor/admin
+    const { rows: overrideRows } = await client.query(
+      `SELECT 1 FROM public.list_user_overrides
+       WHERE list_id = $2 AND user_id = $1 AND deleted_at IS NULL AND role IN ('editor','admin')
+       LIMIT 1`,
+      [userId, listId]
+    );
+    if (overrideRows.length > 0) return true;
+
+    // Group role grants edit if user is member AND role is editor/admin AND list is attached to the group
+    const { rows: roleRows } = await client.query(
+      `SELECT 1
+         FROM public.list_group_roles lgr
+         JOIN public.list_sharing ls
+           ON ls.list_id = lgr.list_id AND ls.shared_with_group_id = lgr.group_id AND ls.deleted_at IS NULL
+         JOIN public.collaboration_group_members m
+           ON m.group_id = lgr.group_id AND m.user_id = $1
+        WHERE lgr.list_id = $2
+          AND lgr.deleted_at IS NULL
+          AND lgr.role IN ('editor','admin')
+        LIMIT 1`,
+      [userId, listId]
+    );
+    if (roleRows.length > 0) return true;
+
+    // Per-group per-user override grants edit
+    const { rows: perGroupOverrideRows } = await client.query(
+      `SELECT 1
+         FROM public.list_group_user_roles lgur
+         WHERE lgur.list_id = $2 AND lgur.user_id = $1 AND lgur.deleted_at IS NULL AND lgur.role IN ('editor','admin')
+         LIMIT 1`,
+      [userId, listId]
+    );
+    if (perGroupOverrideRows.length > 0) return true;
+
+    // Legacy list_sharing permissions ('edit','write','owner') also grant edit when member of that group
+    const { rows: legacyRows } = await client.query(
+      `SELECT 1
+       FROM public.list_sharing ls
+       JOIN public.collaboration_group_members m
+         ON m.group_id = ls.shared_with_group_id AND m.user_id = $1
+       WHERE ls.list_id = $2
+         AND ls.deleted_at IS NULL
+         AND (ls.permissions IS NULL OR ls.permissions IN ('edit','write','owner'))
+       LIMIT 1`,
+      [userId, listId]
+    );
+    return legacyRows.length > 0;
+  }
   // Helper function to get the detail table name for a given item type
   const getDetailTableName = (itemType) => {
     return DETAIL_TABLES_MAP[itemType.toLowerCase()] || null;
@@ -24,6 +93,15 @@ function syncControllerFactory(socketService) {
   const getUserIdentifierColumn = (tableName) => {
     if (tableName === 'list_items' || tableName === 'lists') {
       return 'owner_id';
+    }
+    if (tableName === 'collaboration_groups') {
+      return 'owner_id';
+    }
+    if (tableName === 'collaboration_group_members') {
+      return 'user_id';
+    }
+    if (tableName === 'list_sharing') {
+      return 'shared_with_user_id';
     }
     if (tableName === 'user_settings') {
       return 'user_id';
@@ -558,6 +636,18 @@ function syncControllerFactory(socketService) {
               continue;
             }
 
+            // Enforce collaboration permissions for list_items create
+            if (tableName === 'list_items' && createData.list_id) {
+              const targetListId = createData.list_id || createData.list_server_id;
+              if (targetListId) {
+                const allowed = await userCanEditList(client, userId, targetListId);
+                if (!allowed) {
+                  results.push({ tableName, operation, clientRecordId, status: 'error_forbidden', error: 'Not allowed to add items to this list' });
+                  continue;
+                }
+              }
+            }
+
             // For list_items, parse custom_fields if it's a string
             if (tableName === 'list_items' && typeof createData.custom_fields === 'string') {
               try {
@@ -715,8 +805,9 @@ function syncControllerFactory(socketService) {
 
             // ----- Embedding queue hooks -----
             try {
-              if (['list_items', 'item_tags'].includes(tableName)) {
-                const targetItemId = tableName === 'list_items' ? insertedId : (createData.item_id || values[fields.indexOf('item_id')]);
+              // Only enqueue generically for item_tags; list_items enqueued below in post-processing to ensure correct timing
+              if (tableName === 'item_tags') {
+                const targetItemId = createData.item_id || values[fields.indexOf('item_id')];
                 if (targetItemId) {
                   await EmbeddingService.queueEmbeddingGeneration(targetItemId, 'list_item', { reason: `${tableName}_${operation}` });
                 }
@@ -771,6 +862,8 @@ function syncControllerFactory(socketService) {
 
                     // --- NEW: enrich api_metadata with genres from Spotify ---
                     try {
+                      const svc = getSpotifyServiceLazy();
+                      if (!svc) throw new Error('spotify service unavailable');
                       let metaObj = {};
                       if (createData.api_metadata) {
                         metaObj = typeof createData.api_metadata === 'string' ? JSON.parse(createData.api_metadata) : createData.api_metadata;
@@ -778,7 +871,7 @@ function syncControllerFactory(socketService) {
                       if (!metaObj.genres || metaObj.genres.length === 0) {
                         const sourceId = metaObj.source_id || createData.source_id || null;
                         if (sourceId) {
-                          const genres = await spotifyService.fetchGenres(sourceId, 'track');
+                          const genres = await svc.fetchGenres(sourceId, 'track');
                           if (genres && genres.length) {
                             metaObj.genres = genres.map(g => ({ name: g }));
                             const str = JSON.stringify(metaObj);
@@ -856,6 +949,20 @@ function syncControllerFactory(socketService) {
           } else if (operation === 'update') {
             const updateData = { ...dataPayload };
             const recordId = clientRecordId || updateData.id;
+
+            // Enforce collaboration permissions for list_items update
+            if (tableName === 'list_items') {
+              const { rows: liRows } = await client.query('SELECT list_id FROM public.list_items WHERE id = $1', [recordId]);
+              if (liRows.length === 0) {
+                results.push({ tableName, operation, clientRecordId: recordId, status: 'error_not_found' });
+                continue;
+              }
+              const allowed = await userCanEditList(client, userId, liRows[0].list_id);
+              if (!allowed) {
+                results.push({ tableName, operation, clientRecordId: recordId, status: 'error_forbidden', error: 'Not allowed to edit items on this list' });
+                continue;
+              }
+            }
 
             if (!recordId) {
                 logger.warn(`[SyncController] Skipping update for table '${tableName}': missing 'record_id' or 'data.id'.`, changeItem);
@@ -995,7 +1102,7 @@ function syncControllerFactory(socketService) {
                     break; // Unknown/custom types => skip
                 }
 
-                if (detailTable) {
+                 if (detailTable) {
                   // Ensure a detail row exists – ListService.createDetailRecord is idempotent (ON CONFLICT list_item_id)
                   await ListService.createDetailRecord(
                     client,
@@ -1030,6 +1137,20 @@ function syncControllerFactory(socketService) {
               logger.warn(`[SyncController] Skipping delete for table '${tableName}': missing 'record_id' and no 'data.id' fallback found.`, changeItem);
               continue;
             }
+            // Enforce collaboration permissions for list_items delete
+            if (tableName === 'list_items') {
+              const { rows: liRows } = await client.query('SELECT list_id FROM public.list_items WHERE id = $1', [deleteId]);
+              if (liRows.length === 0) {
+                results.push({ tableName, operation, clientRecordId: deleteId, status: 'error_not_found' });
+                continue;
+              }
+              const allowed = await userCanEditList(client, userId, liRows[0].list_id);
+              if (!allowed) {
+                results.push({ tableName, operation, clientRecordId: deleteId, status: 'error_forbidden', error: 'Not allowed to delete items from this list' });
+                continue;
+              }
+            }
+
             // Soft delete by setting deleted_at timestamp (instead of legacy _deleted flag)
             const deleteQuery = `UPDATE "${tableName}" SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = $1`;
             const deleteRes = await client.query(deleteQuery, [deleteId]);
@@ -1158,6 +1279,8 @@ function syncControllerFactory(socketService) {
         notifications: { created: [], updated: [], deleted: [] },
         list_categories: { created: [], updated: [], deleted: [] },
         item_tags: { created: [], updated: [], deleted: [] },
+        list_sharing: { created: [], updated: [], deleted: [] },
+        gift_reservations: { created: [], updated: [], deleted: [] },
       };
 
       for (const row of rows) {
