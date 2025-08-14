@@ -36,3 +36,4 @@ BEFORE UPDATE ON public.list_group_user_roles
 FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
 
 
+

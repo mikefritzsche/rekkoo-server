@@ -19,3 +19,4 @@ AFTER INSERT OR UPDATE OR DELETE ON public.collaboration_group_members
 FOR EACH ROW EXECUTE FUNCTION track_changes();
 
 
+
