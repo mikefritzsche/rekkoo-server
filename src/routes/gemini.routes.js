@@ -13,11 +13,11 @@ if (!GEMINI_API_KEY) {
 }
 
 // *** USE THE USER-PROVIDED EXPERIMENTAL MODEL NAME ***
-const MODEL_NAME = "gemini-2.5-pro-exp-03-25"; // Using your specific model name
+const MODEL_NAME = "gemini-2.0-flash"; // Using your specific model name
 
 // Construct the API URL dynamically using the model name and v1beta endpoint
 // v1beta is often necessary for experimental or newer models
-const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY}`;
+const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${GEMINI_API_KEY_DEVONE}`;
 
 const DEFAULT_MAX_RESULTS = 5;    // Default suggestions per page if frontend doesn't specify
 const ABSOLUTE_MAX_RESULTS = 20;  // Hard cap to prevent overly large requests

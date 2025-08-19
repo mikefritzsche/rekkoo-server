@@ -522,6 +522,7 @@ function syncControllerFactory(socketService) {
                   'lists_header_background_value',
                   'lists_header_image_url',
                   'social_networks',
+                  'misc_settings',
                   'updated_at'
                 ];
                 const cols = [];
@@ -905,10 +906,14 @@ function syncControllerFactory(socketService) {
                 }
 
                 if (detailTable && detailIdColumn) {
+                  // Prioritize the 'raw' field for place_details, as it contains the full object
+                  // needed by the ListService, whereas api_metadata might be partial.
+                  const detailSource = (detailTable === 'place_details' && createData.raw) ? createData.raw : createData.api_metadata;
+
                   const detailRec = await ListService.createDetailRecord(
                     client,
                     detailTable,
-                    createData.api_metadata,
+                    detailSource,
                     insertedId,
                     createData
                   );
