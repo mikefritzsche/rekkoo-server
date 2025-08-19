@@ -32,7 +32,7 @@ async function performHardDelete({ userId, mode = 'all', listIds = [], itemIds =
       itemQuery = 'SELECT id FROM list_items WHERE owner_id = $1';
     } else if (mode === 'lists') {
       params.push(listIds);
-      itemQuery = 'SELECT id FROM list_items WHERE owner_id = $1 AND list_id = ANY($2)';
+      itemQuery = 'SELECT id FROM list_items WHERE owner_id = $1 AND list_id = ANY($2::uuid[])';
     } else {
       params.push(itemIds);
       itemQuery = 'SELECT id FROM list_items WHERE owner_id = $1 AND id = ANY($2)';
@@ -41,9 +41,9 @@ async function performHardDelete({ userId, mode = 'all', listIds = [], itemIds =
     const { rows: itemRows } = await client.query(itemQuery, params);
     const targetItemIds = itemRows.map((r) => r.id);
 
-    // When mode === 'items' but some ids don\'t belong to user, we simply skip them.
-    if (targetItemIds.length === 0) {
-      return { deletedCounts: {}, items: 0 };
+    // If scope is 'items' and none belong to user, exit early.
+    if (mode === 'items' && targetItemIds.length === 0) {
+      return { deletedCounts: {}, itemsProcessed: 0 };
     }
 
     // Helper to run delete + capture count
@@ -114,7 +114,7 @@ async function performHardDelete({ userId, mode = 'all', listIds = [], itemIds =
       counts.lists = await runDel('DELETE FROM lists WHERE owner_id = $1', [userId]);
     }
     if (mode === 'lists' && listIds.length) {
-      counts.lists = await runDel('DELETE FROM lists WHERE id = ANY($1)', [listIds]);
+      counts.lists = await runDel('DELETE FROM lists WHERE id = ANY($1::uuid[])', [listIds]);
     }
 
     return { deletedCounts: counts, itemsProcessed: targetItemIds.length };
