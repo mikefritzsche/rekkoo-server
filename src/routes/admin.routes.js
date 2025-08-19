@@ -11,6 +11,8 @@ const {
   getCacheSettings, 
   updateCacheSettings 
 } = require('../controllers/CacheController');
+const { performHardDelete } = require('../services/hardDeleteService');
+const { exportUserData } = require('../services/exportService');
 
 const router = express.Router();
 
@@ -431,6 +433,109 @@ router.get('/users/:userId/invitations', authenticateJWT, async (req, res) => {
     res.json({ invitations });
   } catch (err) {
     console.error('Admin user invitations error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// POST /v1.0/admin/users/:userId/hard-delete – irreversible purge of list data
+router.post('/users/:userId/hard-delete', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const { userId } = req.params;
+    const { mode = 'all', listIds = [], itemIds = [], deleteEmbeddings = true } = req.body || {};
+
+    // Basic validation (extra checks happen inside service)
+    if (!['all', 'lists', 'items'].includes(mode)) {
+      return res.status(400).json({ message: 'Invalid mode' });
+    }
+
+    const result = await performHardDelete({ userId, mode, listIds, itemIds, deleteEmbeddings });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('Admin hard-delete error', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// POST /v1.0/admin/users/:userId/export – generate export JSON
+router.post('/users/:userId/export', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+    const { userId } = req.params;
+    const { mode = 'all', listIds = [], itemIds = [], format = 'json' } = req.body || {};
+
+    const data = await exportUserData({ userId, mode, listIds, itemIds });
+
+    if (format === 'zip') {
+      const archiver = require('archiver');
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', `attachment; filename="user_${userId}_export.zip"`);
+      const archive = archiver('zip', { zlib: { level: 9 } });
+      archive.pipe(res);
+
+      data.lists.forEach((list) => {
+        const rows = ['item_id,item_title,item_description'];
+        data.items.filter((it)=>it.list_id===list.id).forEach((it)=>{
+          rows.push(`"${it.id}","${it.title.replace(/"/g,'""')}","${(it.description||'').replace(/"/g,'""')}"`);
+        });
+        archive.append(rows.join('\n'), { name: `${list.title.replace(/[^a-z0-9_-]/gi,'_')}.csv` });
+      });
+
+      archive.finalize();
+    } else {
+      res.setHeader('Content-Disposition', `attachment; filename="user_${userId}_export.json"`);
+      res.json(data);
+    }
+  } catch (err) {
+    console.error('Admin export error', err);
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// === HARD-DELETE SUPPORTING FETCH ROUTES ===
+// GET /v1.0/admin/users/:userId/lists – minimal list info for hard-delete dialog
+router.get('/users/:userId/lists', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+
+    const { userId } = req.params;
+    const includeDeleted = req.query.includeDeleted === 'true';
+    const { rows } = await db.query(
+      `SELECT l.id, l.title, l.created_at, l.deleted_at IS NOT NULL AS is_deleted,
+              (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) AS item_count
+       FROM lists l
+       WHERE owner_id = $1 AND ($2::boolean OR l.deleted_at IS NULL)
+       ORDER BY created_at DESC`,
+      [userId, includeDeleted],
+    );
+
+    res.json({ lists: rows });
+  } catch (err) {
+    console.error('Admin users list error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// GET /v1.0/admin/lists/:id/items – minimal list-item info
+router.get('/lists/:id/items', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+
+    const { id } = req.params;
+    const includeDeleted = req.query.includeDeleted === 'true';
+    const { rows } = await db.query(
+      `SELECT id, title, description, deleted_at IS NOT NULL AS is_deleted
+       FROM list_items
+       WHERE list_id = $1 AND ($2::boolean OR deleted_at IS NULL)
+       ORDER BY created_at DESC`,
+      [id, includeDeleted],
+    );
+    res.json({ items: rows });
+  } catch (err) {
+    console.error('Admin list-items fetch error', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
