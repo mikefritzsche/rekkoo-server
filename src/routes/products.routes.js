@@ -1,8 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const fetch = require('node-fetch');
-const puppeteer = require('puppeteer');
-const cheerio = require('cheerio');
+
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+
+puppeteer.use(StealthPlugin());
 
 router.get('/link', async (req, res) => {
     // res.json({message: 'link fetch', link: req.query.link})
@@ -75,6 +79,37 @@ router.post('/scrape', async (req, res) => {
         if (browser) await browser.close();
     }
 
+});
+
+router.post('/data', async (req, res) => {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: 'Provide a valid URL' });
+
+    let browser;
+    try {
+        browser = await puppeteer.launch({
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                `--proxy-server=http://USER:PASS@proxy-provider:PORT`
+            ],
+        });
+
+        const page = await browser.newPage();
+        await page.setUserAgent(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36'
+        );
+        await page.goto(url, { waitUntil: 'domcontentloaded' });
+
+        const html = await page.content();
+        res.type('html').send(html);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Scraping failed', details: err.message });
+    } finally {
+        if (browser) await browser.close();
+    }
 });
 
 module.exports = router;
