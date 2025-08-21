@@ -84,7 +84,26 @@ class AiService {
                 throw new Error('AI Server health check failed - service may be unavailable');
             }
 
-            const endpoint = `/${entityType}/${id}/generate-embedding`;
+            // Map entity types to correct API routes on AI server
+            const entityRouteMap = {
+                list_item: 'list-items',
+                list_items: 'list-items',
+                favorite: 'favorites',
+                favorites: 'favorites',
+                list: 'lists',
+                user: 'users',
+                review: 'reviews',
+                follower: 'followers',
+                followers: 'followers'
+            };
+
+            let routeSegment = entityRouteMap[entityType] || entityType.replace(/_/g, '-');
+            if (!routeSegment.endsWith('s')) {
+                // Ensure plural form since all AI-server routes are pluralised
+                routeSegment += 's';
+            }
+
+            const endpoint = `/${routeSegment}/${id}/generate-embedding`;
             logger.info(`Triggering embedding generation for ${entityType} ${id} at endpoint: ${endpoint}`);
             
             const response = await this.client.post(endpoint);
