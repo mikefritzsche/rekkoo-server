@@ -18,4 +18,4 @@
  ### Hetzner Volume
  -  scp /path/to/your/local/file admin@5.78.127.128:/mnt/volume-hil-1
 
- v0.0.2
+ v0.0.3
