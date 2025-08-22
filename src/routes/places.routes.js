@@ -8,7 +8,7 @@ const path = require('path');
 const crypto = require('crypto');
 
 const API_KEY = process.env.GOOGLE_PLACES_KEY;
-
+console.log(`GOOGLE+PLACES_API_KEY: `, API_KEY)
 // Simple in-memory cache – 500 images, 7-day TTL
 const photoCache = new LRU({
   max: 500,
