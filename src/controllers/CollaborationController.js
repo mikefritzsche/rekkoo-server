@@ -226,9 +226,11 @@ const CollaborationController = {
     }
   },
 
-  // Get all groups for the current user (owned and member of)
+  // Get all groups for a user (owned and member of)
   getGroupsForUser: async (req, res) => {
-    const user_id = req.user.id;
+    // Allow fetching groups for a specific user via query param (for collaboration checking)
+    // Default to the authenticated user if no userId is provided
+    const user_id = req.query.userId || req.user.id;
 
     try {
       const { rows } = await db.query(
@@ -237,9 +239,12 @@ const CollaborationController = {
           m.role
          FROM collaboration_groups g
          LEFT JOIN collaboration_group_members m ON g.id = m.group_id
-         WHERE g.owner_id = $1 OR m.user_id = $1`,
+         WHERE (g.owner_id = $1 OR m.user_id = $1) 
+           AND g.deleted_at IS NULL`,
         [user_id]
       );
+      
+      console.log(`[CollaborationController] Found ${rows.length} groups for user ${user_id}`);
       res.status(200).json(rows);
     } catch (error) {
       console.error('Error fetching groups for user:', error);

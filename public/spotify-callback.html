@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spotify Authorization - Rekkoo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            background: linear-gradient(135deg, #1db954 0%, #1ed760 100%);
+            color: white;
+        }
+        .container {
+            text-align: center;
+            background: rgba(0, 0, 0, 0.1);
+            padding: 2rem;
+            border-radius: 12px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        .success {
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+        }
+        .message {
+            font-size: 1rem;
+            opacity: 0.9;
+            margin-bottom: 2rem;
+        }
+        .close-btn {
+            background: white;
+            color: #1db954;
+            border: none;
+            padding: 0.75rem 2rem;
+            border-radius: 24px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s ease;
+        }
+        .close-btn:hover {
+            transform: translateY(-2px);
+        }
+        .error {
+            color: #ff6b6b;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div id="content">
+            <div class="success">🎵</div>
+            <div class="message">Processing Spotify authorization...</div>
+        </div>
+    </div>
+
+    <script>
+        // Get URL parameters
+        const urlParams = new URLSearchParams(window.location.search);
+        const code = urlParams.get('code');
+        const error = urlParams.get('error');
+        const state = urlParams.get('state');
+
+        const contentDiv = document.getElementById('content');
+
+        if (error) {
+            contentDiv.innerHTML = `
+                <div class="success error">❌</div>
+                <div class="message">Authorization failed: ${error}</div>
+                <button class="close-btn" onclick="window.close()">Close Window</button>
+            `;
+        } else if (code) {
+            // Send the code to our backend
+            fetch('/v1.0/spotify/callback?' + new URLSearchParams({
+                code: code,
+                state: state || ''
+            }))
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    contentDiv.innerHTML = `
+                        <div class="success">✅</div>
+                        <div class="message">
+                            Spotify authorization successful!<br>
+                            You can now use the music player in Rekkoo.
+                        </div>
+                        <button class="close-btn" onclick="window.close()">Close Window</button>
+                    `;
+                    
+                    // Notify parent window (if opened as popup)
+                    if (window.opener) {
+                        window.opener.postMessage({ 
+                            type: 'spotify-auth-success', 
+                            data: data 
+                        }, '*');
+                    }
+                } else {
+                    throw new Error(data.error || 'Unknown error');
+                }
+            })
+            .catch(error => {
+                contentDiv.innerHTML = `
+                    <div class="success error">❌</div>
+                    <div class="message">Failed to process authorization: ${error.message}</div>
+                    <button class="close-btn" onclick="window.close()">Close Window</button>
+                `;
+            });
+        } else {
+            contentDiv.innerHTML = `
+                <div class="success error">❌</div>
+                <div class="message">No authorization code received</div>
+                <button class="close-btn" onclick="window.close()">Close Window</button>
+            `;
+        }
+    </script>
+</body>
+</html>

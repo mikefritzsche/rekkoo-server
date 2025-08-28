@@ -66,6 +66,13 @@ function createUserRouter(userController) {
   router.get('/:targetUserId/lists', authenticateJWT, userController.getUserPublicLists);
 
   /**
+   * @route GET /:targetUserId/lists-with-access
+   * @desc Get all lists for a user with proper privacy values (for access control)
+   * @access Private
+   */
+  router.get('/:targetUserId/lists-with-access', authenticateJWT, userController.getUserListsWithAccess);
+
+  /**
    * @route POST /
    * @desc Create a new user
    * @access Private

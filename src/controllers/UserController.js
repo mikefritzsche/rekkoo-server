@@ -244,6 +244,292 @@ function userControllerFactory(socketService = null) {
     }
   };
 
+  // Get all lists for a user (with proper privacy values for access control)
+  const getUserListsWithAccess = async (req, res) => {
+    const { targetUserId } = req.params;
+    const viewingUserId = req.query.viewingUserId || req.user?.id; // Use query param or authenticated user
+    
+    logger.info(`[UserController] Getting lists with access for user ${targetUserId}, viewed by ${viewingUserId || 'anonymous'}`);
+    logger.info(`[UserController] Query params:`, req.query);
+    logger.info(`[UserController] Authenticated user:`, req.user?.id);
+    
+    // Declare these outside try block so they're accessible in catch
+    let actualTargetUserId = targetUserId;
+    let actualViewingUserId = viewingUserId;
+    
+    try {
+      // Check if targetUserId is a username (not a UUID)
+      if (targetUserId && !targetUserId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+        const targetUserQuery = await db.query('SELECT id FROM users WHERE username = $1', [targetUserId]);
+        if (targetUserQuery.rows.length > 0) {
+          actualTargetUserId = targetUserQuery.rows[0].id;
+          logger.info(`[UserController] Converted target username ${targetUserId} to ID ${actualTargetUserId}`);
+        }
+      }
+      
+      // Check if viewingUserId is a username (not a UUID)
+      if (viewingUserId && !viewingUserId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+        const viewingUserQuery = await db.query('SELECT id FROM users WHERE username = $1', [viewingUserId]);
+        if (viewingUserQuery.rows.length > 0) {
+          actualViewingUserId = viewingUserQuery.rows[0].id;
+          logger.info(`[UserController] Converted viewing username ${viewingUserId} to ID ${actualViewingUserId}`);
+        } else {
+          logger.warn(`[UserController] Could not find user with username ${viewingUserId}`);
+        }
+      }
+      
+      logger.info(`[UserController] Final IDs - Target: ${actualTargetUserId}, Viewer: ${actualViewingUserId}`);
+      
+      // If viewing own lists, return all
+      if (actualViewingUserId === actualTargetUserId) {
+        const query = `
+          SELECT 
+            l.id, 
+            l.title, 
+            l.description, 
+            l.created_at, 
+            l.updated_at, 
+            l.is_public,
+            l.owner_id,
+            l.background, 
+            l.image_url, 
+            l.list_type, 
+            l.occasion, 
+            l.sort_order,
+            (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
+            u.username as owner_username, 
+            u.profile_image_url as owner_profile_picture_url
+          FROM lists l
+          JOIN users u ON l.owner_id = u.id
+          WHERE l.owner_id = $1 AND l.deleted_at IS NULL
+          ORDER BY l.updated_at DESC;
+        `;
+        
+        const { rows } = await db.query(query, [actualTargetUserId]);
+        logger.info(`[UserController] Returning ${rows.length} lists (own lists) for user ${actualTargetUserId}`);
+        return res.status(200).json(rows);
+      }
+      
+      // Debug: Check viewer's groups
+      if (actualViewingUserId) {
+        const groupCheckQuery = `
+          SELECT DISTINCT group_id 
+          FROM collaboration_group_members 
+          WHERE user_id = $1
+          UNION
+          SELECT id as group_id 
+          FROM collaboration_groups 
+          WHERE owner_id = $1 AND deleted_at IS NULL
+        `;
+        const { rows: groupRows } = await db.query(groupCheckQuery, [actualViewingUserId]);
+        logger.info(`[UserController] Viewer ${actualViewingUserId} is in ${groupRows.length} groups:`, groupRows.map(r => r.group_id));
+        
+        // First check what ALL lists have groups attached (to debug)
+        const allListGroupsQuery = `
+          SELECT DISTINCT list_id, COUNT(*) as group_count
+          FROM list_group_roles
+          WHERE deleted_at IS NULL
+          GROUP BY list_id
+        `;
+        const { rows: allListGroups } = await db.query(allListGroupsQuery);
+        logger.info(`[UserController] Lists with groups in list_group_roles:`, allListGroups);
+        
+        // Check Birthday 2025 list groups in multiple tables
+        const birthdayGroupsQuery = `
+          SELECT lgr.group_id, lgr.role, 'list_group_roles' as source
+          FROM list_group_roles lgr
+          WHERE lgr.list_id = '66184640-2290-4e78-9cdf-2c2c2343f195' 
+            AND lgr.deleted_at IS NULL
+        `;
+        const { rows: birthdayGroups } = await db.query(birthdayGroupsQuery);
+        logger.info(`[UserController] Birthday 2025 list has ${birthdayGroups.length} groups in list_group_roles:`, birthdayGroups);
+        
+        // Also check list_sharing table (legacy)
+        const listSharingQuery = `
+          SELECT shared_with_group_id as group_id, 'list_sharing' as source
+          FROM list_sharing
+          WHERE list_id = '66184640-2290-4e78-9cdf-2c2c2343f195' 
+            AND shared_with_group_id IS NOT NULL
+            AND deleted_at IS NULL
+        `;
+        const { rows: sharingGroups } = await db.query(listSharingQuery);
+        logger.info(`[UserController] Birthday 2025 list has ${sharingGroups.length} groups in list_sharing:`, sharingGroups);
+        
+        // Check ALL entries (including deleted) for debugging
+        const allGroupRolesQuery = `
+          SELECT list_id, group_id, role, deleted_at
+          FROM list_group_roles
+          WHERE list_id = '66184640-2290-4e78-9cdf-2c2c2343f195'
+        `;
+        const { rows: allGroupRoles } = await db.query(allGroupRolesQuery);
+        logger.info(`[UserController] ALL entries for Birthday 2025 in list_group_roles (including deleted):`, allGroupRoles);
+        
+        // Combine groups from both tables
+        const allBirthdayGroups = [...birthdayGroups, ...sharingGroups];
+        
+        // Check if there's overlap
+        const viewerGroupIds = groupRows.map(r => r.group_id);
+        const birthdayGroupIds = allBirthdayGroups.map(r => r.group_id);
+        const hasOverlap = birthdayGroupIds.some(g => viewerGroupIds.includes(g));
+        logger.info(`[UserController] Combined: Birthday 2025 has ${birthdayGroupIds.length} total groups`);
+        logger.info(`[UserController] Does viewer have access to Birthday 2025? ${hasOverlap ? 'YES' : 'NO'}`);
+      }
+      
+      // For other viewers, filter based on privacy and group access
+      let query;
+      if (!actualViewingUserId) {
+        // Anonymous users only see public lists
+        query = `
+          SELECT DISTINCT
+            l.id, 
+            l.title, 
+            l.description, 
+            l.created_at, 
+            l.updated_at, 
+            l.is_public,
+            l.owner_id,
+            l.background, 
+            l.image_url, 
+            l.list_type, 
+            l.occasion, 
+            l.sort_order,
+            (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
+            u.username as owner_username, 
+            u.profile_image_url as owner_profile_picture_url
+          FROM lists l
+          JOIN users u ON l.owner_id = u.id
+          WHERE 
+            l.owner_id = $1 
+            AND l.deleted_at IS NULL
+            AND l.is_public = true
+          ORDER BY l.updated_at DESC;
+        `;
+      } else {
+        // Logged in users see public lists and private lists they have access to
+        query = `
+          WITH viewer_groups AS (
+            -- Get all groups the viewer is a member of
+            SELECT DISTINCT group_id 
+            FROM collaboration_group_members 
+            WHERE user_id = $2
+            UNION
+            SELECT id as group_id 
+            FROM collaboration_groups 
+            WHERE owner_id = $2 AND deleted_at IS NULL
+          )
+          SELECT DISTINCT
+          l.id, 
+          l.title, 
+          l.description, 
+          l.created_at, 
+          l.updated_at, 
+          l.is_public,
+          l.owner_id,
+          l.background, 
+          l.image_url, 
+          l.list_type, 
+          l.occasion, 
+          l.sort_order,
+          (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
+          u.username as owner_username, 
+          u.profile_image_url as owner_profile_picture_url
+        FROM lists l
+        JOIN users u ON l.owner_id = u.id
+        WHERE 
+          l.owner_id = $1 
+          AND l.deleted_at IS NULL
+          AND (
+            -- Public lists are always visible
+            l.is_public = true
+            OR (
+              -- Private lists are visible if viewer has group access
+              l.is_public = false 
+              AND (
+                -- Check list_group_roles table
+                EXISTS (
+                  SELECT 1 FROM list_group_roles lgr
+                  JOIN viewer_groups vg ON lgr.group_id = vg.group_id
+                  WHERE lgr.list_id = l.id AND lgr.deleted_at IS NULL
+                )
+                OR
+                -- Check list_sharing table (legacy)
+                EXISTS (
+                  SELECT 1 FROM list_sharing ls
+                  JOIN viewer_groups vg ON ls.shared_with_group_id = vg.group_id
+                  WHERE ls.list_id = l.id AND ls.deleted_at IS NULL
+                )
+              )
+            )
+            OR (
+              -- Check individual user overrides
+              EXISTS (
+                SELECT 1 FROM list_user_overrides luo
+                WHERE luo.list_id = l.id 
+                  AND luo.user_id = $2 
+                  AND luo.role != 'blocked'
+                  AND luo.deleted_at IS NULL
+              )
+            )
+          )
+        ORDER BY l.updated_at DESC;
+        `;
+      }
+      
+      // Execute query with appropriate parameters
+      const queryParams = actualViewingUserId 
+        ? [actualTargetUserId, actualViewingUserId]
+        : [actualTargetUserId];
+      
+      const { rows } = await db.query(query, queryParams);
+      
+      logger.info(`[UserController] Main query returned ${rows.length} accessible lists for viewer ${actualViewingUserId || 'anonymous'}`);
+      
+      // Log privacy distribution for debugging
+      const publicCount = rows.filter(l => l.is_public === true).length;
+      const privateCount = rows.filter(l => l.is_public === false).length;
+      logger.info(`[UserController] Privacy distribution: ${publicCount} public, ${privateCount} private with access`);
+      
+      // Log list IDs for debugging
+      logger.info(`[UserController] List IDs returned:`, rows.map(l => ({ id: l.id, title: l.title, is_public: l.is_public })));
+      
+      // Debug: Check Birthday 2025 list specifically
+      const birthdayList = rows.find(l => l.id === '66184640-2290-4e78-9cdf-2c2c2343f195');
+      if (!birthdayList && actualViewingUserId) {
+        // Check why Birthday 2025 is not included
+        const debugQuery = `
+          SELECT 
+            l.id,
+            l.title,
+            l.is_public,
+            (SELECT COUNT(*) FROM list_group_roles lgr WHERE lgr.list_id = l.id AND lgr.deleted_at IS NULL) as group_count,
+            (SELECT array_agg(lgr.group_id) FROM list_group_roles lgr WHERE lgr.list_id = l.id AND lgr.deleted_at IS NULL) as list_groups,
+            (SELECT array_agg(vg.group_id) FROM collaboration_group_members vg WHERE vg.user_id = $1) as viewer_groups
+          FROM lists l
+          WHERE l.id = '66184640-2290-4e78-9cdf-2c2c2343f195' AND l.deleted_at IS NULL;
+        `;
+        const { rows: debugRows } = await db.query(debugQuery, [actualViewingUserId]);
+        if (debugRows.length > 0) {
+          logger.info(`[UserController] DEBUG - Birthday 2025 list not included for viewer ${actualViewingUserId}:`, {
+            list: debugRows[0].title,
+            is_public: debugRows[0].is_public,
+            list_has_groups: debugRows[0].group_count > 0,
+            list_groups: debugRows[0].list_groups,
+            viewer_groups: debugRows[0].viewer_groups,
+            has_overlap: debugRows[0].list_groups && debugRows[0].viewer_groups && 
+                        debugRows[0].list_groups.some(g => debugRows[0].viewer_groups.includes(g))
+          });
+        }
+      } else if (birthdayList) {
+        logger.info(`[UserController] Birthday 2025 list IS included for viewer ${actualViewingUserId}`);
+      }
+      
+      res.status(200).json(rows);
+    } catch (error) {
+      logger.error(`[UserController] Error getting lists with access for user ${actualTargetUserId}:`, error);
+      res.status(500).json({ error: 'Failed to get user lists', details: error.message });
+    }
+  };
+
   // Get user suggestions
   const getUserSuggestions = async (req, res) => {
     const requestingUserId = req.user?.id;
@@ -346,6 +632,7 @@ function userControllerFactory(socketService = null) {
     getUserFollowers,
     getUserFollowing,
     getUserPublicLists,
+    getUserListsWithAccess,
     getUserSuggestions,
     getUsersByIds
   };
