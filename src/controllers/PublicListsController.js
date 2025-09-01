@@ -19,12 +19,36 @@ function publicListsControllerFactory() {
       }
       const list = listResult.rows[0];
 
+      // Check if user has access through a group
+      let hasGroupAccess = false;
+      if (requestor_id && requestor_id !== list.owner_id) {
+        const groupAccessQuery = `
+          SELECT COUNT(*) as count
+          FROM public.list_group_roles lgr
+          JOIN public.collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+          WHERE lgr.list_id = $1 
+            AND cgm.user_id = $2
+            AND lgr.deleted_at IS NULL
+        `;
+        const groupAccessResult = await db.query(groupAccessQuery, [id, requestor_id]);
+        hasGroupAccess = groupAccessResult.rows[0]?.count > 0;
+      }
+
+      // Check access permissions
+      const isOwner = list.owner_id === requestor_id;
+      const isPublic = list.is_public === true;
+      const canAccess = isOwner || isPublic || hasGroupAccess;
+
+      if (!canAccess) {
+        return res.status(403).json({ error: 'You do not have permission to view this list' });
+      }
+
       let itemsQuery;
-      if (list.owner_id === requestor_id) {
+      if (isOwner) {
         // Owner sees everything *except* reservation status
         itemsQuery = `SELECT * FROM public.list_items WHERE list_id = $1 AND deleted_at IS NULL ORDER BY sort_order ASC, created_at ASC`;
       } else {
-        // Non-owners see reservation status
+        // Non-owners (including group members) see reservation status
         itemsQuery = `
           SELECT 
             i.*,

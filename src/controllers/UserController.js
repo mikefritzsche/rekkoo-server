@@ -245,6 +245,129 @@ function userControllerFactory(socketService = null) {
   };
 
   // Get all lists for a user (with proper privacy values for access control)
+  /**
+   * Get lists for a user with LIVE access checks (no caching, always fresh)
+   * This endpoint is specifically designed for viewing other users' lists
+   * and ensures real-time group membership verification
+   */
+  const getUserListsLive = async (req, res) => {
+    const { targetUserId } = req.params;
+    const viewingUserId = req.query.viewerId || req.user?.id;
+    
+    logger.info(`[UserController] LIVE access check for user ${targetUserId}, viewer ${viewingUserId || 'anonymous'}`);
+    
+    // Validate that this is for viewing another user's lists
+    if (!viewingUserId || viewingUserId === targetUserId) {
+      return res.status(400).json({ 
+        error: 'This endpoint is for viewing other users\' lists only. Use /lists-with-access for own lists.' 
+      });
+    }
+    
+    try {
+      // Convert usernames to IDs if needed
+      let actualTargetUserId = targetUserId;
+      let actualViewingUserId = viewingUserId;
+      
+      if (!targetUserId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+        const result = await db.query('SELECT id FROM users WHERE username = $1', [targetUserId]);
+        if (result.rows.length > 0) {
+          actualTargetUserId = result.rows[0].id;
+        }
+      }
+      
+      if (!viewingUserId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)) {
+        const result = await db.query('SELECT id FROM users WHERE username = $1', [viewingUserId]);
+        if (result.rows.length > 0) {
+          actualViewingUserId = result.rows[0].id;
+        }
+      }
+      
+      // Real-time query with explicit group membership verification
+      const query = `
+        WITH viewer_active_groups AS (
+          -- Only get ACTIVE group memberships (non-deleted groups)
+          SELECT DISTINCT cgm.group_id, cg.name as group_name
+          FROM collaboration_group_members cgm
+          INNER JOIN collaboration_groups cg ON cgm.group_id = cg.id
+          WHERE cgm.user_id = $2 
+            AND cgm.deleted_at IS NULL
+            AND cg.deleted_at IS NULL
+        ),
+        list_permissions AS (
+          SELECT 
+            l.id,
+            l.title,
+            l.description,
+            l.is_public,
+            l.owner_id,
+            l.background,
+            l.image_url,
+            l.list_type,
+            l.occasion,
+            l.sort_order,
+            l.created_at,
+            l.updated_at,
+            -- Determine access type
+            CASE 
+              WHEN l.is_public = true THEN 'public'
+              WHEN lgr.id IS NOT NULL THEN 'group_member'
+              WHEN ls.id IS NOT NULL THEN 'group_shared'
+              WHEN luo.id IS NOT NULL THEN 'individual_override'
+              ELSE 'no_access'
+            END as access_type,
+            COALESCE(vag.group_name, vag2.group_name) as access_group_name
+          FROM lists l
+          LEFT JOIN list_group_roles lgr ON l.id = lgr.list_id 
+            AND lgr.deleted_at IS NULL
+            AND EXISTS (SELECT 1 FROM viewer_active_groups vag WHERE vag.group_id = lgr.group_id)
+          LEFT JOIN viewer_active_groups vag ON lgr.group_id = vag.group_id
+          LEFT JOIN list_sharing ls ON l.id = ls.list_id 
+            AND ls.deleted_at IS NULL
+            AND EXISTS (SELECT 1 FROM viewer_active_groups vag2 WHERE vag2.group_id = ls.shared_with_group_id)
+          LEFT JOIN viewer_active_groups vag2 ON ls.shared_with_group_id = vag2.group_id
+          LEFT JOIN list_user_overrides luo ON l.id = luo.list_id 
+            AND luo.user_id = $2 
+            AND luo.deleted_at IS NULL 
+            AND luo.role != 'blocked'
+          WHERE l.owner_id = $1 
+            AND l.deleted_at IS NULL
+        )
+        SELECT 
+          lp.*,
+          (SELECT COUNT(*) FROM list_items li WHERE li.list_id = lp.id AND li.deleted_at IS NULL) as item_count,
+          u.username as owner_username,
+          u.profile_image_url as owner_profile_picture_url
+        FROM list_permissions lp
+        JOIN users u ON lp.owner_id = u.id
+        WHERE lp.access_type != 'no_access'
+        ORDER BY lp.updated_at DESC;
+      `;
+      
+      const { rows } = await db.query(query, [actualTargetUserId, actualViewingUserId]);
+      
+      logger.info(`[UserController] LIVE check returned ${rows.length} lists`);
+      rows.forEach(row => {
+        if (row.is_public === false) {
+          logger.info(`  - Private list "${row.title}": ${row.access_type} via ${row.access_group_name || 'N/A'}`);
+        }
+      });
+      
+      res.status(200).json({
+        lists: rows,
+        metadata: {
+          viewer_id: actualViewingUserId,
+          target_user_id: actualTargetUserId,
+          timestamp: new Date().toISOString(),
+          is_live: true
+        }
+      });
+      
+    } catch (error) {
+      logger.error('[UserController] Error in getUserListsLive:', error);
+      res.status(500).json({ error: 'Failed to fetch lists with live access check' });
+    }
+  };
+  
   const getUserListsWithAccess = async (req, res) => {
     const { targetUserId } = req.params;
     const viewingUserId = req.query.viewingUserId || req.user?.id; // Use query param or authenticated user
@@ -406,72 +529,86 @@ function userControllerFactory(socketService = null) {
         `;
       } else {
         // Logged in users see public lists and private lists they have access to
+        // FIXED: Proper group membership verification with access reason tracking
         query = `
           WITH viewer_groups AS (
-            -- Get all groups the viewer is a member of
-            SELECT DISTINCT group_id 
-            FROM collaboration_group_members 
-            WHERE user_id = $2
+            -- Get all groups the viewer is a member of (must be active member)
+            SELECT DISTINCT cgm.group_id, cg.name as group_name
+            FROM collaboration_group_members cgm
+            JOIN collaboration_groups cg ON cgm.group_id = cg.id
+            WHERE cgm.user_id = $2 
+              AND cgm.deleted_at IS NULL
+              AND cg.deleted_at IS NULL
             UNION
-            SELECT id as group_id 
-            FROM collaboration_groups 
-            WHERE owner_id = $2 AND deleted_at IS NULL
-          )
-          SELECT DISTINCT
-          l.id, 
-          l.title, 
-          l.description, 
-          l.created_at, 
-          l.updated_at, 
-          l.is_public,
-          l.owner_id,
-          l.background, 
-          l.image_url, 
-          l.list_type, 
-          l.occasion, 
-          l.sort_order,
-          (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
-          u.username as owner_username, 
-          u.profile_image_url as owner_profile_picture_url
-        FROM lists l
-        JOIN users u ON l.owner_id = u.id
-        WHERE 
-          l.owner_id = $1 
-          AND l.deleted_at IS NULL
-          AND (
-            -- Public lists are always visible
-            l.is_public = true
-            OR (
-              -- Private lists are visible if viewer has group access
-              l.is_public = false 
-              AND (
-                -- Check list_group_roles table
-                EXISTS (
+            -- Include groups the viewer owns
+            SELECT DISTINCT cg.id as group_id, cg.name as group_name
+            FROM collaboration_groups cg
+            WHERE cg.owner_id = $2 
+              AND cg.deleted_at IS NULL
+          ),
+          list_access AS (
+            SELECT 
+              l.*,
+              CASE 
+                WHEN l.is_public = true THEN 'public'
+                WHEN EXISTS (
                   SELECT 1 FROM list_group_roles lgr
                   JOIN viewer_groups vg ON lgr.group_id = vg.group_id
-                  WHERE lgr.list_id = l.id AND lgr.deleted_at IS NULL
-                )
-                OR
-                -- Check list_sharing table (legacy)
-                EXISTS (
+                  WHERE lgr.list_id = l.id 
+                    AND lgr.deleted_at IS NULL
+                ) THEN 'group_access_via_list_group_roles'
+                WHEN EXISTS (
                   SELECT 1 FROM list_sharing ls
                   JOIN viewer_groups vg ON ls.shared_with_group_id = vg.group_id
-                  WHERE ls.list_id = l.id AND ls.deleted_at IS NULL
-                )
-              )
-            )
-            OR (
-              -- Check individual user overrides
-              EXISTS (
-                SELECT 1 FROM list_user_overrides luo
-                WHERE luo.list_id = l.id 
-                  AND luo.user_id = $2 
-                  AND luo.role != 'blocked'
-                  AND luo.deleted_at IS NULL
-              )
-            )
+                  WHERE ls.list_id = l.id 
+                    AND ls.deleted_at IS NULL
+                ) THEN 'group_access_via_list_sharing'
+                WHEN EXISTS (
+                  SELECT 1 FROM list_user_overrides luo
+                  WHERE luo.list_id = l.id 
+                    AND luo.user_id = $2 
+                    AND luo.role != 'blocked'
+                    AND luo.deleted_at IS NULL
+                ) THEN 'individual_access'
+                ELSE 'no_access'
+              END as access_reason,
+              -- Get the group that provides access (if any)
+              COALESCE(
+                (SELECT vg.group_name FROM list_group_roles lgr
+                 JOIN viewer_groups vg ON lgr.group_id = vg.group_id
+                 WHERE lgr.list_id = l.id AND lgr.deleted_at IS NULL
+                 LIMIT 1),
+                (SELECT vg.group_name FROM list_sharing ls
+                 JOIN viewer_groups vg ON ls.shared_with_group_id = vg.group_id
+                 WHERE ls.list_id = l.id AND ls.deleted_at IS NULL
+                 LIMIT 1)
+              ) as access_via_group
+            FROM lists l
+            WHERE l.owner_id = $1 
+              AND l.deleted_at IS NULL
           )
-        ORDER BY l.updated_at DESC;
+          SELECT DISTINCT
+            la.id, 
+            la.title, 
+            la.description, 
+            la.created_at, 
+            la.updated_at, 
+            la.is_public,
+            la.owner_id,
+            la.background, 
+            la.image_url, 
+            la.list_type, 
+            la.occasion, 
+            la.sort_order,
+            la.access_reason,
+            la.access_via_group,
+            (SELECT COUNT(*) FROM list_items li WHERE li.list_id = la.id AND li.deleted_at IS NULL) as item_count,
+            u.username as owner_username, 
+            u.profile_image_url as owner_profile_picture_url
+          FROM list_access la
+          JOIN users u ON la.owner_id = u.id
+          WHERE la.access_reason != 'no_access'
+          ORDER BY la.updated_at DESC;
         `;
       }
       
@@ -484,10 +621,21 @@ function userControllerFactory(socketService = null) {
       
       logger.info(`[UserController] Main query returned ${rows.length} accessible lists for viewer ${actualViewingUserId || 'anonymous'}`);
       
-      // Log privacy distribution for debugging
+      // Log privacy distribution and access reasons for debugging
       const publicCount = rows.filter(l => l.is_public === true).length;
       const privateCount = rows.filter(l => l.is_public === false).length;
       logger.info(`[UserController] Privacy distribution: ${publicCount} public, ${privateCount} private with access`);
+      
+      // Log access reasons for private lists
+      if (actualViewingUserId) {
+        const privateLists = rows.filter(l => l.is_public === false);
+        if (privateLists.length > 0) {
+          logger.info(`[UserController] Private list access reasons for viewer ${actualViewingUserId}:`);
+          privateLists.forEach(list => {
+            logger.info(`  - "${list.title}": ${list.access_reason}${list.access_via_group ? ` (via group: ${list.access_via_group})` : ''}`);
+          });
+        }
+      }
       
       // Log list IDs for debugging
       logger.info(`[UserController] List IDs returned:`, rows.map(l => ({ id: l.id, title: l.title, is_public: l.is_public })));
@@ -633,6 +781,7 @@ function userControllerFactory(socketService = null) {
     getUserFollowing,
     getUserPublicLists,
     getUserListsWithAccess,
+    getUserListsLive,
     getUserSuggestions,
     getUsersByIds
   };

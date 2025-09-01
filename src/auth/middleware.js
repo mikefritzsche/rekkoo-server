@@ -137,4 +137,62 @@ const checkPermissions = (requiredPermissions) => {
 
 const requireRole = (roleName) => checkPermissions([] , roleName); // adjust as needed
 
-module.exports = { authenticateJWT, checkPermissions, authenticateToken };
+/**
+ * Optional authentication middleware
+ * Attempts to authenticate but allows request to proceed even if no token is provided
+ * Sets req.user if authentication succeeds, otherwise continues without it
+ */
+const optionalAuthenticateJWT = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    // If no auth header, continue without authentication
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return next();
+    }
+
+    const token = authHeader.split(' ')[1];
+
+    try {
+      // Verify token
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+      // Get user details from token
+      const userResult = await db.query(
+        `SELECT id, username, email, email_verified, admin_locked, deleted_at
+         FROM users 
+         WHERE id = $1
+           AND account_locked = false
+           AND deleted_at IS NULL`,
+        [decoded.userId || decoded.id]
+      );
+
+      if (userResult.rows.length === 0) {
+        // Invalid user, but continue without authentication
+        return next();
+      }
+
+      const user = userResult.rows[0];
+
+      // Attach user to request
+      req.user = {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        email_verified: user.email_verified
+      };
+
+      next();
+    } catch (tokenError) {
+      // Invalid token, but continue without authentication
+      console.log('Optional auth: Invalid token, continuing without authentication');
+      next();
+    }
+  } catch (error) {
+    console.error('Error in optional authentication:', error);
+    // Continue without authentication on any error
+    next();
+  }
+};
+
+module.exports = { authenticateJWT, checkPermissions, authenticateToken, optionalAuthenticateJWT };

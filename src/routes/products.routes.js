@@ -4,6 +4,8 @@ const fetch = require('node-fetch');
 
 const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const cheerio = require('cheerio');
+
 puppeteer.use(StealthPlugin());
 
 puppeteer.use(StealthPlugin());

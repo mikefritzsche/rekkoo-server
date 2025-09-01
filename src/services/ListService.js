@@ -144,6 +144,13 @@ class ListService {
         backdrop_path: 'raw_details.backdrop_path',
         watch_providers: 'raw_details.watch_providers',
       },
+      gift_details: {
+        quantity: 'quantity',
+        where_to_buy: 'where_to_buy',
+        amazon_url: 'amazon_url',
+        web_link: 'web_link',
+        rating: 'rating'
+      },
       // Add other mappings here as needed
     };
 
@@ -154,6 +161,13 @@ class ListService {
     }
 
     const record = { list_item_id: listItemId };
+    
+    // Add debug logging for gift_details
+    if (tableName === 'gift_details') {
+      logger.info(`[ListService.createDetailRecord] Processing gift_details for item ${listItemId}`);
+      logger.info(`[ListService.createDetailRecord] apiMetadata:`, typeof apiMetadata === 'string' ? apiMetadata : JSON.stringify(apiMetadata));
+      logger.info(`[ListService.createDetailRecord] listItemData:`, JSON.stringify(listItemData));
+    }
     // --- Normalise metadata keys / shapes ---
     let metadata = typeof apiMetadata === 'string' ? JSON.parse(apiMetadata) : apiMetadata || {};
 
@@ -237,6 +251,13 @@ class ListService {
     const insertValues = Object.values(record);
     const valuePlaceholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
 
+    // Log the final record for gift_details
+    if (tableName === 'gift_details') {
+      logger.info(`[ListService.createDetailRecord] Final gift_details record to insert:`, JSON.stringify(record));
+      logger.info(`[ListService.createDetailRecord] Insert columns:`, insertColumns);
+      logger.info(`[ListService.createDetailRecord] Insert values:`, insertValues);
+    }
+    
     const query = `INSERT INTO ${tableName} (${insertColumns.join(', ')}) VALUES (${valuePlaceholders})
                   ON CONFLICT (list_item_id)
                   DO UPDATE SET updated_at = CURRENT_TIMESTAMP

@@ -73,6 +73,13 @@ function createUserRouter(userController) {
   router.get('/:targetUserId/lists-with-access', authenticateJWT, userController.getUserListsWithAccess);
 
   /**
+   * @route GET /:targetUserId/lists-live
+   * @desc Get lists with real-time access checks (for viewing other users' lists)
+   * @access Private
+   */
+  router.get('/:targetUserId/lists-live', authenticateJWT, userController.getUserListsLive);
+
+  /**
    * @route POST /
    * @desc Create a new user
    * @access Private

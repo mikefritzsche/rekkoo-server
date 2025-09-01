@@ -73,6 +73,7 @@ const adminRoutes = require('./routes/admin.routes');
 const invitationRoutes = require('./routes/invitations.routes');
 const { log } = require('console');
 const osmRoutes = require('./routes/osm.routes');
+const giftRoutes = require('./routes/gifts.routes');
 
 // --- 2. Initialize Express App and HTTP Server ---
 const app = express();
@@ -247,6 +248,7 @@ app.use('/v1.0/list-types', createListTypesRouter(listTypesController));
 app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
 app.use('/v1.0/collaboration', collaborationRoutes);
+app.use('/v1.0/gifts', giftRoutes);
 
 // --- 7. Basic/Utility Routes ---
 app.get('/api/v1.0/health', (req, res) => {

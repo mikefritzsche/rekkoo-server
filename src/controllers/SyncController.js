@@ -25,6 +25,7 @@ const DETAIL_TABLES_MAP = {
   place: 'place_details',
   spotify_item: 'spotify_item_details', // Assuming 'spotify_item' is the type used in 'list_items' table
   tv: 'tv_details', // Add TV details mapping
+  gift: 'gift_details', // Add gift details mapping
 };
 
 function syncControllerFactory(socketService) {
@@ -843,6 +844,7 @@ function syncControllerFactory(socketService) {
                 }
                 let detailTable = null;
                 let detailIdColumn = null;
+                logger.info(`[SyncController] CREATE: Processing item with sourceType: '${sourceType}' for list_items creation`);
                 switch (sourceType) {
                   case 'movie':
                   case 'movies':
@@ -900,15 +902,26 @@ function syncControllerFactory(socketService) {
                     detailTable = 'tv_details';
                     detailIdColumn = 'tv_detail_id';
                     break;
+                  case 'gift':
+                  case 'gifts':
+                    logger.info('[SyncController] CREATE: Detected gift list type - will create gift_details');
+                    logger.info('[SyncController] CREATE: Gift item data:', JSON.stringify(createData));
+                    detailTable = 'gift_details';
+                    detailIdColumn = 'gift_detail_id';
+                    break;
                   default:
                     // Unknown or custom list types will skip detail creation
                     break;
                 }
 
                 if (detailTable && detailIdColumn) {
+                  logger.info(`[SyncController] CREATE: Creating detail record in table: ${detailTable}`);
                   // Prioritize the 'raw' field for place_details, as it contains the full object
                   // needed by the ListService, whereas api_metadata might be partial.
-                  const detailSource = (detailTable === 'place_details' && createData.raw) ? createData.raw : createData.api_metadata;
+                  // For gift_details, use the item data directly
+                  const detailSource = detailTable === 'gift_details' ? createData : 
+                                     (detailTable === 'place_details' && createData.raw) ? createData.raw : createData.api_metadata;
+                  logger.info(`[SyncController] CREATE: Detail source for ${detailTable}:`, typeof detailSource === 'string' ? detailSource : JSON.stringify(detailSource));
 
                   const detailRec = await ListService.createDetailRecord(
                     client,
@@ -1076,6 +1089,7 @@ function syncControllerFactory(socketService) {
 
                 // Map to detail table / fk column
                 let detailTable = null;
+                logger.info(`[SyncController] UPDATE: Processing item with sourceType: '${sourceType}' for list_items update`);
                 switch (sourceType) {
                   case 'movie':
                   case 'movies':
@@ -1102,6 +1116,12 @@ function syncControllerFactory(socketService) {
                   case 'tv':
                   case 'television':
                     detailTable = 'tv_details';
+                    break;
+                  case 'gift':
+                  case 'gifts':
+                    logger.info('[SyncController] UPDATE: Detected gift list type - will ensure gift_details');
+                    logger.info('[SyncController] UPDATE: Gift item data:', JSON.stringify(updateData));
+                    detailTable = 'gift_details';
                     break;
                   default:
                     break; // Unknown/custom types => skip

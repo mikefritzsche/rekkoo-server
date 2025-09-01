@@ -7,10 +7,26 @@ const CollaborationController = {
     const { listId } = req.params;
     const requester_id = req.user.id;
     try {
-      // Ensure requester is owner or admin of the list
+      // First check if the list exists and get owner
       const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
       if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
-      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+      
+      const isOwner = listRows[0].owner_id === requester_id;
+      
+      // If not owner, check if user has group access to this list
+      if (!isOwner) {
+        const { rows: accessRows } = await db.query(
+          `SELECT 1 FROM list_sharing ls
+           JOIN collaboration_group_members cgm ON cgm.group_id = ls.shared_with_group_id
+           WHERE ls.list_id = $1 AND cgm.user_id = $2 AND ls.deleted_at IS NULL
+           LIMIT 1`,
+          [listId, requester_id]
+        );
+        
+        if (accessRows.length === 0) {
+          return res.status(403).json({ error: 'Insufficient permissions' });
+        }
+      }
 
       const { rows } = await db.query(
         `SELECT ls.shared_with_group_id as group_id,
@@ -276,18 +292,29 @@ const CollaborationController = {
     }
   },
 
-  // Get members of a group (owner only)
+  // Get members of a group (owner or group members can view)
   getGroupMembers: async (req, res) => {
     const { groupId } = req.params;
     const requester_id = req.user.id;
     try {
-      // Ensure requester is owner of the group
+      // First check if the group exists and get owner
       const groupResult = await db.query('SELECT owner_id FROM collaboration_groups WHERE id = $1', [groupId]);
       if (groupResult.rows.length === 0) {
         return res.status(404).json({ error: 'Group not found' });
       }
-      if (groupResult.rows[0].owner_id !== requester_id) {
-        return res.status(403).json({ error: 'Only the group owner can view members' });
+      
+      const isOwner = groupResult.rows[0].owner_id === requester_id;
+      
+      // If not owner, check if user is a member of this group
+      if (!isOwner) {
+        const { rows: memberRows } = await db.query(
+          'SELECT 1 FROM collaboration_group_members WHERE group_id = $1 AND user_id = $2 LIMIT 1',
+          [groupId, requester_id]
+        );
+        
+        if (memberRows.length === 0) {
+          return res.status(403).json({ error: 'Only group members can view the member list' });
+        }
       }
 
       const { rows } = await db.query(
@@ -311,9 +338,26 @@ const CollaborationController = {
     const { listId, groupId } = req.params;
     const requester_id = req.user.id;
     try {
+      // First check if the list exists and get owner
       const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
       if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
-      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+      
+      const isOwner = listRows[0].owner_id === requester_id;
+      
+      // If not owner, check if user is a member of this specific group and has access to the list
+      if (!isOwner) {
+        const { rows: accessRows } = await db.query(
+          `SELECT 1 FROM list_sharing ls
+           JOIN collaboration_group_members cgm ON cgm.group_id = ls.shared_with_group_id
+           WHERE ls.list_id = $1 AND ls.shared_with_group_id = $2 AND cgm.user_id = $3 AND ls.deleted_at IS NULL
+           LIMIT 1`,
+          [listId, groupId, requester_id]
+        );
+        
+        if (accessRows.length === 0) {
+          return res.status(403).json({ error: 'Insufficient permissions' });
+        }
+      }
 
       const { rows } = await db.query(
         `SELECT lgur.list_id, lgur.group_id, lgur.user_id, lgur.role, lgur.permissions,
