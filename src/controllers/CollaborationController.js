@@ -554,6 +554,93 @@ const CollaborationController = {
             res.status(500).json({ error: 'Internal Server Error' });
         }
     },
+
+    // Get effective user role for a list
+    getUserListRole: async (req, res) => {
+        const { listId, userId } = req.params;
+        const requester_id = req.user.id;
+        
+        try {
+            // Only allow users to check their own role or list owners to check any user's role
+            const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+            if (listRows.length === 0) {
+                return res.status(404).json({ error: 'List not found' });
+            }
+            
+            const listOwnerId = listRows[0].owner_id;
+            const isOwner = listOwnerId === requester_id;
+            
+            // Users can only check their own role unless they're the owner
+            if (userId !== requester_id && !isOwner) {
+                return res.status(403).json({ error: 'Insufficient permissions' });
+            }
+            
+            // If checking the owner's role, return 'owner'
+            if (userId === listOwnerId) {
+                return res.json({ role: 'owner' });
+            }
+            
+            // Check for direct user role override on the list
+            const { rows: userOverride } = await db.query(
+                `SELECT role FROM list_user_overrides 
+                 WHERE list_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+                [listId, userId]
+            );
+            
+            if (userOverride.length > 0) {
+                return res.json({ role: userOverride[0].role });
+            }
+            
+            // Check for group-based access with the most permissive role
+            const { rows: groupRoles } = await db.query(
+                `SELECT 
+                    COALESCE(lgur.role, lgr.role, 'viewer') as effective_role,
+                    CASE 
+                        WHEN lgur.role IS NOT NULL THEN 'user_group_override'
+                        WHEN lgr.role IS NOT NULL THEN 'group_role'
+                        ELSE 'default'
+                    END as role_source
+                 FROM list_sharing ls
+                 JOIN collaboration_group_members cgm ON cgm.group_id = ls.shared_with_group_id
+                 LEFT JOIN list_group_roles lgr ON lgr.list_id = ls.list_id 
+                    AND lgr.group_id = ls.shared_with_group_id 
+                    AND lgr.deleted_at IS NULL
+                 LEFT JOIN list_group_user_roles lgur ON lgur.list_id = ls.list_id 
+                    AND lgur.group_id = ls.shared_with_group_id 
+                    AND lgur.user_id = cgm.user_id 
+                    AND lgur.deleted_at IS NULL
+                 WHERE ls.list_id = $1 
+                    AND cgm.user_id = $2 
+                    AND ls.deleted_at IS NULL
+                    AND cgm.deleted_at IS NULL
+                 ORDER BY 
+                    CASE COALESCE(lgur.role, lgr.role, 'viewer')
+                        WHEN 'admin' THEN 1
+                        WHEN 'editor' THEN 2
+                        WHEN 'commenter' THEN 3
+                        WHEN 'reserver' THEN 4
+                        WHEN 'viewer' THEN 5
+                        ELSE 6
+                    END
+                 LIMIT 1`,
+                [listId, userId]
+            );
+            
+            if (groupRoles.length > 0) {
+                return res.json({ 
+                    role: groupRoles[0].effective_role,
+                    source: groupRoles[0].role_source 
+                });
+            }
+            
+            // No access found
+            return res.json({ role: 'viewer' });
+            
+        } catch (e) {
+            console.error('Error fetching user list role:', e);
+            return res.status(500).json({ error: 'Internal Server Error' });
+        }
+    },
 };
 
 module.exports = CollaborationController; 

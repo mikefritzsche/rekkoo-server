@@ -258,9 +258,15 @@ class ListService {
       logger.info(`[ListService.createDetailRecord] Insert values:`, insertValues);
     }
     
+    // Build the UPDATE SET clause for ON CONFLICT
+    const updateSetClause = insertColumns
+      .filter(col => col !== 'list_item_id') // Don't update the primary key
+      .map(col => `${col} = EXCLUDED.${col}`)
+      .join(', ');
+    
     const query = `INSERT INTO ${tableName} (${insertColumns.join(', ')}) VALUES (${valuePlaceholders})
                   ON CONFLICT (list_item_id)
-                  DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+                  DO UPDATE SET ${updateSetClause}, updated_at = CURRENT_TIMESTAMP
                   RETURNING *;`;
 
     try {

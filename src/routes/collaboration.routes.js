@@ -31,6 +31,9 @@ router.get('/lists/:listId/groups/:groupId/users', authenticateJWT, Collaboratio
 router.get('/lists/:listId/users', authenticateJWT, CollaborationController.getListUserOverrides);
 router.put('/lists/:listId/users/:userId/role', authenticateJWT, CollaborationController.setUserRoleOverrideOnList);
 
+// Get effective user role for a list
+router.get('/lists/:listId/users/:userId/role', authenticateJWT, CollaborationController.getUserListRole);
+
 // List-specific per-group per-user roles
 router.put('/lists/:listId/groups/:groupId/users/:userId/role', authenticateJWT, CollaborationController.setUserRoleForGroupOnList);
 

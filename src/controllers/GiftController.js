@@ -360,12 +360,16 @@ const GiftController = {
     try {
       // Check if user has access to the list
       const { rows: accessCheck } = await db.query(
-        `SELECT l.id, l.owner_id, l.title,
+        `SELECT l.id, l.owner_id, l.title, l.list_type, l.is_public, l.is_collaborative,
           EXISTS(
-            SELECT 1 FROM list_sharing ls
-            JOIN group_members gm ON ls.shared_with_group_id = gm.group_id
-            WHERE ls.list_id = l.id AND gm.user_id = $2 AND ls.deleted_at IS NULL
-          ) as has_group_access
+            SELECT 1 FROM list_group_roles lgr
+            JOIN collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+            WHERE lgr.list_id = l.id AND cgm.user_id = $2 AND lgr.deleted_at IS NULL
+          ) as has_group_access,
+          EXISTS(
+            SELECT 1 FROM list_user_overrides luo
+            WHERE luo.list_id = l.id AND luo.user_id = $2 AND luo.deleted_at IS NULL
+          ) as has_direct_access
          FROM lists l
          WHERE l.id = $1 AND l.deleted_at IS NULL`,
         [listId, userId]
@@ -378,7 +382,35 @@ const GiftController = {
       const list = accessCheck[0];
       const isOwner = String(list.owner_id) === String(userId);
       
-      if (!isOwner && !list.has_group_access) {
+      // Debug logging
+      console.log('[GiftController.getListReservations] Access check:', {
+        listId,
+        userId,
+        listOwnerId: list.owner_id,
+        isOwner,
+        list_type: list.list_type,
+        is_public: list.is_public,
+        is_collaborative: list.is_collaborative,
+        has_group_access: list.has_group_access,
+        has_direct_access: list.has_direct_access,
+        isGiftList: list.list_type === 'gifts'
+      });
+      
+      // Allow access if:
+      // 1. User is the owner
+      // 2. User has group access
+      // 3. User has direct access (list_user_overrides)
+      // 4. List is public and is a gift list
+      // 5. List is collaborative
+      const hasAccess = isOwner || 
+                       list.has_group_access || 
+                       list.has_direct_access ||
+                       (list.is_public && list.list_type === 'gifts') ||
+                       list.is_collaborative;
+      
+      console.log('[GiftController.getListReservations] Has access:', hasAccess);
+      
+      if (!hasAccess) {
         return res.status(403).json({ error: 'Access denied' });
       }
       
