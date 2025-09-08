@@ -9,6 +9,12 @@ function publicListsControllerFactory() {
     const { id } = req.params;
     const requestor_id = req.user?.id; // Can be null for public, unauthenticated requests
 
+    console.log('[PublicListsController.getListById] Request received:', {
+      listId: id,
+      requestorId: requestor_id,
+      userInfo: req.user
+    });
+
     if (!id) return res.status(400).json({ error: 'id param required' });
 
     try {
@@ -24,11 +30,25 @@ function publicListsControllerFactory() {
       if (requestor_id && requestor_id !== list.owner_id) {
         const groupAccessQuery = `
           SELECT COUNT(*) as count
-          FROM public.list_group_roles lgr
-          JOIN public.collaboration_group_members cgm ON lgr.group_id = cgm.group_id
-          WHERE lgr.list_id = $1 
-            AND cgm.user_id = $2
-            AND lgr.deleted_at IS NULL
+          FROM (
+            -- Check list_group_roles table (new system)
+            SELECT 1
+            FROM public.list_group_roles lgr
+            JOIN public.collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+            WHERE lgr.list_id = $1 
+              AND cgm.user_id = $2
+              AND lgr.deleted_at IS NULL
+              AND cgm.deleted_at IS NULL
+            UNION
+            -- Check list_sharing table (legacy system)
+            SELECT 1
+            FROM public.list_sharing ls
+            JOIN public.collaboration_group_members cgm ON ls.shared_with_group_id = cgm.group_id
+            WHERE ls.list_id = $1 
+              AND cgm.user_id = $2
+              AND ls.deleted_at IS NULL
+              AND cgm.deleted_at IS NULL
+          ) as access_check
         `;
         const groupAccessResult = await db.query(groupAccessQuery, [id, requestor_id]);
         hasGroupAccess = groupAccessResult.rows[0]?.count > 0;
@@ -39,7 +59,19 @@ function publicListsControllerFactory() {
       const isPublic = list.is_public === true;
       const canAccess = isOwner || isPublic || hasGroupAccess;
 
+      console.log('[PublicListsController.getListById] Access check:', {
+        listId: id,
+        requestorId: requestor_id,
+        listOwnerId: list.owner_id,
+        isOwner,
+        isPublic,
+        hasGroupAccess,
+        canAccess,
+        listType: list.list_type
+      });
+
       if (!canAccess) {
+        console.log('[PublicListsController.getListById] Access DENIED for user:', requestor_id);
         return res.status(403).json({ error: 'You do not have permission to view this list' });
       }
 

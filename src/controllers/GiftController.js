@@ -357,18 +357,37 @@ const GiftController = {
     const { listId } = req.params;
     const userId = req.user.id;
     
+    console.log('[GiftController.getListReservations] Request received:', {
+      listId,
+      userId,
+      userInfo: req.user
+    });
+    
     try {
       // Check if user has access to the list
       const { rows: accessCheck } = await db.query(
         `SELECT l.id, l.owner_id, l.title, l.list_type, l.is_public, l.is_collaborative,
-          EXISTS(
+          (EXISTS(
             SELECT 1 FROM list_group_roles lgr
             JOIN collaboration_group_members cgm ON lgr.group_id = cgm.group_id
-            WHERE lgr.list_id = l.id AND cgm.user_id = $2 AND lgr.deleted_at IS NULL
-          ) as has_group_access,
+            WHERE lgr.list_id = l.id 
+              AND cgm.user_id = $2 
+              AND lgr.deleted_at IS NULL
+              AND cgm.deleted_at IS NULL
+          ) OR EXISTS(
+            SELECT 1 FROM list_sharing ls
+            JOIN collaboration_group_members cgm ON ls.shared_with_group_id = cgm.group_id
+            WHERE ls.list_id = l.id 
+              AND cgm.user_id = $2 
+              AND ls.deleted_at IS NULL
+              AND cgm.deleted_at IS NULL
+          )) as has_group_access,
           EXISTS(
             SELECT 1 FROM list_user_overrides luo
-            WHERE luo.list_id = l.id AND luo.user_id = $2 AND luo.deleted_at IS NULL
+            WHERE luo.list_id = l.id 
+              AND luo.user_id = $2 
+              AND luo.role != 'blocked'
+              AND luo.deleted_at IS NULL
           ) as has_direct_access
          FROM lists l
          WHERE l.id = $1 AND l.deleted_at IS NULL`,
@@ -382,6 +401,30 @@ const GiftController = {
       const list = accessCheck[0];
       const isOwner = String(list.owner_id) === String(userId);
       
+      // Additional debug query to check group membership directly
+      const { rows: groupDebug } = await db.query(
+        `SELECT 
+          'list_group_roles' as source,
+          lgr.group_id,
+          cg.name as group_name,
+          lgr.role
+        FROM list_group_roles lgr
+        JOIN collaboration_groups cg ON lgr.group_id = cg.id
+        JOIN collaboration_group_members cgm ON cg.id = cgm.group_id
+        WHERE lgr.list_id = $1 AND cgm.user_id = $2 AND lgr.deleted_at IS NULL AND cgm.deleted_at IS NULL
+        UNION ALL
+        SELECT 
+          'list_sharing' as source,
+          ls.shared_with_group_id as group_id,
+          cg.name as group_name,
+          'member' as role
+        FROM list_sharing ls
+        JOIN collaboration_groups cg ON ls.shared_with_group_id = cg.id
+        JOIN collaboration_group_members cgm ON cg.id = cgm.group_id
+        WHERE ls.list_id = $1 AND cgm.user_id = $2 AND ls.deleted_at IS NULL AND cgm.deleted_at IS NULL`,
+        [listId, userId]
+      );
+      
       // Debug logging
       console.log('[GiftController.getListReservations] Access check:', {
         listId,
@@ -393,19 +436,20 @@ const GiftController = {
         is_collaborative: list.is_collaborative,
         has_group_access: list.has_group_access,
         has_direct_access: list.has_direct_access,
-        isGiftList: list.list_type === 'gifts'
+        isGiftList: list.list_type === 'gifts',
+        groupMemberships: groupDebug
       });
       
       // Allow access if:
       // 1. User is the owner
       // 2. User has group access
       // 3. User has direct access (list_user_overrides)
-      // 4. List is public and is a gift list
+      // 4. List is public
       // 5. List is collaborative
       const hasAccess = isOwner || 
                        list.has_group_access || 
                        list.has_direct_access ||
-                       (list.is_public && list.list_type === 'gifts') ||
+                       list.is_public ||
                        list.is_collaborative;
       
       console.log('[GiftController.getListReservations] Has access:', hasAccess);

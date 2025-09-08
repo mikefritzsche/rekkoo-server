@@ -108,6 +108,7 @@ app.use(cors({
     
     const allowedOrigins = [
       'http://localhost:3000',
+      'http://localhost:8080',
       'http://localhost:8081',
       'http://localhost:8082',
       'https://app-dev.rekkoo.com',
