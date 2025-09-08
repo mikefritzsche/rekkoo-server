@@ -90,6 +90,114 @@ function syncControllerFactory(socketService) {
     return DETAIL_TABLES_MAP[itemType.toLowerCase()] || null;
   };
 
+  // Helper function to notify group members about list changes
+  async function notifyGroupMembersOfListChanges(results, userId) {
+    try {
+      // Collect affected list IDs and their operations from list_items changes
+      const affectedLists = new Map(); // Map<listId, {operations: Set, deletedItemIds: Array}>
+      
+      for (const result of results) {
+        if (result.tableName === 'list_items' && result.listId) {
+          if (!affectedLists.has(result.listId)) {
+            affectedLists.set(result.listId, { 
+              operations: new Set(),
+              deletedItemIds: []
+            });
+          }
+          
+          const listInfo = affectedLists.get(result.listId);
+          
+          // Track what operations were performed
+          let operation = 'update';
+          if (result.status === 'created' || result.operation === 'create') {
+            operation = 'add';
+          } else if (result.status === 'deleted' || result.operation === 'delete') {
+            operation = 'delete';
+            // Track the deleted item ID (use clientRecordId for delete operations)
+            if (result.clientRecordId || result.itemId || result.id) {
+              listInfo.deletedItemIds.push(result.clientRecordId || result.itemId || result.id);
+            }
+          } else if (result.status === 'updated' || result.operation === 'update') {
+            operation = 'update';
+          }
+          listInfo.operations.add(operation);
+        }
+      }
+      
+      if (affectedLists.size === 0) {
+        return; // No list_items changes to notify about
+      }
+      
+      // For each affected list, check if it has groups and notify members
+      for (const [listId, listInfo] of affectedLists) {
+        const operations = listInfo.operations;
+        // Get all group members who have access to this list (including group owners)
+        const groupMembersQuery = `
+          SELECT DISTINCT cgm.user_id
+          FROM list_group_roles lgr
+          JOIN collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+          WHERE lgr.list_id = $1 
+            AND lgr.deleted_at IS NULL
+            AND cgm.deleted_at IS NULL
+            AND cgm.user_id != $2
+          UNION
+          SELECT DISTINCT cg.owner_id as user_id
+          FROM list_group_roles lgr
+          JOIN collaboration_groups cg ON lgr.group_id = cg.id
+          WHERE lgr.list_id = $1 
+            AND lgr.deleted_at IS NULL
+            AND cg.deleted_at IS NULL
+            AND cg.owner_id != $2
+          UNION
+          SELECT DISTINCT cgm.user_id
+          FROM list_sharing ls
+          JOIN collaboration_group_members cgm ON ls.shared_with_group_id = cgm.group_id
+          WHERE ls.list_id = $1 
+            AND ls.deleted_at IS NULL
+            AND cgm.deleted_at IS NULL
+            AND cgm.user_id != $2
+          UNION
+          SELECT DISTINCT cg.owner_id as user_id
+          FROM list_sharing ls
+          JOIN collaboration_groups cg ON ls.shared_with_group_id = cg.id
+          WHERE ls.list_id = $1 
+            AND ls.deleted_at IS NULL
+            AND cg.deleted_at IS NULL
+            AND cg.owner_id != $2
+        `;
+        
+        const { rows: members } = await db.query(groupMembersQuery, [listId, userId]);
+        
+        // Notify each group member about the list update
+        const operationsArray = Array.from(operations);
+        for (const member of members) {
+          const notificationData = { 
+            listId: listId,
+            updatedBy: userId,
+            operations: operationsArray, // Include what operations were performed
+            timestamp: Date.now()
+          };
+          
+          // Include deleted item IDs for delete operations
+          if (listInfo.deletedItemIds.length > 0) {
+            notificationData.deletedItemIds = listInfo.deletedItemIds;
+            // For backward compatibility, keep single itemId for single deletions
+            if (listInfo.deletedItemIds.length === 1) {
+              notificationData.itemId = listInfo.deletedItemIds[0];
+            }
+          }
+          
+          const deletedInfo = notificationData.deletedItemIds ? ` with ${notificationData.deletedItemIds.length} deleted items` : (notificationData.itemId ? ` itemId: ${notificationData.itemId}` : '');
+          logger.info(`[SyncController] Notifying user ${member.user_id} about list ${listId} update (operations: ${operationsArray.join(', ')})${deletedInfo}`);
+          socketService.notifyUser(member.user_id, 'list_update', notificationData);
+        }
+      }
+    } catch (error) {
+      logger.error('[SyncController] Error notifying group members:', error);
+      // Don't throw - this is a non-critical operation
+    }
+  }
+
   // Helper to determine the correct user identifier column for a given table
   const getUserIdentifierColumn = (tableName) => {
     if (tableName === 'list_items' || tableName === 'lists') {
@@ -958,15 +1066,18 @@ function syncControllerFactory(socketService) {
             // ---- End list_items post-processing ----
 
             results.push({
+              tableName,
               operation,
               clientRecordId,
               status: 'created',
-              serverId: insertedId
+              serverId: insertedId,
+              listId: tableName === 'list_items' ? (createData.list_id || createData.list_server_id) : undefined
             });
 
           } else if (operation === 'update') {
             const updateData = { ...dataPayload };
             const recordId = clientRecordId || updateData.id;
+            let updateListId = undefined; // Store list_id for notifications
 
             // Enforce collaboration permissions for list_items update
             if (tableName === 'list_items') {
@@ -975,7 +1086,8 @@ function syncControllerFactory(socketService) {
                 results.push({ tableName, operation, clientRecordId: recordId, status: 'error_not_found' });
                 continue;
               }
-              const allowed = await userCanEditList(client, userId, liRows[0].list_id);
+              updateListId = liRows[0].list_id; // Store for later use
+              const allowed = await userCanEditList(client, userId, updateListId);
               if (!allowed) {
                 results.push({ tableName, operation, clientRecordId: recordId, status: 'error_forbidden', error: 'Not allowed to edit items on this list' });
                 continue;
@@ -1143,9 +1255,11 @@ function syncControllerFactory(socketService) {
             }
 
             results.push({
+              tableName,
               operation,
               clientRecordId: recordId,
-              status: 'updated'
+              status: 'updated',
+              listId: updateListId // Use the updateListId we captured earlier
             });
 
           } 
@@ -1162,6 +1276,9 @@ function syncControllerFactory(socketService) {
               logger.warn(`[SyncController] Skipping delete for table '${tableName}': missing 'record_id' and no 'data.id' fallback found.`, changeItem);
               continue;
             }
+            
+            let deleteListId = undefined; // Store list_id for notifications
+            
             // Enforce collaboration permissions for list_items delete
             if (tableName === 'list_items') {
               const { rows: liRows } = await client.query('SELECT list_id FROM public.list_items WHERE id = $1', [deleteId]);
@@ -1169,7 +1286,8 @@ function syncControllerFactory(socketService) {
                 results.push({ tableName, operation, clientRecordId: deleteId, status: 'error_not_found' });
                 continue;
               }
-              const allowed = await userCanEditList(client, userId, liRows[0].list_id);
+              deleteListId = liRows[0].list_id; // Store for later use
+              const allowed = await userCanEditList(client, userId, deleteListId);
               if (!allowed) {
                 results.push({ tableName, operation, clientRecordId: deleteId, status: 'error_forbidden', error: 'Not allowed to delete items from this list' });
                 continue;
@@ -1196,15 +1314,20 @@ function syncControllerFactory(socketService) {
             }
             
             results.push({
+              tableName,
               operation,
               clientRecordId: deleteId,
-              status: 'deleted'
+              status: 'deleted',
+              listId: deleteListId // Use the deleteListId we captured earlier
             });
           }
         }
       });
       
       // After transaction completes successfully
+      // Notify group members about list_item changes
+      await notifyGroupMembersOfListChanges(results, userId);
+      
       socketService.notifyUser(userId, 'syncComplete', { message: 'Push processed', results });
       res.status(200).json({ success: true, message: 'Changes pushed and processed successfully.', results });
     } catch (error) {
@@ -1427,6 +1550,64 @@ function syncControllerFactory(socketService) {
     return batchResults;
   };
 
+  // Get all list items for a list (used by group members to fetch shared items)
+  const handleGetListItems = async (req, res) => {
+    try {
+      const userId = req.user?.id;
+      const { listId } = req.params;
+      
+      if (!userId || !listId) {
+        return res.status(400).json({ error: 'Missing required parameters' });
+      }
+      
+      // Check if user has access to this list
+      const hasAccess = await userCanEditList(db, userId, listId);
+      if (!hasAccess) {
+        // Check if user can at least view the list
+        const viewQuery = `
+          SELECT 1 FROM public.lists WHERE id = $1 AND (
+            owner_id = $2 
+            OR is_public = true
+            OR id IN (
+              SELECT list_id FROM public.list_sharing ls
+              JOIN public.collaboration_group_members cgm ON ls.shared_with_group_id = cgm.group_id
+              WHERE cgm.user_id = $2 AND ls.deleted_at IS NULL AND cgm.deleted_at IS NULL
+            )
+            OR id IN (
+              SELECT list_id FROM public.list_group_roles lgr
+              JOIN public.collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+              WHERE cgm.user_id = $2 AND lgr.deleted_at IS NULL AND cgm.deleted_at IS NULL
+            )
+          ) LIMIT 1
+        `;
+        const { rows: viewRows } = await db.query(viewQuery, [listId, userId]);
+        if (viewRows.length === 0) {
+          return res.status(403).json({ error: 'Access denied' });
+        }
+      }
+      
+      // Fetch all non-deleted items for this list
+      const itemsQuery = `
+        SELECT * FROM public.list_items 
+        WHERE list_id = $1 AND deleted_at IS NULL
+        ORDER BY created_at DESC
+      `;
+      const { rows: items } = await db.query(itemsQuery, [listId]);
+      
+      logger.info(`[SyncController] User ${userId} fetched ${items.length} items for list ${listId}`);
+      
+      res.status(200).json({ 
+        success: true,
+        items: items,
+        count: items.length
+      });
+      
+    } catch (error) {
+      logger.error('[SyncController] Error fetching list items:', error);
+      res.status(500).json({ error: 'Failed to fetch list items' });
+    }
+  };
+
   return {
     handlePush,
     handleGetChanges,
@@ -1434,6 +1615,7 @@ function syncControllerFactory(socketService) {
     handleGetRecord,
     handleGetConflicts,
     handleGetQueue,
+    handleGetListItems,
   };
 }
 

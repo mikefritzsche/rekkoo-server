@@ -1,55 +1,122 @@
 // socket-service.js
 const socketIo = require('socket.io');
-const jwt = require('jsonwebtoken'); // Or your auth mechanism
+const jwt = require('jsonwebtoken');
 const db = require('../config/db');
 
 class SocketService {
   constructor(server) {
     // Determine allowed origins based on environment
-    const allowedOrigins = process.env.NODE_ENV === 'production'
-      ? (process.env.SOCKET_CORS_ORIGINS || 'https://your-production-app.com').split(',') // Default to a placeholder, split comma-separated string
-      : (process.env.SOCKET_CORS_ORIGINS_DEV || '*').split(','); // Default to '*' for dev, split comma-separated string
+    let allowedOrigins;
+    
+    if (process.env.NODE_ENV === 'production') {
+      allowedOrigins = '*' // (process.env.SOCKET_CORS_ORIGINS || 'https://app.rekkoo.com').split(',').map(origin => origin.trim());
+    } else {
+      // Development mode - be more permissive
+      const devOrigins = '*' // process.env.SOCKET_CORS_ORIGINS_DEV || 'http://localhost:8081,http://localhost:3000,http://localhost:19006';
+      if (devOrigins === '*') {
+        allowedOrigins = true; // Allow all origins in dev if * is specified
+      } else {
+        allowedOrigins = devOrigins.split(',').map(origin => origin.trim());
+        // Always add common development URLs
+        if (!allowedOrigins.includes('http://localhost:8081')) {
+          allowedOrigins.push('http://localhost:8081');
+        }
+        if (!allowedOrigins.includes('http://localhost:3000')) {
+          allowedOrigins.push('http://localhost:3000');
+        }
+        if (!allowedOrigins.includes('http://localhost:19006')) {
+          allowedOrigins.push('http://localhost:19006');
+        }
+      }
+    }
 
-    console.log(`SocketService: Allowed CORS Origins: ${allowedOrigins.join(', ')}`);
+    console.log(`SocketService: NODE_ENV=${process.env.NODE_ENV}`);
+    console.log(`SocketService: Allowed CORS Origins:`, allowedOrigins);
 
     this.io = socketIo(server, {
       cors: {
-        origin: allowedOrigins, // Use the dynamic list
+        origin: allowedOrigins, // Use the dynamic list or true for all
         methods: ["GET", "POST"],
-        // credentials: true // Uncomment if needed
+        credentials: true // Enable credentials for auth
       }
     });
 
     // --- Authentication Middleware ---
     this.io.use(async (socket, next) => {
-      const token = socket.handshake.auth.token;
+      let token = socket.handshake.auth.token;
       if (!token) {
         console.error('Socket connection failed: No token provided.');
         return next(new Error('Authentication error: No token'));
       }
 
-      try {
-        // Verify token and check session against database
-        const sessionResult = await db.query(
-          `SELECT u.id, u.username, u.email, u.email_verified
-           FROM user_sessions s
-           JOIN users u ON s.user_id = u.id
-           WHERE s.token = $1
-             AND s.expires_at > NOW()
-             AND u.account_locked = false`,
-          [token]
-        );
+      // Remove 'Bearer ' prefix if present
+      if (token.startsWith('Bearer ')) {
+        token = token.substring(7);
+        console.log('[SocketService] Stripped Bearer prefix from token');
+      }
 
-        if (sessionResult.rows.length === 0) {
-          console.error('Socket connection failed: Invalid or expired session');
+      console.log('[SocketService] Attempting authentication with token (first 20 chars):', token.substring(0, 20) + '...');
+
+      try {
+        // First try JWT verification
+        let userId = null;
+        let userInfo = null;
+        
+        // Check if it's a JWT token (they typically have 3 parts separated by dots)
+        if (token.includes('.') && token.split('.').length === 3) {
+          console.log('[SocketService] Token appears to be JWT, attempting JWT verification...');
+          try {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            console.log('[SocketService] JWT decoded successfully:', { userId: decoded.id || decoded.userId });
+            
+            // Get user info from database using the decoded user ID
+            const userResult = await db.query(
+              `SELECT id, username, email, email_verified
+               FROM users
+               WHERE id = $1 AND account_locked = false`,
+              [decoded.id || decoded.userId || decoded.sub]
+            );
+            
+            if (userResult.rows.length > 0) {
+              userInfo = userResult.rows[0];
+              userId = userInfo.id;
+              console.log('[SocketService] User found via JWT:', userId);
+            }
+          } catch (jwtError) {
+            console.error('[SocketService] JWT verification failed:', jwtError.message);
+          }
+        }
+        
+        // If JWT didn't work, try session token lookup
+        if (!userId) {
+          console.log('[SocketService] Trying session token lookup...');
+          const sessionResult = await db.query(
+            `SELECT u.id, u.username, u.email, u.email_verified
+             FROM user_sessions s
+             JOIN users u ON s.user_id = u.id
+             WHERE s.token = $1
+               AND s.expires_at > NOW()
+               AND u.account_locked = false`,
+            [token]
+          );
+
+          if (sessionResult.rows.length > 0) {
+            userInfo = sessionResult.rows[0];
+            userId = userInfo.id;
+            console.log('[SocketService] User found via session token:', userId);
+          }
+        }
+
+        if (!userId || !userInfo) {
+          console.error('Socket connection failed: Invalid or expired token');
           return next(new Error('Authentication error: Invalid session'));
         }
 
         // Attach user to socket
         socket.user = {
-          id: sessionResult.rows[0].id,
-          username: sessionResult.rows[0].username,
-          email: sessionResult.rows[0].email
+          id: userInfo.id,
+          username: userInfo.username,
+          email: userInfo.email
         };
 
         console.log(`Socket authenticated for user: ${socket.user.id}`);
@@ -120,6 +187,85 @@ class SocketService {
           timestamp: new Date().toISOString(),
           message: 'Pong response from server'
         });
+      });
+
+      // Handle test group notification
+      socket.on('test_group_notification', async (data) => {
+        console.log(`[SocketService] Received test_group_notification from user ${socket.user?.id} for list ${data.listId}`);
+        
+        if (!socket.user || !data.listId) {
+          socket.emit('error', { message: 'Invalid test request' });
+          return;
+        }
+
+        try {
+          // Get all group members for this list (similar to SyncController logic)
+          const groupMembersQuery = `
+            SELECT DISTINCT cgm.user_id
+            FROM list_group_roles lgr
+            JOIN collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+            WHERE lgr.list_id = $1 
+              AND lgr.deleted_at IS NULL
+              AND cgm.deleted_at IS NULL
+              AND cgm.user_id != $2
+            UNION
+            SELECT DISTINCT cg.owner_id as user_id
+            FROM list_group_roles lgr
+            JOIN collaboration_groups cg ON lgr.group_id = cg.id
+            WHERE lgr.list_id = $1 
+              AND lgr.deleted_at IS NULL
+              AND cg.deleted_at IS NULL
+              AND cg.owner_id != $2
+            UNION
+            SELECT DISTINCT cgm.user_id
+            FROM list_sharing ls
+            JOIN collaboration_group_members cgm ON ls.shared_with_group_id = cgm.group_id
+            WHERE ls.list_id = $1 
+              AND ls.deleted_at IS NULL
+              AND cgm.deleted_at IS NULL
+              AND cgm.user_id != $2
+            UNION
+            SELECT DISTINCT cg.owner_id as user_id
+            FROM list_sharing ls
+            JOIN collaboration_groups cg ON ls.shared_with_group_id = cg.id
+            WHERE ls.list_id = $1 
+              AND ls.deleted_at IS NULL
+              AND cg.deleted_at IS NULL
+              AND cg.owner_id != $2
+          `;
+          
+          const { rows: members } = await db.query(groupMembersQuery, [data.listId, socket.user.id]);
+          
+          console.log(`[SocketService] Found ${members.length} group members for list ${data.listId}`);
+          
+          // Send test notification to each member
+          for (const member of members) {
+            const userRoom = `user_${member.user_id}`;
+            console.log(`[SocketService] Sending test notification to room ${userRoom}`);
+            
+            // Check if room exists
+            const roomClients = this.io.sockets.adapter.rooms.get(userRoom);
+            const clientCount = roomClients ? roomClients.size : 0;
+            console.log(`[SocketService] Room ${userRoom} has ${clientCount} connected client(s)`);
+            
+            this.io.to(userRoom).emit('websocket_test', {
+              message: `Test notification from user ${socket.user.id}`,
+              listId: data.listId,
+              timestamp: Date.now(),
+              fromUserId: socket.user.id
+            });
+          }
+          
+          // Send confirmation to the sender
+          socket.emit('test_sent', { 
+            message: `Test sent to ${members.length} group members`,
+            memberCount: members.length 
+          });
+          
+        } catch (error) {
+          console.error('[SocketService] Error sending test notifications:', error);
+          socket.emit('error', { message: 'Failed to send test notifications' });
+        }
       });
     });
   }

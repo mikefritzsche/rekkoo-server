@@ -44,6 +44,9 @@ module.exports = (socketService) => {
   // Get sync queue status
   router.get('/queue', authenticateJWT, syncController.handleGetQueue);
 
+  // Get list items (for group members to fetch shared list items)
+  router.get('/lists/:listId/items', authenticateJWT, syncController.handleGetListItems);
+
   // New optimized endpoints
   router.get('/stats', authenticateJWT, optimizedSyncController.getSyncStats);
   
