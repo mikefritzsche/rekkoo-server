@@ -53,14 +53,42 @@ function userControllerFactory(socketService = null) {
     try {
       const { id } = req.params;
 
+      // Join users table with user_settings to get profile header fields
       const { rows } = await db.query(
-        'SELECT id, username, email, full_name, email_verified FROM users WHERE id = $1',
+        `SELECT 
+          u.id, 
+          u.username, 
+          u.email, 
+          u.full_name, 
+          u.email_verified,
+          u.profile_image_url,
+          u.created_at,
+          u.updated_at,
+          -- Include user_settings fields for profile header
+          us.lists_header_background_type,
+          us.lists_header_background_value,
+          us.lists_header_image_url,
+          -- Map lists_header_image_url to profile_header_image_url for client compatibility
+          us.lists_header_image_url as profile_header_image_url
+        FROM users u
+        LEFT JOIN user_settings us ON u.id = us.user_id
+        WHERE u.id = $1`,
         [id]
       );
 
       if (rows.length === 0) {
         return res.status(404).json({ error: 'User not found' });
       }
+
+      logger.info(`[UserController] getUserById returning user data:`, {
+        id: rows[0].id,
+        username: rows[0].username,
+        profile_image_url: rows[0].profile_image_url,
+        profile_header_image_url: rows[0].profile_header_image_url,
+        lists_header_background_type: rows[0].lists_header_background_type,
+        lists_header_background_value: rows[0].lists_header_background_value,
+        lists_header_image_url: rows[0].lists_header_image_url
+      });
 
       res.json(rows[0]);
     } catch (err) {
