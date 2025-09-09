@@ -189,6 +189,108 @@ class SocketService {
         });
       });
 
+      // Handle list privacy updates
+      socket.on('list_privacy_update', async (data) => {
+        
+        if (!socket.user || !data.listId) {
+          console.error(`[SocketService] Invalid request - user: ${socket.user?.id}, listId: ${data.listId}`);
+          socket.emit('error', { message: 'Invalid privacy update request' });
+          return;
+        }
+
+        try {
+          // First verify that the user owns this list
+          const ownerCheckQuery = `
+            SELECT owner_id, is_public 
+            FROM lists 
+            WHERE id = $1 AND deleted_at IS NULL
+          `;
+          const { rows: listRows } = await db.query(ownerCheckQuery, [data.listId]);
+          
+          if (listRows.length === 0) {
+            console.log(`[SocketService] List ${data.listId} not found`);
+            socket.emit('error', { message: 'List not found' });
+            return;
+          }
+          
+          const list = listRows[0];
+          if (list.owner_id !== socket.user.id) {
+            console.log(`[SocketService] User ${socket.user.id} is not the owner of list ${data.listId}`);
+            socket.emit('error', { message: 'Unauthorized: Only list owner can change privacy' });
+            return;
+          }
+          
+          console.log(`[SocketService] Privacy update authorized for list ${data.listId}. New access_type: ${data.access_type}`);
+          
+          // Update the database with the new privacy setting
+          const isPublic = data.access_type === 'public';
+          const updateQuery = `
+            UPDATE lists 
+            SET is_public = $1, updated_at = CURRENT_TIMESTAMP 
+            WHERE id = $2 AND deleted_at IS NULL
+          `;
+          await db.query(updateQuery, [isPublic, data.listId]);
+          console.log(`[SocketService] Updated list ${data.listId} is_public to ${isPublic} in database`);
+          
+          // Get all users who might need to be notified
+          // This includes:
+          // 1. All users currently viewing the owner's profile
+          // 2. Group members who have access to the list
+          // 3. Users the list is shared with
+          
+          // For now, broadcast to all connected users except the sender
+          // In a production system, you'd want to be more selective
+          const rooms = this.io.sockets.adapter.rooms;
+          const notifiedUsers = new Set();
+          
+          // Notify all connected users (except sender) about the privacy change
+          console.log(`[SocketService] Total connected sockets: ${this.io.sockets.sockets.size}`);
+          
+          for (const [socketId, socket] of this.io.sockets.sockets) {
+            console.log(`[SocketService] Checking socket ${socketId}, user: ${socket.user?.id}`);
+            
+            if (socket.user && socket.user.id !== data.updatedBy) {
+              const userRoom = `user_${socket.user.id}`;
+              
+              // Check if user room exists and has members
+              const roomSockets = this.io.sockets.adapter.rooms.get(userRoom);
+              const roomSize = roomSockets ? roomSockets.size : 0;
+              console.log(`[SocketService] User room ${userRoom} has ${roomSize} sockets`);
+              
+              if (!notifiedUsers.has(socket.user.id)) {
+                console.log(`[SocketService] >>> NOTIFYING user ${socket.user.id} about privacy change for list ${data.listId}`);
+                
+                const notificationData = {
+                  listId: data.listId,
+                  updatedBy: data.updatedBy,
+                  access_type: data.access_type,
+                  previousAccessType: data.previousAccessType,
+                  timestamp: data.timestamp || Date.now()
+                };
+                
+                console.log(`[SocketService] Notification data:`, JSON.stringify(notificationData));
+                this.io.to(userRoom).emit('list_privacy_update', notificationData);
+                notifiedUsers.add(socket.user.id);
+              }
+            } else if (socket.user && socket.user.id === data.updatedBy) {
+              console.log(`[SocketService] Skipping sender ${socket.user.id}`);
+            }
+          }
+          
+          console.log(`[SocketService] Notified ${notifiedUsers.size} users about privacy change for list ${data.listId}`);
+          
+          // Send confirmation to the sender
+          socket.emit('privacy_update_sent', { 
+            message: `Privacy update sent to ${notifiedUsers.size} users`,
+            userCount: notifiedUsers.size 
+          });
+          
+        } catch (error) {
+          console.error('[SocketService] Error handling privacy update:', error);
+          socket.emit('error', { message: 'Failed to process privacy update' });
+        }
+      });
+
       // Handle test group notification
       socket.on('test_group_notification', async (data) => {
         console.log(`[SocketService] Received test_group_notification from user ${socket.user?.id} for list ${data.listId}`);
