@@ -1,4 +1,4 @@
-const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 const crypto = require('crypto'); // For generating unique keys
 
@@ -130,11 +130,88 @@ const deleteR2Object = async (key) => {
   console.log(`[R2 Service] Deleted object ${key}`);
 };
 
+/**
+ * Lists objects in the R2 bucket with optional prefix and pagination
+ * @param {Object} options - List options
+ * @param {string} options.prefix - Optional prefix to filter objects
+ * @param {string} options.continuationToken - For pagination
+ * @param {number} options.maxKeys - Maximum number of keys to return (default: 100)
+ * @returns {Promise<Object>} List response with objects and continuation token
+ */
+const listR2Objects = async ({ prefix = '', continuationToken = null, maxKeys = 100 } = {}) => {
+  if (!isR2Configured()) {
+    throw new Error('R2 service is not configured');
+  }
+
+  const client = getS3Client();
+  const command = new ListObjectsV2Command({
+    Bucket: R2_BUCKET_NAME,
+    Prefix: prefix,
+    MaxKeys: maxKeys,
+    ContinuationToken: continuationToken,
+  });
+
+  try {
+    const response = await client.send(command);
+    console.log(`[R2 Service] Listed ${response.Contents?.length || 0} objects with prefix: ${prefix}`);
+    
+    // Process the response to include public URLs if configured
+    const publicBase = process.env.R2_PUBLIC_URL_BASE;
+    const contents = (response.Contents || []).map(item => ({
+      ...item,
+      PublicUrl: publicBase ? `${publicBase}/${item.Key}` : null,
+    }));
+
+    return {
+      contents,
+      isTruncated: response.IsTruncated,
+      nextContinuationToken: response.NextContinuationToken,
+      keyCount: response.KeyCount,
+    };
+  } catch (error) {
+    console.error('[R2 Service] Error listing objects:', error);
+    throw new Error('Could not list objects from storage');
+  }
+};
+
+/**
+ * Generates a presigned GET URL for viewing/downloading an object
+ * @param {string} key - The object key
+ * @param {number} expiresIn - URL validity duration in seconds (default: 3600)
+ * @returns {Promise<string>} The presigned URL
+ */
+const generatePresignedGetUrl = async (key, expiresIn = 3600) => {
+  if (!isR2Configured()) {
+    throw new Error('R2 service is not configured');
+  }
+
+  if (!key) {
+    throw new Error('Object key is required');
+  }
+
+  const client = getS3Client();
+  const command = new GetObjectCommand({
+    Bucket: R2_BUCKET_NAME,
+    Key: key,
+  });
+
+  try {
+    const presignedUrl = await getSignedUrl(client, command, { expiresIn });
+    console.log(`[R2 Service] Generated presigned GET URL for key: ${key}`);
+    return presignedUrl;
+  } catch (error) {
+    console.error('[R2 Service] Error generating presigned GET URL:', error);
+    throw new Error('Could not generate download URL');
+  }
+};
+
 module.exports = {
   generatePresignedPutUrl,
+  generatePresignedGetUrl,
   generateUniqueKey,
   isR2Configured,
   deleteR2Object,
+  listR2Objects,
   get s3Client() {
     return getS3Client();
   }

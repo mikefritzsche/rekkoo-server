@@ -13,8 +13,10 @@ const {
 } = require('../controllers/CacheController');
 const { performHardDelete } = require('../services/hardDeleteService');
 const { exportUserData } = require('../services/exportService');
+const r2AdminControllerFactory = require('../controllers/R2AdminController');
 
 const router = express.Router();
+const r2AdminController = r2AdminControllerFactory();
 
 // Helper to verify admin role via user_roles table
 async function ensureAdmin(userId) {
@@ -578,5 +580,40 @@ router.post('/cache/clear', authenticateJWT, async (req, res) => {
 
 router.get('/cache/settings', authenticateJWT, getCacheSettings);
 router.post('/cache/settings', authenticateJWT, updateCacheSettings);
+
+// === R2 STORAGE ADMIN ROUTES ===
+// List objects in R2 storage
+router.get('/r2/objects', authenticateJWT, async (req, res) => {
+  if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+  req.user.isAdmin = true; // Set admin flag for controller
+  await r2AdminController.listObjects(req, res);
+});
+
+// Get presigned URL for a specific object
+// Using query parameter for key to handle slashes
+router.get('/r2/object-url', authenticateJWT, async (req, res) => {
+  if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+  req.user.isAdmin = true;
+  // Get key from query parameter
+  req.params.key = req.query.key || '';
+  await r2AdminController.getObjectUrl(req, res);
+});
+
+// Delete an object
+// Using request body for key to handle slashes
+router.delete('/r2/object', authenticateJWT, async (req, res) => {
+  if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+  req.user.isAdmin = true;
+  // Get key from body
+  req.params.key = req.body.key || '';
+  await r2AdminController.deleteObject(req, res);
+});
+
+// Get storage statistics
+router.get('/r2/stats', authenticateJWT, async (req, res) => {
+  if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+  req.user.isAdmin = true;
+  await r2AdminController.getStorageStats(req, res);
+});
 
 module.exports = router; 
