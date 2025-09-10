@@ -1,44 +1,56 @@
 const express = require('express');
-const router = express.Router();
-const CollaborationController = require('../controllers/CollaborationController');
 const { authenticateJWT } = require('../auth/middleware');
 
-// Group routes
-router.post('/groups', authenticateJWT, CollaborationController.createGroup);
-router.get('/groups', authenticateJWT, CollaborationController.getGroupsForUser);
+/**
+ * Creates and returns a router with collaboration routes
+ * @param {Object} collaborationController - Controller with collaboration methods
+ * @returns {express.Router} Express router
+ */
+function createCollaborationRouter(collaborationController) {
+  const router = express.Router();
 
-// Group member routes
-router.post('/groups/:groupId/members', authenticateJWT, CollaborationController.addMemberToGroup);
-router.get('/groups/:groupId/members', authenticateJWT, CollaborationController.getGroupMembers);
-router.delete('/groups/:groupId/members/:userId', authenticateJWT, CollaborationController.removeMemberFromGroup);
+  // User search route
+  router.get('/users/search', authenticateJWT, collaborationController.searchUsers);
 
-// Group invitation routes
-router.post('/groups/:groupId/invitations', authenticateJWT, CollaborationController.inviteUserToGroup);
+  // Group routes
+  router.post('/groups', authenticateJWT, collaborationController.createGroup);
+  router.get('/groups', authenticateJWT, collaborationController.getGroupsForUser);
 
-// List sharing routes
-router.get('/lists/:listId/shares', authenticateJWT, CollaborationController.getListShares);
-router.post('/lists/:listId/share/:groupId', authenticateJWT, CollaborationController.shareListWithGroup);
-router.delete('/lists/:listId/share/:groupId', authenticateJWT, CollaborationController.unshareListFromGroup);
+  // Group member routes
+  router.post('/groups/:groupId/members', authenticateJWT, collaborationController.addMemberToGroup);
+  router.get('/groups/:groupId/members', authenticateJWT, collaborationController.getGroupMembers);
+  router.delete('/groups/:groupId/members/:userId', authenticateJWT, collaborationController.removeMemberFromGroup);
 
-// List-specific group roles routes
-router.get('/lists/:listId/groups', authenticateJWT, CollaborationController.getListGroupsWithRoles);
-router.post('/lists/:listId/groups/:groupId', authenticateJWT, CollaborationController.attachGroupToList);
-router.put('/lists/:listId/groups/:groupId', authenticateJWT, CollaborationController.updateGroupRoleOnList);
-router.delete('/lists/:listId/groups/:groupId', authenticateJWT, CollaborationController.detachGroupFromList);
-router.get('/lists/:listId/groups/:groupId/users', authenticateJWT, CollaborationController.getGroupUserRolesOnList);
+  // Group invitation routes
+  router.post('/groups/:groupId/invitations', authenticateJWT, collaborationController.inviteUserToGroup);
 
-// List-specific per-user overrides
-router.get('/lists/:listId/users', authenticateJWT, CollaborationController.getListUserOverrides);
-router.put('/lists/:listId/users/:userId/role', authenticateJWT, CollaborationController.setUserRoleOverrideOnList);
+  // List sharing routes
+  router.get('/lists/:listId/shares', authenticateJWT, collaborationController.getListShares);
+  router.post('/lists/:listId/share/:groupId', authenticateJWT, collaborationController.shareListWithGroup);
+  router.delete('/lists/:listId/share/:groupId', authenticateJWT, collaborationController.unshareListFromGroup);
 
-// Get effective user role for a list
-router.get('/lists/:listId/users/:userId/role', authenticateJWT, CollaborationController.getUserListRole);
+  // List-specific group roles routes
+  router.get('/lists/:listId/groups', authenticateJWT, collaborationController.getListGroupsWithRoles);
+  router.post('/lists/:listId/groups/:groupId', authenticateJWT, collaborationController.attachGroupToList);
+  router.put('/lists/:listId/groups/:groupId', authenticateJWT, collaborationController.updateGroupRoleOnList);
+  router.delete('/lists/:listId/groups/:groupId', authenticateJWT, collaborationController.detachGroupFromList);
+  router.get('/lists/:listId/groups/:groupId/users', authenticateJWT, collaborationController.getGroupUserRolesOnList);
 
-// List-specific per-group per-user roles
-router.put('/lists/:listId/groups/:groupId/users/:userId/role', authenticateJWT, CollaborationController.setUserRoleForGroupOnList);
+  // List-specific per-user overrides
+  router.get('/lists/:listId/users', authenticateJWT, collaborationController.getListUserOverrides);
+  router.put('/lists/:listId/users/:userId/role', authenticateJWT, collaborationController.setUserRoleOverrideOnList);
 
-// "Shop For" routes
-router.post('/items/:itemId/claim', authenticateJWT, CollaborationController.claimGift);
-router.delete('/items/:itemId/claim', authenticateJWT, CollaborationController.unclaimGift);
+  // Get effective user role for a list
+  router.get('/lists/:listId/users/:userId/role', authenticateJWT, collaborationController.getUserListRole);
 
-module.exports = router; 
+  // List-specific per-group per-user roles
+  router.put('/lists/:listId/groups/:groupId/users/:userId/role', authenticateJWT, collaborationController.setUserRoleForGroupOnList);
+
+  // "Shop For" routes
+  router.post('/items/:itemId/claim', authenticateJWT, collaborationController.claimGift);
+  router.delete('/items/:itemId/claim', authenticateJWT, collaborationController.unclaimGift);
+
+  return router;
+}
+
+module.exports = createCollaborationRouter; 

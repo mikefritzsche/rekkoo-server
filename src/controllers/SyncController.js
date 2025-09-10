@@ -1402,8 +1402,56 @@ function syncControllerFactory(socketService) {
             cl.change_data::json
           ) AS current_data
         FROM change_log_updates cl
-        LEFT JOIN (SELECT id, row_to_json(lists.*) as json_build_object FROM public.lists WHERE owner_id = $1 AND deleted_at IS NULL) l ON cl.table_name = 'lists' AND cl.operation != 'delete' AND l.id = cl.record_id::uuid
-        LEFT JOIN (SELECT id, row_to_json(list_items.*) as json_build_object FROM public.list_items WHERE owner_id = $1 AND deleted_at IS NULL) li ON cl.table_name = 'list_items' AND cl.operation != 'delete' AND li.id = cl.record_id::uuid
+        LEFT JOIN (
+          SELECT id, row_to_json(lists.*) as json_build_object 
+          FROM public.lists 
+          WHERE deleted_at IS NULL 
+            AND (
+              owner_id = $1 
+              OR id IN (
+                -- Lists shared with user through groups
+                SELECT DISTINCT lgr.list_id 
+                FROM list_group_roles lgr
+                JOIN collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+                WHERE cgm.user_id = $1 
+                  AND lgr.deleted_at IS NULL 
+                  AND cgm.deleted_at IS NULL
+                UNION
+                -- Lists shared directly with user  
+                SELECT DISTINCT luo.list_id
+                FROM list_user_overrides luo
+                WHERE luo.user_id = $1 
+                  AND luo.deleted_at IS NULL
+                  AND luo.role != 'blocked'
+                  AND luo.role != 'inherit'
+              )
+            )
+        ) l ON cl.table_name = 'lists' AND cl.operation != 'delete' AND l.id = cl.record_id::uuid
+        LEFT JOIN (
+          SELECT li.id, row_to_json(li.*) as json_build_object 
+          FROM public.list_items li
+          WHERE li.deleted_at IS NULL 
+            AND (
+              li.owner_id = $1 
+              OR li.list_id IN (
+                -- Items from lists shared with user through groups
+                SELECT DISTINCT lgr.list_id 
+                FROM list_group_roles lgr
+                JOIN collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+                WHERE cgm.user_id = $1 
+                  AND lgr.deleted_at IS NULL 
+                  AND cgm.deleted_at IS NULL
+                UNION
+                -- Items from lists shared directly with user  
+                SELECT DISTINCT luo.list_id
+                FROM list_user_overrides luo
+                WHERE luo.user_id = $1 
+                  AND luo.deleted_at IS NULL
+                  AND luo.role != 'blocked'
+                  AND luo.role != 'inherit'
+              )
+            )
+        ) li ON cl.table_name = 'list_items' AND cl.operation != 'delete' AND li.id = cl.record_id::uuid
         LEFT JOIN (SELECT id, row_to_json(favorites.*) as json_build_object FROM public.favorites WHERE user_id = $1 AND deleted_at IS NULL) f ON cl.table_name = 'favorites' AND cl.operation != 'delete' AND f.id = cl.record_id::uuid
         LEFT JOIN (SELECT user_id, row_to_json(user_settings.*) as json_build_object FROM public.user_settings WHERE user_id = $1) us ON cl.table_name = 'user_settings' AND cl.operation != 'delete' AND us.user_id = $1
         LEFT JOIN (SELECT id, row_to_json(users.*) as json_build_object FROM public.users) u ON cl.table_name = 'users' AND cl.operation != 'delete' AND u.id = cl.record_id::uuid
@@ -1416,6 +1464,15 @@ function syncControllerFactory(socketService) {
       `;
 
       const { rows } = await db.query(query, [userId, lastPulledAt]);
+      
+      // Debug: Log shared lists being pulled
+      const sharedLists = rows.filter(r => r.table_name === 'lists' && r.current_data && r.current_data.owner_id !== userId);
+      if (sharedLists.length > 0) {
+        logger.info(`[SyncController] Pull found ${sharedLists.length} shared lists for user ${userId}:`);
+        sharedLists.forEach(list => {
+          logger.info(`  - Shared list: "${list.current_data.title}" (${list.current_data.id}), owner: ${list.current_data.owner_id}`);
+        });
+      }
 
       const changes = {
         lists: { created: [], updated: [], deleted: [] },

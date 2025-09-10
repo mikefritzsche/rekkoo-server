@@ -25,8 +25,10 @@ function publicListsControllerFactory() {
       }
       const list = listResult.rows[0];
 
-      // Check if user has access through a group
+      // Check if user has access through a group or individual share
       let hasGroupAccess = false;
+      let hasIndividualAccess = false;
+      
       if (requestor_id && requestor_id !== list.owner_id) {
         const groupAccessQuery = `
           SELECT COUNT(*) as count
@@ -52,12 +54,24 @@ function publicListsControllerFactory() {
         `;
         const groupAccessResult = await db.query(groupAccessQuery, [id, requestor_id]);
         hasGroupAccess = groupAccessResult.rows[0]?.count > 0;
+        
+        // Check individual access via list_user_overrides
+        const individualAccessQuery = `
+          SELECT COUNT(*) as count
+          FROM public.list_user_overrides luo
+          WHERE luo.list_id = $1 
+            AND luo.user_id = $2 
+            AND luo.role NOT IN ('blocked', 'inherit')
+            AND luo.deleted_at IS NULL
+        `;
+        const individualAccessResult = await db.query(individualAccessQuery, [id, requestor_id]);
+        hasIndividualAccess = individualAccessResult.rows[0]?.count > 0;
       }
 
       // Check access permissions
       const isOwner = list.owner_id === requestor_id;
       const isPublic = list.is_public === true;
-      const canAccess = isOwner || isPublic || hasGroupAccess;
+      const canAccess = isOwner || isPublic || hasGroupAccess || hasIndividualAccess;
 
       console.log('[PublicListsController.getListById] Access check:', {
         listId: id,
@@ -66,6 +80,7 @@ function publicListsControllerFactory() {
         isOwner,
         isPublic,
         hasGroupAccess,
+        hasIndividualAccess,
         canAccess,
         listType: list.list_type
       });

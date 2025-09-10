@@ -357,6 +357,7 @@ function userControllerFactory(socketService = null) {
             AND luo.user_id = $2 
             AND luo.deleted_at IS NULL 
             AND luo.role != 'blocked'
+            AND luo.role != 'inherit'
           WHERE l.owner_id = $1 
             AND l.deleted_at IS NULL
         )
@@ -373,11 +374,79 @@ function userControllerFactory(socketService = null) {
       
       const { rows } = await db.query(query, [actualTargetUserId, actualViewingUserId]);
       
+      // Debug: Check for individual shares specifically
+      const individualSharesQuery = `
+        SELECT luo.*, l.title, l.is_public
+        FROM list_user_overrides luo
+        JOIN lists l ON l.id = luo.list_id
+        WHERE l.owner_id = $1 
+          AND luo.user_id = $2
+          AND luo.deleted_at IS NULL
+          AND luo.role != 'blocked'
+          AND luo.role != 'inherit'
+          AND l.deleted_at IS NULL
+      `;
+      const { rows: individualShares } = await db.query(individualSharesQuery, [actualTargetUserId, actualViewingUserId]);
+      
+      // Debug: Check specifically why individual shares might not be showing
+      if (individualShares.length > 0 && rows.length === 0) {
+        logger.warn(`[UserController] WARNING: Found ${individualShares.length} individual shares but main query returned 0 lists!`);
+        
+        // Run a diagnostic query to understand the issue
+        const diagnosticQuery = `
+          SELECT 
+            l.id,
+            l.title,
+            l.is_public,
+            l.owner_id,
+            luo.id as override_id,
+            luo.role as override_role,
+            luo.user_id as override_user,
+            luo.deleted_at as override_deleted,
+            CASE 
+              WHEN luo.id IS NOT NULL AND luo.role != 'blocked' AND luo.role != 'inherit' THEN 'should_have_access'
+              ELSE 'no_access'
+            END as diagnostic_result
+          FROM lists l
+          LEFT JOIN list_user_overrides luo ON l.id = luo.list_id 
+            AND luo.user_id = $2 
+            AND luo.deleted_at IS NULL
+          WHERE l.owner_id = $1 
+            AND l.deleted_at IS NULL
+            AND l.id IN (SELECT list_id FROM list_user_overrides WHERE user_id = $2 AND deleted_at IS NULL)
+        `;
+        const { rows: diagnosticRows } = await db.query(diagnosticQuery, [actualTargetUserId, actualViewingUserId]);
+        logger.info(`[UserController] Diagnostic query results for individual shares:`);
+        diagnosticRows.forEach(row => {
+          logger.info(`  - List: "${row.title}" (${row.id})`);
+          logger.info(`    Override: ID=${row.override_id}, Role=${row.override_role}, User=${row.override_user}`);
+          logger.info(`    Result: ${row.diagnostic_result}`);
+        });
+      }
+      
       logger.info(`[UserController] LIVE check returned ${rows.length} lists`);
+      logger.info(`[UserController] Individual shares check found ${individualShares.length} direct shares`);
+      
+      // Log individual shares in detail
+      if (individualShares.length > 0) {
+        logger.info(`[UserController] Individual shares details:`);
+        individualShares.forEach(share => {
+          logger.info(`  - List: "${share.title}" (ID: ${share.list_id})`);
+          logger.info(`    Role: ${share.role}, Deleted: ${share.deleted_at}, Public: ${share.is_public}`);
+          // Check if this list appears in the main results
+          const inMainResults = rows.find(r => r.id === share.list_id);
+          if (inMainResults) {
+            logger.info(`    ✓ INCLUDED in main results with access_type: ${inMainResults.access_type}`);
+          } else {
+            logger.info(`    ✗ MISSING from main results!`);
+          }
+        });
+      }
+      
+      // Log all lists with their access types
+      logger.info(`[UserController] All returned lists with access types:`);
       rows.forEach(row => {
-        if (row.is_public === false) {
-          logger.info(`  - Private list "${row.title}": ${row.access_type} via ${row.access_group_name || 'N/A'}`);
-        }
+        logger.info(`  - "${row.title}" (${row.id}): ${row.access_type}${row.is_public ? ' [PUBLIC]' : ' [PRIVATE]'}`);
       });
       
       res.status(200).json({
@@ -398,7 +467,8 @@ function userControllerFactory(socketService = null) {
   
   const getUserListsWithAccess = async (req, res) => {
     const { targetUserId } = req.params;
-    const viewingUserId = req.query.viewingUserId || req.user?.id; // Use query param or authenticated user
+    // Accept both viewerId and viewingUserId for backward compatibility
+    const viewingUserId = req.query.viewerId || req.query.viewingUserId || req.user?.id; // Use query param or authenticated user
     
     logger.info(`[UserController] Getting lists with access for user ${targetUserId}, viewed by ${viewingUserId || 'anonymous'}`);
     logger.info(`[UserController] Query params:`, req.query);
@@ -431,16 +501,32 @@ function userControllerFactory(socketService = null) {
       
       logger.info(`[UserController] Final IDs - Target: ${actualTargetUserId}, Viewer: ${actualViewingUserId}`);
       
-      // If viewing own lists, return all
+      // If viewing own lists, return all owned lists AND lists shared with them
       if (actualViewingUserId === actualTargetUserId) {
         const query = `
-          SELECT 
+          WITH viewer_groups AS (
+            -- Get all groups the user is a member of
+            SELECT DISTINCT cgm.group_id, cg.name as group_name
+            FROM collaboration_group_members cgm
+            JOIN collaboration_groups cg ON cgm.group_id = cg.id
+            WHERE cgm.user_id = $1 
+              AND cgm.deleted_at IS NULL
+              AND cg.deleted_at IS NULL
+            UNION
+            -- Include groups the user owns
+            SELECT DISTINCT cg.id as group_id, cg.name as group_name
+            FROM collaboration_groups cg
+            WHERE cg.owner_id = $1 
+              AND cg.deleted_at IS NULL
+          )
+          SELECT DISTINCT
             l.id, 
             l.title, 
             l.description, 
             l.created_at, 
             l.updated_at, 
             l.is_public,
+            l.is_collaborative,
             l.owner_id,
             l.background, 
             l.image_url, 
@@ -449,15 +535,94 @@ function userControllerFactory(socketService = null) {
             l.sort_order,
             (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
             u.username as owner_username, 
-            u.profile_image_url as owner_profile_picture_url
+            u.profile_image_url as owner_profile_picture_url,
+            -- Mark if this is a shared list (not owned by viewer)
+            CASE 
+              WHEN l.owner_id = $1 THEN false
+              ELSE true
+            END as shared_with_me,
+            -- Determine share type for shared lists
+            CASE 
+              WHEN l.owner_id = $1 THEN null
+              WHEN EXISTS (
+                SELECT 1 FROM list_group_roles lgr
+                JOIN viewer_groups vg ON lgr.group_id = vg.group_id
+                WHERE lgr.list_id = l.id AND lgr.deleted_at IS NULL
+              ) OR EXISTS (
+                SELECT 1 FROM list_sharing ls
+                JOIN viewer_groups vg ON ls.shared_with_group_id = vg.group_id
+                WHERE ls.list_id = l.id AND ls.deleted_at IS NULL
+              ) THEN 'group_shared'
+              WHEN EXISTS (
+                SELECT 1 FROM list_user_overrides luo
+                WHERE luo.list_id = l.id 
+                  AND luo.user_id = $1 
+                  AND luo.role NOT IN ('blocked', 'inherit')
+                  AND luo.deleted_at IS NULL
+              ) THEN 'individual_shared'
+              ELSE null
+            END as share_type,
+            -- Get the group that provides access (if any)
+            COALESCE(
+              (SELECT vg.group_name FROM list_group_roles lgr
+               JOIN viewer_groups vg ON lgr.group_id = vg.group_id
+               WHERE lgr.list_id = l.id AND lgr.deleted_at IS NULL
+               LIMIT 1),
+              (SELECT vg.group_name FROM list_sharing ls
+               JOIN viewer_groups vg ON ls.shared_with_group_id = vg.group_id
+               WHERE ls.list_id = l.id AND ls.deleted_at IS NULL
+               LIMIT 1)
+            ) as access_via_group,
+            -- Add sort order expression for ORDER BY clause
+            CASE WHEN l.owner_id = $1 THEN 0 ELSE 1 END as sort_priority
           FROM lists l
           JOIN users u ON l.owner_id = u.id
-          WHERE l.owner_id = $1 AND l.deleted_at IS NULL
-          ORDER BY l.updated_at DESC;
+          WHERE l.deleted_at IS NULL
+            AND (
+              -- Lists owned by the user
+              l.owner_id = $1
+              OR
+              -- Lists shared with user through groups (list_group_roles)
+              EXISTS (
+                SELECT 1 FROM list_group_roles lgr
+                JOIN viewer_groups vg ON lgr.group_id = vg.group_id
+                WHERE lgr.list_id = l.id AND lgr.deleted_at IS NULL
+              )
+              OR
+              -- Lists shared with user through groups (list_sharing - legacy)
+              EXISTS (
+                SELECT 1 FROM list_sharing ls
+                JOIN viewer_groups vg ON ls.shared_with_group_id = vg.group_id
+                WHERE ls.list_id = l.id AND ls.deleted_at IS NULL
+              )
+              OR
+              -- Lists shared with user individually
+              EXISTS (
+                SELECT 1 FROM list_user_overrides luo
+                WHERE luo.list_id = l.id 
+                  AND luo.user_id = $1 
+                  AND luo.role NOT IN ('blocked', 'inherit')
+                  AND luo.deleted_at IS NULL
+              )
+            )
+          ORDER BY 
+            -- Show owned lists first, then shared lists
+            sort_priority,
+            l.updated_at DESC;
         `;
         
         const { rows } = await db.query(query, [actualTargetUserId]);
-        logger.info(`[UserController] Returning ${rows.length} lists (own lists) for user ${actualTargetUserId}`);
+        
+        // Log the breakdown
+        const ownedLists = rows.filter(r => !r.shared_with_me);
+        const sharedLists = rows.filter(r => r.shared_with_me);
+        const groupShared = sharedLists.filter(r => r.share_type === 'group_shared');
+        const individualShared = sharedLists.filter(r => r.share_type === 'individual_shared');
+        
+        logger.info(`[UserController] Returning ${rows.length} total lists for user ${actualTargetUserId}:`);
+        logger.info(`  - ${ownedLists.length} owned lists`);
+        logger.info(`  - ${sharedLists.length} shared lists (${groupShared.length} via groups, ${individualShared.length} individual)`);
+        
         return res.status(200).json(rows);
       }
       
@@ -596,6 +761,7 @@ function userControllerFactory(socketService = null) {
                   WHERE luo.list_id = l.id 
                     AND luo.user_id = $2 
                     AND luo.role != 'blocked'
+                    AND luo.role != 'inherit'
                     AND luo.deleted_at IS NULL
                 ) THEN 'individual_access'
                 ELSE 'no_access'
@@ -640,6 +806,55 @@ function userControllerFactory(socketService = null) {
         `;
       }
       
+      // Debug: Before executing main query, check individual shares directly
+      if (actualViewingUserId && actualViewingUserId !== actualTargetUserId) {
+        const directShareCheck = `
+          SELECT 
+            luo.list_id,
+            luo.user_id,
+            luo.role,
+            luo.deleted_at,
+            l.title,
+            l.is_public,
+            l.owner_id
+          FROM list_user_overrides luo
+          JOIN lists l ON l.id = luo.list_id
+          WHERE l.owner_id = $1 
+            AND luo.user_id = $2
+            AND l.deleted_at IS NULL
+          ORDER BY luo.role
+        `;
+        const { rows: directShares } = await db.query(directShareCheck, [actualTargetUserId, actualViewingUserId]);
+        
+        logger.info(`[UserController] Direct share check for viewer ${actualViewingUserId} on owner ${actualTargetUserId}'s lists:`);
+        logger.info(`[UserController] Found ${directShares.length} total override entries`);
+        directShares.forEach(share => {
+          logger.info(`  - List: "${share.title}" (${share.list_id})`);
+          logger.info(`    Role: ${share.role}, Deleted: ${share.deleted_at}, Public: ${share.is_public}`);
+          logger.info(`    Should be included: ${share.role !== 'blocked' && share.role !== 'inherit' && !share.deleted_at ? 'YES' : 'NO'}`);
+        });
+        
+        // Test the EXISTS clause directly for each individual share
+        const validShares = directShares.filter(s => s.role !== 'blocked' && s.role !== 'inherit' && !s.deleted_at);
+        if (validShares.length > 0) {
+          logger.info(`[UserController] Testing EXISTS clause for ${validShares.length} valid shares:`);
+          for (const share of validShares) {
+            const existsTest = `
+              SELECT EXISTS (
+                SELECT 1 FROM list_user_overrides luo
+                WHERE luo.list_id = $1 
+                  AND luo.user_id = $2 
+                  AND luo.role != 'blocked'
+                  AND luo.role != 'inherit'
+                  AND luo.deleted_at IS NULL
+              ) as should_exist
+            `;
+            const { rows: existsResult } = await db.query(existsTest, [share.list_id, actualViewingUserId]);
+            logger.info(`    List "${share.title}": EXISTS clause returns ${existsResult[0].should_exist}`);
+          }
+        }
+      }
+      
       // Execute query with appropriate parameters
       const queryParams = actualViewingUserId 
         ? [actualTargetUserId, actualViewingUserId]
@@ -648,6 +863,34 @@ function userControllerFactory(socketService = null) {
       const { rows } = await db.query(query, queryParams);
       
       logger.info(`[UserController] Main query returned ${rows.length} accessible lists for viewer ${actualViewingUserId || 'anonymous'}`);
+      
+      // Check if individually shared lists made it to the results
+      if (actualViewingUserId && actualViewingUserId !== actualTargetUserId) {
+        const directShareCheck = `
+          SELECT luo.list_id
+          FROM list_user_overrides luo
+          JOIN lists l ON l.id = luo.list_id
+          WHERE l.owner_id = $1 
+            AND luo.user_id = $2
+            AND luo.role != 'blocked'
+            AND luo.role != 'inherit'
+            AND luo.deleted_at IS NULL
+            AND l.deleted_at IS NULL
+        `;
+        const { rows: expectedShares } = await db.query(directShareCheck, [actualTargetUserId, actualViewingUserId]);
+        
+        if (expectedShares.length > 0) {
+          logger.info(`[UserController] Checking if ${expectedShares.length} individual shares are in results:`);
+          expectedShares.forEach(share => {
+            const inResults = rows.find(r => r.id === share.list_id);
+            if (inResults) {
+              logger.info(`  ✓ List ${share.list_id} IS in results with access_reason: ${inResults.access_reason}`);
+            } else {
+              logger.error(`  ✗ List ${share.list_id} MISSING from results!`);
+            }
+          });
+        }
+      }
       
       // Log privacy distribution and access reasons for debugging
       const publicCount = rows.filter(l => l.is_public === true).length;
