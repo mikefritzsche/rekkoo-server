@@ -13,6 +13,76 @@ function collaborationControllerFactory(socketService = null) {
   };
 
 const CollaborationController = {
+  // Bulk fetch members for multiple groups
+  getBulkGroupMembers: async (req, res) => {
+    const { group_ids } = req.body;
+    const requester_id = req.user.id;
+    
+    if (!group_ids || !Array.isArray(group_ids) || group_ids.length === 0) {
+      return res.status(400).json({ error: 'group_ids array is required' });
+    }
+
+    // Limit batch size to prevent abuse
+    if (group_ids.length > 50) {
+      return res.status(400).json({ error: 'Maximum 50 groups per batch request' });
+    }
+
+    console.log(`[getBulkGroupMembers] Fetching members for ${group_ids.length} groups for user ${requester_id}`);
+
+    try {
+      // First check which groups the requester has access to
+      const { rows: accessibleGroups } = await db.query(
+        `SELECT DISTINCT g.id 
+         FROM collaboration_groups g
+         WHERE g.id = ANY($1::uuid[])
+           AND (
+             g.owner_id = $2  -- User owns the group
+             OR EXISTS (      -- User is a member of the group
+               SELECT 1 FROM collaboration_group_members cgm 
+               WHERE cgm.group_id = g.id AND cgm.user_id = $2
+             )
+           )`,
+        [group_ids, requester_id]
+      );
+
+      const accessibleGroupIds = accessibleGroups.map(g => g.id);
+      
+      if (accessibleGroupIds.length === 0) {
+        return res.status(200).json({});
+      }
+
+      // Fetch all members for accessible groups
+      const { rows: members } = await db.query(
+        `SELECT m.group_id, m.user_id, m.role, m.joined_at, 
+                u.username, u.email, u.full_name,
+                u.profile_image_url AS avatar_url
+         FROM collaboration_group_members m
+         JOIN users u ON u.id = m.user_id
+         WHERE m.group_id = ANY($1::uuid[])
+         ORDER BY m.group_id, m.joined_at ASC`,
+        [accessibleGroupIds]
+      );
+
+      // Group members by group_id
+      const result = {};
+      for (const groupId of accessibleGroupIds) {
+        result[groupId] = [];
+      }
+      
+      members.forEach(member => {
+        if (!result[member.group_id]) {
+          result[member.group_id] = [];
+        }
+        result[member.group_id].push(member);
+      });
+
+      res.status(200).json(result);
+    } catch (error) {
+      console.error('Error fetching bulk group members:', error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
   // Batch fetch sharing data for multiple lists
   getBatchListShares: async (req, res) => {
     const { listIds } = req.body;
