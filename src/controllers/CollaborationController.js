@@ -445,6 +445,44 @@ const CollaborationController = {
         [listId, groupId, role, permissions ? JSON.stringify(permissions) : null]
       );
       if (rows.length === 0) return res.status(404).json({ error: 'Group not attached to list' });
+      
+      // Notify all group members about the role change
+      try {
+        console.log(`[CollaborationController] Notifying group members about role change for list ${listId} (group: ${groupId}, new role: ${role})`);
+        
+        const { rows: groupMembers } = await db.query(
+          `SELECT DISTINCT cgm.user_id 
+           FROM collaboration_group_members cgm 
+           WHERE cgm.group_id = $1 
+             AND cgm.deleted_at IS NULL
+             AND cgm.user_id != $2
+           UNION
+           SELECT DISTINCT cg.owner_id as user_id
+           FROM collaboration_groups cg
+           WHERE cg.id = $1 
+             AND cg.deleted_at IS NULL
+             AND cg.owner_id != $2`,
+          [groupId, requester_id]
+        );
+        
+        for (const member of groupMembers) {
+          console.log(`[CollaborationController] Notifying user ${member.user_id} about group role change to ${role}`);
+          safeSocketService.notifyUser(member.user_id, 'list_access_granted', {
+            listId: listId,
+            updatedBy: requester_id,
+            accessType: 'group',
+            groupId: groupId,
+            role: role,
+            timestamp: Date.now()
+          });
+        }
+        
+        console.log(`[CollaborationController] Notified ${groupMembers.length} group members about role change`);
+      } catch (notifyError) {
+        console.error('[CollaborationController] Failed to notify group members about role change:', notifyError);
+        // Don't fail the request if notifications fail
+      }
+      
       return res.json(rows[0]);
     } catch (e) {
       console.error('Error updating group role:', e);
@@ -618,6 +656,18 @@ const CollaborationController = {
 
         // Notify the user about access revocation (only if we actually removed an override)
         if (rowCount > 0) {
+          // Create a change_log entry marking the list as deleted for the user
+          try {
+            await db.query(
+              `INSERT INTO public.change_log (table_name, record_id, operation, user_id, change_data, created_at)
+               VALUES ('lists', $1, 'delete', $2, NULL, CURRENT_TIMESTAMP)`,
+              [listId, userId]
+            );
+            console.log(`[setUserRoleOverrideOnList] Added delete change_log entry for user ${userId} to remove list ${listId}`);
+          } catch (changeLogError) {
+            console.error('[setUserRoleOverrideOnList] Failed to create delete change_log entry:', changeLogError);
+          }
+          
           try {
             console.log(`[CollaborationController] Notifying user ${userId} about list access revoked (individual)`);
             safeSocketService.notifyUser(userId, 'list_access_revoked', {
@@ -668,19 +718,58 @@ const CollaborationController = {
         console.log('[setUserRoleOverrideOnList] Verified data:', verifyQuery.rows[0]);
       }
 
-      // Notify the user about access granted (only notify if user is not the requester)
+      // Create a change_log entry for the newly shared/blocked user so they can sync the list
       if (userId !== requester_id) {
         try {
-          console.log(`[CollaborationController] Notifying user ${userId} about list access granted (individual, role: ${role})`);
-          safeSocketService.notifyUser(userId, 'list_access_granted', {
-            listId: listId,
-            updatedBy: requester_id,
-            accessType: 'individual',
-            role: role,
-            timestamp: Date.now()
-          });
+          if (role === 'blocked') {
+            // For blocked users, create a delete entry
+            await db.query(
+              `INSERT INTO public.change_log (table_name, record_id, operation, user_id, change_data, created_at)
+               VALUES ('lists', $1, 'delete', $2, NULL, CURRENT_TIMESTAMP)`,
+              [listId, userId]
+            );
+            console.log(`[setUserRoleOverrideOnList] Added delete change_log entry for blocked user ${userId} for list ${listId}`);
+          } else {
+            // For granted access, create an update entry
+            const { rows: listData } = await db.query('SELECT * FROM lists WHERE id = $1', [listId]);
+            if (listData.length > 0) {
+              await db.query(
+                `INSERT INTO public.change_log (table_name, record_id, operation, user_id, change_data, created_at)
+                 VALUES ('lists', $1, 'update', $2, $3::jsonb, CURRENT_TIMESTAMP)`,
+                [listId, userId, JSON.stringify(listData[0])]
+              );
+              console.log(`[setUserRoleOverrideOnList] Added change_log entry for user ${userId} to sync list ${listId}`);
+            }
+          }
+        } catch (changeLogError) {
+          console.error('[setUserRoleOverrideOnList] Failed to create change_log entry:', changeLogError);
+          // Don't fail the whole operation if change_log fails
+        }
+      }
+
+      // Notify the user about access granted/revoked (only notify if user is not the requester)
+      if (userId !== requester_id) {
+        try {
+          if (role === 'blocked') {
+            console.log(`[CollaborationController] Notifying user ${userId} about list access revoked (blocked)`);
+            safeSocketService.notifyUser(userId, 'list_access_revoked', {
+              listId: listId,
+              updatedBy: requester_id,
+              accessType: 'individual',
+              timestamp: Date.now()
+            });
+          } else {
+            console.log(`[CollaborationController] Notifying user ${userId} about list access granted (individual, role: ${role})`);
+            safeSocketService.notifyUser(userId, 'list_access_granted', {
+              listId: listId,
+              updatedBy: requester_id,
+              accessType: 'individual',
+              role: role,
+              timestamp: Date.now()
+            });
+          }
         } catch (notifyError) {
-          console.error('[CollaborationController] Failed to notify user about access granted:', notifyError);
+          console.error('[CollaborationController] Failed to notify user about access change:', notifyError);
         }
       }
 
@@ -715,13 +804,24 @@ const CollaborationController = {
       }
 
       const upsert = await db.query(
-        `INSERT INTO public.list_group_user_roles (id, list_id, group_id, user_id, role, permissions)
-           VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+        `INSERT INTO public.list_group_user_roles (list_id, group_id, user_id, role, permissions)
+           VALUES ($1, $2, $3, $4, $5::jsonb)
          ON CONFLICT (list_id, group_id, user_id)
            DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions, deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
          RETURNING *`,
-        [uuidv4(), listId, groupId, userId, role, permissions ? JSON.stringify(permissions) : null]
+        [listId, groupId, userId, role, permissions ? JSON.stringify(permissions) : null]
       );
+
+      // Notify the affected user about their role override
+      safeSocketService.notifyUser(userId, 'list_access_granted', {
+        listId: listId,
+        updatedBy: req.user.id,
+        accessType: 'group_override',
+        groupId: groupId,
+        role: role,
+        timestamp: Date.now()
+      });
+
       return res.status(201).json(upsert.rows[0]);
     } catch (e) {
       console.error('Error setting user role for group on list:', e);
