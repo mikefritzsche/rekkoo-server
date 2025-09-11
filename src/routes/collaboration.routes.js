@@ -25,6 +25,7 @@ function createCollaborationRouter(collaborationController) {
   router.post('/groups/:groupId/invitations', authenticateJWT, collaborationController.inviteUserToGroup);
 
   // List sharing routes
+  router.post('/lists/batch-shares', authenticateJWT, collaborationController.getBatchListShares);
   router.get('/lists/:listId/shares', authenticateJWT, collaborationController.getListShares);
   router.post('/lists/:listId/share/:groupId', authenticateJWT, collaborationController.shareListWithGroup);
   router.delete('/lists/:listId/share/:groupId', authenticateJWT, collaborationController.unshareListFromGroup);

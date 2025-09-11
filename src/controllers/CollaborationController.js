@@ -13,6 +13,169 @@ function collaborationControllerFactory(socketService = null) {
   };
 
 const CollaborationController = {
+  // Batch fetch sharing data for multiple lists
+  getBatchListShares: async (req, res) => {
+    const { listIds } = req.body;
+    const requester_id = req.user.id;
+    
+    if (!listIds || !Array.isArray(listIds) || listIds.length === 0) {
+      return res.status(400).json({ error: 'listIds array is required' });
+    }
+
+    // Limit batch size to prevent abuse
+    if (listIds.length > 100) {
+      return res.status(400).json({ error: 'Maximum 100 lists per batch request' });
+    }
+
+    console.log(`[getBatchListShares] Fetching shares for ${listIds.length} lists for user ${requester_id} - Updated`);
+
+    try {
+      // First, get all lists to check ownership and access
+      const { rows: lists } = await db.query(
+        'SELECT id, owner_id FROM lists WHERE id = ANY($1::uuid[])',
+        [listIds]
+      );
+
+      const listOwnerMap = {};
+      lists.forEach(list => {
+        listOwnerMap[list.id] = list.owner_id;
+      });
+
+      // Prepare results object
+      const results = {
+        groups: {},
+        individuals: {}
+      };
+
+      // Initialize empty arrays for each list
+      listIds.forEach(listId => {
+        results.groups[listId] = [];
+        results.individuals[listId] = [];
+      });
+
+      // Batch fetch all group shares for lists where user is owner or has access
+      const { rows: groupShares } = await db.query(
+        `SELECT DISTINCT
+          ls.list_id,
+          ls.shared_with_group_id as group_id,
+          cg.name as group_name,
+          cg.description as group_description,
+          ls.permissions,
+          ls.created_at,
+          COUNT(cgm.user_id) as member_count
+        FROM list_sharing ls
+        JOIN collaboration_groups cg ON cg.id = ls.shared_with_group_id
+        LEFT JOIN collaboration_group_members cgm ON cgm.group_id = ls.shared_with_group_id
+        WHERE ls.list_id = ANY($1::uuid[])
+          AND ls.deleted_at IS NULL
+          AND cg.deleted_at IS NULL
+          AND (
+            -- User owns the list
+            ls.list_id IN (SELECT id FROM lists WHERE id = ANY($1::uuid[]) AND owner_id = $2)
+            OR
+            -- User has access to the list through group or individual share
+            EXISTS (
+              SELECT 1 FROM collaboration_group_members cgm2
+              WHERE cgm2.group_id IN (
+                SELECT shared_with_group_id FROM list_sharing
+                WHERE list_id = ls.list_id AND deleted_at IS NULL
+              ) AND cgm2.user_id = $2
+            )
+            OR
+            EXISTS (
+              SELECT 1 FROM list_user_overrides luo
+              WHERE luo.list_id = ls.list_id 
+                AND luo.user_id = $2 
+                AND luo.deleted_at IS NULL
+                AND luo.role NOT IN ('blocked', 'inherit')
+            )
+          )
+        GROUP BY ls.list_id, ls.shared_with_group_id, cg.name, cg.description, ls.permissions, ls.created_at
+        ORDER BY ls.created_at ASC`,
+        [listIds, requester_id]
+      );
+
+      // Batch fetch all individual shares for lists where user is owner or has access
+      const { rows: individualShares } = await db.query(
+        `SELECT DISTINCT
+          luo.list_id,
+          luo.user_id,
+          luo.role,
+          luo.permissions,
+          luo.created_at,
+          u.username,
+          u.email,
+          u.full_name,
+          u.profile_image_url,
+          u.profile_display_config
+        FROM list_user_overrides luo
+        JOIN users u ON u.id = luo.user_id
+        WHERE luo.list_id = ANY($1::uuid[])
+          AND luo.deleted_at IS NULL
+          AND luo.role NOT IN ('blocked', 'inherit')
+          AND (
+            -- User owns the list
+            luo.list_id IN (SELECT id FROM lists WHERE id = ANY($1::uuid[]) AND owner_id = $2)
+            OR
+            -- User has access to the list
+            EXISTS (
+              SELECT 1 FROM collaboration_group_members cgm
+              WHERE cgm.group_id IN (
+                SELECT shared_with_group_id FROM list_sharing
+                WHERE list_id = luo.list_id AND deleted_at IS NULL
+              ) AND cgm.user_id = $2
+            )
+            OR
+            EXISTS (
+              SELECT 1 FROM list_user_overrides luo2
+              WHERE luo2.list_id = luo.list_id 
+                AND luo2.user_id = $2 
+                AND luo2.deleted_at IS NULL
+                AND luo2.role NOT IN ('blocked', 'inherit')
+            )
+          )
+        ORDER BY luo.created_at ASC`,
+        [listIds, requester_id]
+      );
+
+      // Organize group shares by list_id
+      groupShares.forEach(share => {
+        if (results.groups[share.list_id]) {
+          results.groups[share.list_id].push({
+            id: share.group_id,
+            name: share.group_name,
+            description: share.group_description,
+            permissions: share.permissions,
+            member_count: parseInt(share.member_count),
+            created_at: share.created_at
+          });
+        }
+      });
+
+      // Organize individual shares by list_id
+      individualShares.forEach(share => {
+        if (results.individuals[share.list_id]) {
+          results.individuals[share.list_id].push({
+            user_id: share.user_id,
+            role: share.role,
+            permissions: share.permissions,
+            username: share.username,
+            email: share.email,
+            full_name: share.full_name,
+            profile_image_url: share.profile_image_url,
+            profile_display_config: share.profile_display_config
+          });
+        }
+      });
+
+      console.log(`[getBatchListShares] Returning shares for ${listIds.length} lists`);
+      res.json(results);
+    } catch (error) {
+      console.error('Error batch fetching list shares:', error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
   // Search users for collaboration
   searchUsers: async (req, res) => {
     const { q: query, limit = 10 } = req.query;
@@ -317,7 +480,9 @@ const CollaborationController = {
       }
 
       const { rows } = await db.query(
-        `SELECT luo.list_id, luo.user_id, luo.role, luo.permissions, u.username, u.email, u.full_name
+        `SELECT luo.list_id, luo.user_id, luo.role, luo.permissions, 
+                u.username, u.email, u.full_name,
+                u.profile_image_url, u.profile_display_config
          FROM public.list_user_overrides luo
          JOIN public.users u ON u.id = luo.user_id
          WHERE luo.list_id = $1 AND luo.deleted_at IS NULL
