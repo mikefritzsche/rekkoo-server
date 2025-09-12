@@ -90,28 +90,71 @@ function publicListsControllerFactory() {
         return res.status(403).json({ error: 'You do not have permission to view this list' });
       }
 
+      // Always fetch all item fields for consistency
       let itemsQuery;
-      if (isOwner) {
-        // Owner sees everything *except* reservation status
-        itemsQuery = `SELECT * FROM public.list_items WHERE list_id = $1 AND deleted_at IS NULL ORDER BY sort_order ASC, created_at ASC`;
-      } else {
-        // Non-owners (including group members) see reservation status
+      let items;
+      
+      if (list.list_type === 'gifts') {
+        // For gift lists, always include reservation status (will be null for non-reserved items)
         itemsQuery = `
           SELECT 
             i.*,
             gr.reserved_by,
             gr.is_purchased,
-            u.username as reserved_by_username
+            u.username as reserved_by_username,
+            u.full_name as reserved_by_full_name
           FROM public.list_items i
           LEFT JOIN public.gift_reservations gr ON i.id = gr.item_id
           LEFT JOIN public.users u ON gr.reserved_by = u.id
           WHERE i.list_id = $1 AND i.deleted_at IS NULL 
           ORDER BY i.sort_order ASC, i.created_at ASC
         `;
+        
+        const itemsResult = await db.query(itemsQuery, [id]);
+        
+        // Transform the data to have consistent structure with nested giftStatus
+        items = itemsResult.rows.map(item => {
+          const { reserved_by, is_purchased, reserved_by_username, reserved_by_full_name, ...itemData } = item;
+          
+          // Build the transformed item with gift status as a nested object
+          const transformedItem = {
+            ...itemData
+          };
+          
+          // Add gift status for non-owners or when there's reservation data
+          if (!isOwner || reserved_by) {
+            transformedItem.giftStatus = {
+              is_reserved: !!reserved_by,
+              is_purchased: !!is_purchased,
+              reserved_by: reserved_by ? {
+                id: reserved_by,
+                username: reserved_by_username,
+                full_name: reserved_by_full_name,
+                is_me: reserved_by === requestor_id
+              } : null
+            };
+          }
+          
+          // For owners, don't show reservation details unless it's their own reservation
+          if (isOwner && reserved_by && reserved_by !== requestor_id) {
+            // Hide other people's reservations from the owner
+            delete transformedItem.giftStatus;
+          }
+          
+          return transformedItem;
+        });
+      } else {
+        // For non-gift lists, use simple query
+        itemsQuery = `
+          SELECT * FROM public.list_items 
+          WHERE list_id = $1 AND deleted_at IS NULL 
+          ORDER BY sort_order ASC, created_at ASC
+        `;
+        const itemsResult = await db.query(itemsQuery, [id]);
+        items = itemsResult.rows;
       }
 
-      const itemsResult = await db.query(itemsQuery, [id]);
-      res.json({ list, items: itemsResult.rows });
+      res.json({ list, items });
     } catch (err) {
       console.error('[PublicListsController] getListById error:', err);
       res.status(500).json({ error: 'Internal server error' });

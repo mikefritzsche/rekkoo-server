@@ -1426,10 +1426,42 @@ function syncControllerFactory(socketService) {
                   AND luo.role != 'inherit'
               )
             )
-        ) l ON cl.table_name = 'lists' AND cl.operation != 'delete' AND l.id = cl.record_id::uuid
+        ) l ON cl.table_name = 'lists' AND cl.operation != 'delete' AND l.id = CASE 
+          WHEN cl.record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' 
+          THEN cl.record_id::uuid 
+          ELSE NULL 
+        END
         LEFT JOIN (
-          SELECT li.id, row_to_json(li.*) as json_build_object 
+          SELECT li.id, 
+            CASE 
+              WHEN gd.id IS NOT NULL THEN
+                json_build_object(
+                  'id', li.id,
+                  'list_id', li.list_id,
+                  'title', li.title,
+                  'description', li.description,
+                  'status', li.status,
+                  'priority', li.priority,
+                  'image_url', li.image_url,
+                  'link', li.link,
+                  'custom_fields', li.custom_fields,
+                  'owner_id', li.owner_id,
+                  'created_at', li.created_at,
+                  'updated_at', li.updated_at,
+                  'deleted_at', li.deleted_at,
+                  'price', li.price,
+                  'api_metadata', li.api_metadata,
+                  'gift_detail_id', li.gift_detail_id,
+                  'quantity', gd.quantity,
+                  'where_to_buy', gd.where_to_buy,
+                  'amazon_url', gd.amazon_url,
+                  'web_link', gd.web_link,
+                  'rating', gd.rating
+                )
+              ELSE row_to_json(li.*)
+            END as json_build_object
           FROM public.list_items li
+          LEFT JOIN public.gift_details gd ON li.gift_detail_id = gd.id
           WHERE li.deleted_at IS NULL 
             AND (
               li.owner_id = $1 
@@ -1451,14 +1483,38 @@ function syncControllerFactory(socketService) {
                   AND luo.role != 'inherit'
               )
             )
-        ) li ON cl.table_name = 'list_items' AND cl.operation != 'delete' AND li.id = cl.record_id::uuid
-        LEFT JOIN (SELECT id, row_to_json(favorites.*) as json_build_object FROM public.favorites WHERE user_id = $1 AND deleted_at IS NULL) f ON cl.table_name = 'favorites' AND cl.operation != 'delete' AND f.id = cl.record_id::uuid
+        ) li ON cl.table_name = 'list_items' AND cl.operation != 'delete' AND li.id = CASE 
+          WHEN cl.record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' 
+          THEN cl.record_id::uuid 
+          ELSE NULL 
+        END
+        LEFT JOIN (SELECT id, row_to_json(favorites.*) as json_build_object FROM public.favorites WHERE user_id = $1 AND deleted_at IS NULL) f ON cl.table_name = 'favorites' AND cl.operation != 'delete' AND f.id = CASE 
+          WHEN cl.record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' 
+          THEN cl.record_id::uuid 
+          ELSE NULL 
+        END
         LEFT JOIN (SELECT user_id, row_to_json(user_settings.*) as json_build_object FROM public.user_settings WHERE user_id = $1) us ON cl.table_name = 'user_settings' AND cl.operation != 'delete' AND us.user_id = $1
-        LEFT JOIN (SELECT id, row_to_json(users.*) as json_build_object FROM public.users) u ON cl.table_name = 'users' AND cl.operation != 'delete' AND u.id = cl.record_id::uuid
-        LEFT JOIN (SELECT id, row_to_json(followers.*) as json_build_object FROM public.followers WHERE (follower_id = $1 OR followed_id = $1) AND deleted_at IS NULL) flw ON cl.table_name = 'followers' AND cl.operation != 'delete' AND flw.id = cl.record_id::uuid
-        LEFT JOIN (SELECT id, row_to_json(notifications.*) as json_build_object FROM public.notifications WHERE user_id = $1 AND deleted_at IS NULL) n ON cl.table_name = 'notifications' AND cl.operation != 'delete' AND n.id = cl.record_id::uuid
-        LEFT JOIN (SELECT id, row_to_json(list_categories.*) as json_build_object FROM public.list_categories WHERE deleted_at IS NULL) lc ON cl.table_name = 'list_categories' AND cl.operation != 'delete' AND lc.id = cl.record_id::uuid
-        LEFT JOIN (SELECT item_id, row_to_json(item_tags.*) as json_build_object FROM public.item_tags WHERE deleted_at IS NULL) it ON cl.table_name = 'item_tags' AND cl.operation != 'delete' AND it.item_id = cl.record_id::uuid
+        LEFT JOIN (SELECT id, row_to_json(users.*) as json_build_object FROM public.users) u ON cl.table_name = 'users' AND cl.operation != 'delete' AND u.id = CASE 
+          WHEN cl.record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' 
+          THEN cl.record_id::uuid 
+          ELSE NULL 
+        END
+        LEFT JOIN (SELECT id, row_to_json(followers.*) as json_build_object FROM public.followers WHERE (follower_id = $1 OR followed_id = $1) AND deleted_at IS NULL) flw ON cl.table_name = 'followers' AND cl.operation != 'delete' AND flw.id = CASE 
+          WHEN cl.record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' 
+          THEN cl.record_id::uuid 
+          ELSE NULL 
+        END
+        LEFT JOIN (SELECT id, row_to_json(notifications.*) as json_build_object FROM public.notifications WHERE user_id = $1 AND deleted_at IS NULL) n ON cl.table_name = 'notifications' AND cl.operation != 'delete' AND n.id = CASE 
+          WHEN cl.record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' 
+          THEN cl.record_id::uuid 
+          ELSE NULL 
+        END
+        LEFT JOIN (SELECT id, row_to_json(list_categories.*) as json_build_object FROM public.list_categories WHERE deleted_at IS NULL) lc ON cl.table_name = 'list_categories' AND cl.operation != 'delete' AND lc.id = CASE 
+          WHEN cl.record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' 
+          THEN cl.record_id::uuid 
+          ELSE NULL 
+        END
+        LEFT JOIN (SELECT item_id, row_to_json(item_tags.*) as json_build_object FROM public.item_tags WHERE deleted_at IS NULL) it ON cl.table_name = 'item_tags' AND cl.operation != 'delete' AND it.item_id::text = cl.record_id
         ORDER BY cl.created_at ASC
         LIMIT 1000;
       `;
