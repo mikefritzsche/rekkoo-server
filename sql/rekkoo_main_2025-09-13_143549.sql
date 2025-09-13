@@ -2393,6 +2393,13 @@ CREATE INDEX idx_change_log_table_record ON public.change_log USING btree (table
 
 
 --
+-- Name: idx_change_log_user_created; Type: INDEX; Schema: public; Owner: admin
+--
+
+CREATE INDEX idx_change_log_user_created ON public.change_log USING btree (user_id, created_at);
+
+
+--
 -- Name: idx_change_log_user_timestamp; Type: INDEX; Schema: public; Owner: admin
 --
 
