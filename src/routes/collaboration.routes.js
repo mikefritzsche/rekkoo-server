@@ -24,6 +24,9 @@ function createCollaborationRouter(collaborationController) {
 
   // Group invitation routes
   router.post('/groups/:groupId/invitations', authenticateJWT, collaborationController.inviteUserToGroup);
+  router.get('/groups/invitations/pending', authenticateJWT, collaborationController.getPendingGroupInvitations);
+  router.post('/groups/invitations/:invitationId/accept', authenticateJWT, collaborationController.acceptGroupInvitation);
+  router.post('/groups/invitations/:invitationId/decline', authenticateJWT, collaborationController.declineGroupInvitation);
 
   // List sharing routes
   router.post('/lists/batch-shares', authenticateJWT, collaborationController.getBatchListShares);

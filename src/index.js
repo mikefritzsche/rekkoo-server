@@ -45,11 +45,13 @@ const createRecipeRouter = require('./routes/recipe.routes');
 const createPublicListsRouter = require('./routes/public-lists.routes');
 const createCollaborationRouter = require('./routes/collaboration.routes.js');
 const createListTypesRouter = require('./routes/list-types.routes');
+const createConnectionsRouter = require('./routes/connections.routes');
 
 // Import controllers that need initialization
 const favoritesControllerFactory = require('./controllers/FavoritesController');
 const userControllerFactory = require('./controllers/UserController');
 const collaborationControllerFactory = require('./controllers/CollaborationController');
+const connectionsControllerFactory = require('./controllers/ConnectionsController');
 const booksControllerFactory = require('./controllers/BooksController');
 const tmdbControllerFactory = require('./controllers/TMDBController');
 const spotifyControllerFactory = require('./controllers/SpotifyController');
@@ -88,6 +90,7 @@ const socketService = new SocketService(server);
 const favoritesController = favoritesControllerFactory(socketService);
 const userController = userControllerFactory(socketService);
 const collaborationController = collaborationControllerFactory(socketService);
+const connectionsController = connectionsControllerFactory(socketService);
 const booksController = booksControllerFactory(socketService);
 const tmdbController = tmdbControllerFactory(socketService);
 const spotifyController = spotifyControllerFactory(socketService);
@@ -251,6 +254,7 @@ app.use('/v1.0/list-types', createListTypesRouter(listTypesController));
 app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
 app.use('/v1.0/collaboration', createCollaborationRouter(collaborationController));
+app.use('/v1.0/connections', createConnectionsRouter(connectionsController));
 app.use('/v1.0/gifts', giftRoutes);
 
 // --- 7. Basic/Utility Routes ---

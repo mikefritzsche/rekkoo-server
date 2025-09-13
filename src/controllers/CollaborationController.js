@@ -246,25 +246,30 @@ const CollaborationController = {
     }
   },
 
-  // Search users for collaboration
+  // Search connected users for collaboration
   searchUsers: async (req, res) => {
     const { q: query, limit = 10 } = req.query;
-    
+    const userId = req.user.id;
+
     if (!query || query.length < 2) {
       return res.json([]);
     }
 
     try {
       const searchQuery = `%${query}%`;
+      // Only return connected users
       const { rows } = await db.query(
-        `SELECT id, username, email, full_name
-         FROM users 
-         WHERE (username ILIKE $1 OR email ILIKE $1 OR full_name ILIKE $1)
-           AND deleted_at IS NULL
-         LIMIT $2`,
-        [searchQuery, parseInt(limit)]
+        `SELECT u.id, u.username, u.email, u.full_name
+         FROM users u
+         INNER JOIN connections c ON c.connection_id = u.id
+         WHERE c.user_id = $1
+           AND c.status = 'accepted'
+           AND (u.username ILIKE $2 OR u.email ILIKE $2 OR u.full_name ILIKE $2)
+           AND u.deleted_at IS NULL
+         LIMIT $3`,
+        [userId, searchQuery, parseInt(limit)]
       );
-      
+
       return res.json(rows);
     } catch (error) {
       console.error('Error searching users:', error);
@@ -875,7 +880,7 @@ const CollaborationController = {
     }
   },
 
-  // Add a member to a group
+  // Add a member to a group (requires connection)
   addMemberToGroup: async (req, res) => {
     const { groupId } = req.params;
     const { userId, role } = req.body;
@@ -886,6 +891,29 @@ const CollaborationController = {
       const groupResult = await db.query('SELECT owner_id FROM collaboration_groups WHERE id = $1', [groupId]);
       if (groupResult.rows.length === 0 || groupResult.rows[0].owner_id !== owner_id) {
         return res.status(403).json({ error: 'Only the group owner can add members' });
+      }
+
+      // Check if the owner is connected to the user they're trying to add
+      const connectionResult = await db.query(
+        `SELECT status FROM connections
+         WHERE user_id = $1 AND connection_id = $2 AND status = 'accepted'`,
+        [owner_id, userId]
+      );
+
+      if (connectionResult.rows.length === 0) {
+        return res.status(403).json({
+          error: 'You can only add connected users to groups. Please send a connection request first.'
+        });
+      }
+
+      // Check if user is already a member
+      const existingMemberResult = await db.query(
+        'SELECT 1 FROM collaboration_group_members WHERE group_id = $1 AND user_id = $2',
+        [groupId, userId]
+      );
+
+      if (existingMemberResult.rows.length > 0) {
+        return res.status(400).json({ error: 'User is already a member of this group' });
       }
 
       const { rows } = await db.query(
@@ -1018,24 +1046,208 @@ const CollaborationController = {
     }
   },
 
-  // Invite a user to a group
+  // Invite a connected user to a group
   inviteUserToGroup: async (req, res) => {
     const { groupId } = req.params;
-    const { email } = req.body;
+    const { userId, role = 'member' } = req.body;
     const inviter_id = req.user.id;
 
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' });
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
     }
 
     try {
-        // Use invitationService to create and email the invite
-        const invitationService = require('../services/invitationService');
-        const metadata = { invite_type: 'group', group_id: groupId };
-        const invite = await invitationService.createInvitation(inviter_id, email, metadata);
-        res.status(201).json(invite);
+      // Check if the current user is the owner of the group
+      const groupResult = await db.query('SELECT owner_id, name FROM collaboration_groups WHERE id = $1', [groupId]);
+      if (groupResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Group not found' });
+      }
+
+      if (groupResult.rows[0].owner_id !== inviter_id) {
+        return res.status(403).json({ error: 'Only the group owner can invite members' });
+      }
+
+      // Check if the inviter is connected to the user they're trying to invite
+      const connectionResult = await db.query(
+        `SELECT status FROM connections
+         WHERE user_id = $1 AND connection_id = $2 AND status = 'accepted'`,
+        [inviter_id, userId]
+      );
+
+      if (connectionResult.rows.length === 0) {
+        return res.status(403).json({
+          error: 'You can only invite connected users to groups. Please send a connection request first.'
+        });
+      }
+
+      // Check if user is already a member
+      const existingMemberResult = await db.query(
+        'SELECT 1 FROM collaboration_group_members WHERE group_id = $1 AND user_id = $2',
+        [groupId, userId]
+      );
+
+      if (existingMemberResult.rows.length > 0) {
+        return res.status(400).json({ error: 'User is already a member of this group' });
+      }
+
+      // Check for existing pending invitation
+      const existingInviteResult = await db.query(
+        `SELECT 1 FROM group_invitations
+         WHERE group_id = $1 AND invitee_id = $2 AND status = 'pending'`,
+        [groupId, userId]
+      );
+
+      if (existingInviteResult.rows.length > 0) {
+        return res.status(400).json({ error: 'An invitation has already been sent to this user' });
+      }
+
+      // Create the group invitation
+      const { rows } = await db.query(
+        `INSERT INTO group_invitations
+         (group_id, inviter_id, invitee_id, role, status)
+         VALUES ($1, $2, $3, $4, 'pending')
+         RETURNING *`,
+        [groupId, inviter_id, userId, role]
+      );
+
+      // Notify the invitee via socket
+      if (socketService) {
+        socketService.notifyUser(userId, 'group:invitation', {
+          invitation: rows[0],
+          group: {
+            id: groupId,
+            name: groupResult.rows[0].name
+          },
+          inviter: {
+            id: inviter_id,
+            username: req.user.username,
+            full_name: req.user.full_name
+          }
+        });
+      }
+
+      res.status(201).json(rows[0]);
     } catch (error) {
       console.error('Error inviting user to group:', error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // Accept a group invitation
+  acceptGroupInvitation: async (req, res) => {
+    const { invitationId } = req.params;
+    const userId = req.user.id;
+
+    try {
+      // Get the invitation
+      const invitationResult = await db.query(
+        `SELECT * FROM group_invitations
+         WHERE id = $1 AND invitee_id = $2 AND status = 'pending'`,
+        [invitationId, userId]
+      );
+
+      if (invitationResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Invitation not found or already processed' });
+      }
+
+      const invitation = invitationResult.rows[0];
+
+      // Begin transaction
+      await db.query('BEGIN');
+
+      // Update invitation status
+      await db.query(
+        `UPDATE group_invitations
+         SET status = 'accepted', responded_at = NOW()
+         WHERE id = $1`,
+        [invitationId]
+      );
+
+      // Add user to the group
+      await db.query(
+        `INSERT INTO collaboration_group_members (group_id, user_id, role)
+         VALUES ($1, $2, $3)`,
+        [invitation.group_id, userId, invitation.role]
+      );
+
+      await db.query('COMMIT');
+
+      // Notify the inviter
+      if (socketService) {
+        socketService.notifyUser(invitation.inviter_id, 'group:invitation-accepted', {
+          groupId: invitation.group_id,
+          acceptedBy: {
+            id: userId,
+            username: req.user.username
+          }
+        });
+      }
+
+      res.json({ message: 'Group invitation accepted' });
+    } catch (error) {
+      await db.query('ROLLBACK');
+      console.error('Error accepting group invitation:', error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // Decline a group invitation
+  declineGroupInvitation: async (req, res) => {
+    const { invitationId } = req.params;
+    const userId = req.user.id;
+
+    try {
+      const result = await db.query(
+        `UPDATE group_invitations
+         SET status = 'declined', responded_at = NOW()
+         WHERE id = $1 AND invitee_id = $2 AND status = 'pending'
+         RETURNING inviter_id, group_id`,
+        [invitationId, userId]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Invitation not found or already processed' });
+      }
+
+      // Notify the inviter
+      if (socketService) {
+        socketService.notifyUser(result.rows[0].inviter_id, 'group:invitation-declined', {
+          groupId: result.rows[0].group_id,
+          declinedBy: {
+            id: userId,
+            username: req.user.username
+          }
+        });
+      }
+
+      res.json({ message: 'Group invitation declined' });
+    } catch (error) {
+      console.error('Error declining group invitation:', error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // Get pending group invitations for the current user
+  getPendingGroupInvitations: async (req, res) => {
+    const userId = req.user.id;
+
+    try {
+      const { rows } = await db.query(
+        `SELECT gi.*, cg.name as group_name, cg.description as group_description,
+                u.username as inviter_username, u.full_name as inviter_name
+         FROM group_invitations gi
+         JOIN collaboration_groups cg ON cg.id = gi.group_id
+         JOIN users u ON u.id = gi.inviter_id
+         WHERE gi.invitee_id = $1
+           AND gi.status = 'pending'
+           AND gi.expires_at > NOW()
+         ORDER BY gi.created_at DESC`,
+        [userId]
+      );
+
+      res.json(rows);
+    } catch (error) {
+      console.error('Error fetching pending group invitations:', error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
   },
