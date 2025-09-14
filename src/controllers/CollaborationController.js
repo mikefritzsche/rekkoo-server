@@ -1067,17 +1067,38 @@ const CollaborationController = {
         return res.status(403).json({ error: 'Only the group owner can invite members' });
       }
 
-      // Check if the inviter is connected to the user they're trying to invite
+      // Enhanced connection check - allows both mutual connections and following
       const connectionResult = await db.query(
-        `SELECT status FROM connections
-         WHERE user_id = $1 AND connection_id = $2 AND status = 'accepted'`,
+        `SELECT status, connection_type
+         FROM connections
+         WHERE user_id = $1
+           AND connection_id = $2
+           AND (
+             (status = 'accepted' AND connection_type = 'mutual')
+             OR (status = 'following' AND connection_type = 'following')
+           )`,
         [inviter_id, userId]
       );
 
       if (connectionResult.rows.length === 0) {
-        return res.status(403).json({
-          error: 'You can only invite connected users to groups. Please send a connection request first.'
-        });
+        // Check if the invitee is following the inviter (reverse check)
+        const reverseConnectionResult = await db.query(
+          `SELECT status, connection_type
+           FROM connections
+           WHERE user_id = $1
+             AND connection_id = $2
+             AND connection_type = 'following'
+             AND status = 'following'`,
+          [userId, inviter_id]
+        );
+
+        if (reverseConnectionResult.rows.length === 0) {
+          return res.status(403).json({
+            error: 'You can only invite connected users to groups. Please send a connection request or follow them first.',
+            requiresConnection: true,
+            userId: userId
+          });
+        }
       }
 
       // Check if user is already a member
@@ -1092,22 +1113,42 @@ const CollaborationController = {
 
       // Check for existing pending invitation
       const existingInviteResult = await db.query(
-        `SELECT 1 FROM group_invitations
+        `SELECT id, expires_at FROM group_invitations
          WHERE group_id = $1 AND invitee_id = $2 AND status = 'pending'`,
         [groupId, userId]
       );
 
       if (existingInviteResult.rows.length > 0) {
-        return res.status(400).json({ error: 'An invitation has already been sent to this user' });
+        const existingInvite = existingInviteResult.rows[0];
+        const expiresAt = new Date(existingInvite.expires_at);
+        const now = new Date();
+
+        if (expiresAt > now) {
+          const daysLeft = Math.ceil((expiresAt - now) / (1000 * 60 * 60 * 24));
+          return res.status(400).json({
+            error: 'An invitation has already been sent to this user',
+            existingInvitationId: existingInvite.id,
+            expiresInDays: daysLeft
+          });
+        }
+
+        // If expired, update it to expired status
+        await db.query(
+          `UPDATE group_invitations SET status = 'expired' WHERE id = $1`,
+          [existingInvite.id]
+        );
       }
 
-      // Create the group invitation
+      // Generate unique invitation code
+      const invitationCode = `GRP-${Date.now()}-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
+
+      // Create the group invitation with invitation_code
       const { rows } = await db.query(
         `INSERT INTO group_invitations
-         (group_id, inviter_id, invitee_id, role, status)
-         VALUES ($1, $2, $3, $4, 'pending')
+         (group_id, inviter_id, invitee_id, role, status, invitation_code, message)
+         VALUES ($1, $2, $3, $4, 'pending', $5, $6)
          RETURNING *`,
-        [groupId, inviter_id, userId, role]
+        [groupId, inviter_id, userId, role, invitationCode, req.body.message || null]
       );
 
       // Notify the invitee via socket

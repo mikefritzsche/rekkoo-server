@@ -46,6 +46,7 @@ const createPublicListsRouter = require('./routes/public-lists.routes');
 const createCollaborationRouter = require('./routes/collaboration.routes.js');
 const createListTypesRouter = require('./routes/list-types.routes');
 const createConnectionsRouter = require('./routes/connections.routes');
+const createListSharingRouter = require('./routes/list-sharing.routes');
 
 // Import controllers that need initialization
 const favoritesControllerFactory = require('./controllers/FavoritesController');
@@ -63,6 +64,7 @@ const searchControllerFactory = require('./controllers/SearchController');
 const recipeControllerFactory = require('./controllers/RecipeController');
 const publicListsControllerFactory = require('./controllers/PublicListsController');
 const listTypesControllerFactory = require('./controllers/ListTypesController');
+const listSharingController = require('./controllers/ListSharingController');
 
 // Import standard routes
 const claudeRoutes = require('./routes/claude');
@@ -245,7 +247,10 @@ app.use('/v1.0/search', searchRouter);
 const recipeRouter = createRecipeRouter(recipeController);
 app.use('/v1.0/recipe', recipeRouter);
 
-// Public lists route
+// List sharing routes (must come before public lists route due to specific paths)
+app.use('/v1.0/lists', createListSharingRouter(listSharingController));
+
+// Public lists route (has catch-all /:id route so must come after specific routes)
 const publicListsRouter = createPublicListsRouter(publicListsController);
 app.use('/v1.0/lists', publicListsRouter);
 
