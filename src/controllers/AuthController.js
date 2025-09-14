@@ -92,6 +92,28 @@ const register = async (req, res) => {
         [userId]
       );
 
+      // Create user settings with private mode and connection code
+      const connectionCodeResult = await client.query(
+        `SELECT public.generate_user_connection_code() as code`
+      );
+
+      await client.query(
+        `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
+         VALUES ($1, $2, NOW(), NOW())
+         ON CONFLICT (user_id) DO NOTHING`,
+        [userId, JSON.stringify({
+          privacy_mode: 'private',
+          show_email_to_connections: false,
+          allow_connection_requests: true,
+          allow_group_invites_from_connections: true,
+          searchable_by_username: false,
+          searchable_by_email: false,
+          searchable_by_name: false,
+          show_mutual_connections: false,
+          connection_code: connectionCodeResult.rows[0].code
+        })]
+      );
+
       return { userId, verificationToken, username, email };
     });
 
@@ -890,6 +912,28 @@ const oauthCallback = async (req, res) => {
                VALUES ($1, (SELECT id FROM roles WHERE name = 'user'))`,
               [user.id]
             );
+
+            // Create user settings with private mode and connection code
+            const connectionCodeResult = await client.query(
+              `SELECT public.generate_user_connection_code() as code`
+            );
+
+            await client.query(
+              `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
+               VALUES ($1, $2, NOW(), NOW())
+               ON CONFLICT (user_id) DO NOTHING`,
+              [user.id, JSON.stringify({
+                privacy_mode: 'private',
+                show_email_to_connections: false,
+                allow_connection_requests: true,
+                allow_group_invites_from_connections: true,
+                searchable_by_username: false,
+                searchable_by_email: false,
+                searchable_by_name: false,
+                show_mutual_connections: false,
+                connection_code: connectionCodeResult.rows[0].code
+              })]
+            );
           }
         } else {
           // No verified email, cannot link or create securely without more info/steps
@@ -1239,6 +1283,28 @@ const mobileOauth = async (req, res) => {
               `INSERT INTO user_roles (user_id, role_id)
                VALUES ($1, (SELECT id FROM roles WHERE name = 'user'))`,
               [user.id]
+            );
+
+            // Create user settings with private mode and connection code
+            const connectionCodeResult = await client.query(
+              `SELECT public.generate_user_connection_code() as code`
+            );
+
+            await client.query(
+              `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
+               VALUES ($1, $2, NOW(), NOW())
+               ON CONFLICT (user_id) DO NOTHING`,
+              [user.id, JSON.stringify({
+                privacy_mode: 'private',
+                show_email_to_connections: false,
+                allow_connection_requests: true,
+                allow_group_invites_from_connections: true,
+                searchable_by_username: false,
+                searchable_by_email: false,
+                searchable_by_name: false,
+                show_mutual_connections: false,
+                connection_code: connectionCodeResult.rows[0].code
+              })]
             );
           }
         } else {
@@ -1640,6 +1706,28 @@ const enhancedOAuthCallback = async (req, res) => {
             `INSERT INTO user_roles (user_id, role_id)
              VALUES ($1, (SELECT id FROM roles WHERE name = 'user'))`,
             [user.id]
+          );
+
+          // Create user settings with private mode and connection code
+          const connectionCodeResult = await client.query(
+            `SELECT public.generate_user_connection_code() as code`
+          );
+
+          await client.query(
+            `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
+             VALUES ($1, $2, NOW(), NOW())
+             ON CONFLICT (user_id) DO NOTHING`,
+            [user.id, JSON.stringify({
+              privacy_mode: 'private',
+              show_email_to_connections: false,
+              allow_connection_requests: true,
+              allow_group_invites_from_connections: true,
+              searchable_by_username: false,
+              searchable_by_email: false,
+              searchable_by_name: false,
+              show_mutual_connections: false,
+              connection_code: connectionCodeResult.rows[0].code
+            })]
           );
         } else {
           // No email provided and no existing user found

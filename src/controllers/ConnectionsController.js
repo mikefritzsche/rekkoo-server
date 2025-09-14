@@ -146,12 +146,24 @@ function connectionsControllerFactory(socketService = null) {
       try {
         const result = await db.query(
           `SELECT ci.*,
-                  u.username, u.full_name, u.profile_image_url,
-                  ups.show_email_to_connections,
-                  CASE WHEN ups.show_email_to_connections = true THEN u.email ELSE NULL END as email
+                  u.username,
+                  -- Only show full_name if sender's privacy mode is not 'private'
+                  CASE
+                    WHEN us.privacy_settings->>'privacy_mode' = 'private' THEN NULL
+                    ELSE u.full_name
+                  END as full_name,
+                  -- Only show profile image if privacy mode is not 'private'
+                  CASE
+                    WHEN us.privacy_settings->>'privacy_mode' = 'private' THEN NULL
+                    ELSE u.profile_image_url
+                  END as profile_image_url,
+                  us.privacy_settings->>'privacy_mode' as privacy_mode,
+                  (us.privacy_settings->>'show_email_to_connections')::boolean as show_email_to_connections,
+                  -- Never show email to non-connections
+                  NULL as email
            FROM connection_invitations ci
            JOIN users u ON u.id = ci.sender_id
-           LEFT JOIN user_privacy_settings ups ON ups.user_id = u.id
+           LEFT JOIN user_settings us ON us.user_id = u.id
            WHERE ci.recipient_id = $1
              AND ci.status = 'pending'
              AND ci.expires_at > NOW()
@@ -175,9 +187,21 @@ function connectionsControllerFactory(socketService = null) {
       try {
         const result = await db.query(
           `SELECT ci.*,
-                  u.username, u.full_name, u.profile_image_url
+                  u.username,
+                  -- Only show full_name if recipient's privacy mode is not 'private'
+                  CASE
+                    WHEN us.privacy_settings->>'privacy_mode' = 'private' THEN NULL
+                    ELSE u.full_name
+                  END as full_name,
+                  -- Only show profile image if privacy mode is not 'private'
+                  CASE
+                    WHEN us.privacy_settings->>'privacy_mode' = 'private' THEN NULL
+                    ELSE u.profile_image_url
+                  END as profile_image_url,
+                  us.privacy_settings->>'privacy_mode' as privacy_mode
            FROM connection_invitations ci
            JOIN users u ON u.id = ci.recipient_id
+           LEFT JOIN user_settings us ON us.user_id = u.id
            WHERE ci.sender_id = $1
              AND ci.status = 'pending'
              AND ci.expires_at > NOW()
@@ -371,12 +395,12 @@ function connectionsControllerFactory(socketService = null) {
           const followersResult = await db.query(
             `SELECT c.*,
                     u.username, u.full_name, u.profile_image_url,
-                    ups.show_email_to_connections,
-                    CASE WHEN ups.show_email_to_connections = true THEN u.email ELSE NULL END as email,
+                    (us.privacy_settings->>'show_email_to_connections')::boolean as show_email_to_connections,
+                    CASE WHEN (us.privacy_settings->>'show_email_to_connections')::boolean = true THEN u.email ELSE NULL END as email,
                     c.connection_type, c.visibility_level, c.auto_accepted
              FROM connections c
              JOIN users u ON u.id = c.user_id
-             LEFT JOIN user_privacy_settings ups ON ups.user_id = u.id
+             LEFT JOIN user_settings us ON us.user_id = u.id
              WHERE c.connection_id = $1 AND c.status = 'following' AND c.connection_type = 'following'
              ORDER BY c.accepted_at DESC`,
             [userId]
@@ -387,12 +411,12 @@ function connectionsControllerFactory(socketService = null) {
         const result = await db.query(
           `SELECT c.*,
                   u.username, u.full_name, u.profile_image_url,
-                  ups.show_email_to_connections,
-                  CASE WHEN ups.show_email_to_connections = true THEN u.email ELSE NULL END as email,
+                  (us.privacy_settings->>'show_email_to_connections')::boolean as show_email_to_connections,
+                  CASE WHEN (us.privacy_settings->>'show_email_to_connections')::boolean = true THEN u.email ELSE NULL END as email,
                   c.connection_type, c.visibility_level, c.auto_accepted
            FROM connections c
            JOIN users u ON u.id = c.connection_id
-           LEFT JOIN user_privacy_settings ups ON ups.user_id = u.id
+           LEFT JOIN user_settings us ON us.user_id = u.id
            WHERE ${whereClause}
            ORDER BY c.accepted_at DESC`,
           [userId]
@@ -666,22 +690,39 @@ function connectionsControllerFactory(socketService = null) {
 
       try {
         const result = await db.query(
-          `SELECT * FROM user_privacy_settings WHERE user_id = $1`,
+          `SELECT privacy_settings FROM user_settings WHERE user_id = $1`,
           [userId]
         );
 
         if (result.rows.length === 0) {
-          // Create default settings if they don't exist
+          // Generate connection code for private mode
+          const codeResult = await db.query(`SELECT public.generate_user_connection_code() as code`);
+
+          // Create default settings if they don't exist (default to private mode)
+          const defaultSettings = {
+            privacy_mode: 'private',
+            show_email_to_connections: false,
+            allow_connection_requests: true,
+            allow_group_invites_from_connections: true,
+            searchable_by_username: false,
+            searchable_by_email: false,
+            searchable_by_name: false,
+            show_mutual_connections: false,
+            connection_code: codeResult.rows[0].code
+          };
+
           const newSettings = await db.query(
-            `INSERT INTO user_privacy_settings (user_id)
-             VALUES ($1)
-             RETURNING *`,
-            [userId]
+            `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
+             VALUES ($1, $2, NOW(), NOW())
+             ON CONFLICT (user_id) DO UPDATE
+             SET privacy_settings = $2, updated_at = NOW()
+             RETURNING privacy_settings`,
+            [userId, JSON.stringify(defaultSettings)]
           );
-          return res.json(newSettings.rows[0]);
+          return res.json(newSettings.rows[0].privacy_settings);
         }
 
-        res.json(result.rows[0]);
+        res.json(result.rows[0].privacy_settings || {});
       } catch (error) {
         console.error('Error fetching privacy settings:', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -701,7 +742,15 @@ function connectionsControllerFactory(socketService = null) {
       }
 
       try {
-        // Build dynamic update query
+        // Get current settings
+        const currentResult = await db.query(
+          `SELECT privacy_settings FROM user_settings WHERE user_id = $1`,
+          [userId]
+        );
+
+        const currentSettings = currentResult.rows[0]?.privacy_settings || {};
+
+        // Build updated settings object
         const allowedFields = [
           'privacy_mode',
           'show_email_to_connections',
@@ -713,33 +762,41 @@ function connectionsControllerFactory(socketService = null) {
           'show_mutual_connections'
         ];
 
-        const updateFields = [];
-        const values = [];
-        let paramCount = 1;
+        const updatedSettings = { ...currentSettings };
 
         for (const field of allowedFields) {
           if (field in updates) {
-            updateFields.push(`${field} = $${paramCount}`);
-            values.push(updates[field]);
-            paramCount++;
+            updatedSettings[field] = updates[field];
           }
         }
 
-        if (updateFields.length === 0) {
-          return res.status(400).json({ error: 'No valid fields to update' });
+        // Generate connection code if switching to private mode
+        if (updatedSettings.privacy_mode === 'private' && !updatedSettings.connection_code) {
+          const codeResult = await db.query(`SELECT public.generate_user_connection_code() as code`);
+          updatedSettings.connection_code = codeResult.rows[0].code;
         }
 
-        values.push(userId);
+        // Update searchable settings based on privacy mode
+        if (updatedSettings.privacy_mode === 'private') {
+          updatedSettings.searchable_by_username = false;
+          updatedSettings.searchable_by_email = false;
+          updatedSettings.searchable_by_name = false;
+        } else if (updatedSettings.privacy_mode === 'public') {
+          updatedSettings.searchable_by_username = true;
+          updatedSettings.searchable_by_name = true;
+        }
 
+        // Update the database
         const result = await db.query(
-          `UPDATE user_privacy_settings
-           SET ${updateFields.join(', ')}, updated_at = NOW()
-           WHERE user_id = $${paramCount}
-           RETURNING *`,
-          values
+          `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
+           VALUES ($1, $2, NOW(), NOW())
+           ON CONFLICT (user_id) DO UPDATE
+           SET privacy_settings = $2, updated_at = NOW()
+           RETURNING privacy_settings`,
+          [userId, JSON.stringify(updatedSettings)]
         );
 
-        res.json(result.rows[0]);
+        res.json(result.rows[0].privacy_settings);
       } catch (error) {
         console.error('Error updating privacy settings:', error);
         res.status(500).json({ error: 'Internal server error' });
@@ -823,8 +880,18 @@ function connectionsControllerFactory(socketService = null) {
 
         if (searchBy === 'username') {
           searchQuery = `
-            SELECT u.id, u.username, u.full_name, u.profile_image_url,
-                   ups.privacy_mode,
+            SELECT u.id, u.username,
+                   -- Only show full_name based on privacy settings and connection status
+                   CASE
+                     WHEN us.privacy_settings->>'privacy_mode' = 'private' AND c.status != 'accepted' THEN NULL
+                     ELSE u.full_name
+                   END as full_name,
+                   -- Only show profile image based on privacy settings
+                   CASE
+                     WHEN us.privacy_settings->>'privacy_mode' = 'private' AND c.status != 'accepted' THEN NULL
+                     ELSE u.profile_image_url
+                   END as profile_image_url,
+                   us.privacy_settings->>'privacy_mode' as privacy_mode,
                    CASE
                      WHEN c.status = 'accepted' THEN true
                      ELSE false
@@ -843,7 +910,7 @@ function connectionsControllerFactory(socketService = null) {
                       )
                    ) as mutual_connections_count
             FROM users u
-            LEFT JOIN user_privacy_settings ups ON ups.user_id = u.id
+            LEFT JOIN user_settings us ON us.user_id = u.id
             LEFT JOIN connections c ON c.user_id = $2
               AND c.connection_id = u.id
               AND c.status = 'accepted'
@@ -852,23 +919,33 @@ function connectionsControllerFactory(socketService = null) {
               AND ci.status = 'pending'
             WHERE u.username ILIKE $1
               AND u.id != $2
-              AND (ups.searchable_by_username = true OR ups.privacy_mode = 'public')
+              AND ((us.privacy_settings->>'searchable_by_username')::boolean = true OR us.privacy_settings->>'privacy_mode' = 'public')
             LIMIT 20`;
         } else if (searchBy === 'email') {
           searchQuery = `
-            SELECT u.id, u.username, u.full_name, u.profile_image_url,
-                   ups.privacy_mode,
+            SELECT u.id, u.username,
+                   -- Only show full_name based on privacy settings and connection status
+                   CASE
+                     WHEN us.privacy_settings->>'privacy_mode' = 'private' AND c.status != 'accepted' THEN NULL
+                     ELSE u.full_name
+                   END as full_name,
+                   -- Only show profile image based on privacy settings
+                   CASE
+                     WHEN us.privacy_settings->>'privacy_mode' = 'private' AND c.status != 'accepted' THEN NULL
+                     ELSE u.profile_image_url
+                   END as profile_image_url,
+                   us.privacy_settings->>'privacy_mode' as privacy_mode,
                    CASE
                      WHEN c.status = 'accepted' THEN true
                      ELSE false
                    END as is_connected
             FROM users u
-            LEFT JOIN user_privacy_settings ups ON ups.user_id = u.id
+            LEFT JOIN user_settings us ON us.user_id = u.id
             LEFT JOIN connections c ON c.user_id = $2
               AND c.connection_id = u.id
             WHERE u.email = $1
               AND u.id != $2
-              AND (ups.searchable_by_email = true OR ups.privacy_mode = 'public')
+              AND ((us.privacy_settings->>'searchable_by_email')::boolean = true OR us.privacy_settings->>'privacy_mode' = 'public')
             LIMIT 20`;
           params = [query, userId]; // Exact match for email
         } else {
