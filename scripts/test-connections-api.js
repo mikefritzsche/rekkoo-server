@@ -6,11 +6,24 @@
  */
 
 const axios = require('axios');
+const https = require('https');
 
 // Configuration
 const API_BASE_URL = process.env.API_URL || 'https://api-dev.rekkoo.com';
 const TEST_USER_1_TOKEN = process.env.TEST_USER_1_TOKEN || ''; // Set this to a valid JWT token
 const TEST_USER_2_TOKEN = process.env.TEST_USER_2_TOKEN || ''; // Set this to a valid JWT token for second user
+const IGNORE_SSL = process.env.IGNORE_SSL === 'true' || API_BASE_URL.includes('api-dev') || API_BASE_URL.includes('localhost');
+
+// Create HTTPS agent that ignores self-signed certificates in development
+const httpsAgent = IGNORE_SSL ? new https.Agent({
+  rejectUnauthorized: false
+}) : undefined;
+
+if (IGNORE_SSL) {
+  console.log('⚠️  Warning: Ignoring SSL certificate verification (development mode)');
+  console.log('   API URL:', API_BASE_URL);
+  console.log('');
+}
 
 // Create axios instances for each user
 const user1Api = axios.create({
@@ -18,7 +31,8 @@ const user1Api = axios.create({
   headers: {
     'Authorization': `Bearer ${TEST_USER_1_TOKEN}`,
     'Content-Type': 'application/json'
-  }
+  },
+  httpsAgent: httpsAgent
 });
 
 const user2Api = axios.create({
@@ -26,7 +40,8 @@ const user2Api = axios.create({
   headers: {
     'Authorization': `Bearer ${TEST_USER_2_TOKEN}`,
     'Content-Type': 'application/json'
-  }
+  },
+  httpsAgent: httpsAgent
 });
 
 // Test functions
@@ -138,6 +153,24 @@ async function testGetSentRequests() {
   }
 }
 
+async function testGetExpiringInvitations() {
+  console.log('\n⏰ Testing Get Expiring Invitations...');
+
+  try {
+    const response = await user1Api.get('/requests/expiring');
+    console.log('✅ Expiring invitations:', response.data);
+
+    if (response.data.total > 0) {
+      console.log(`  - Expiring today: ${response.data.invitations.expiring_today.length}`);
+      console.log(`  - Expiring tomorrow: ${response.data.invitations.expiring_tomorrow.length}`);
+      console.log(`  - Expiring soon (2-5 days): ${response.data.invitations.expiring_soon.length}`);
+    }
+
+  } catch (error) {
+    console.error('❌ Get expiring invitations error:', error.response?.data || error.message);
+  }
+}
+
 // Main test runner
 async function runTests() {
   console.log('🚀 Starting Connection API Tests');
@@ -157,6 +190,7 @@ async function runTests() {
   await testConnectionFlow(userId);
   await testGetConnections();
   await testGetSentRequests();
+  await testGetExpiringInvitations();
 
   console.log('\n✨ Connection API tests completed!');
 }

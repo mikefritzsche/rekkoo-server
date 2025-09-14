@@ -14,11 +14,11 @@ function connectionsControllerFactory(socketService = null) {
 
   const ConnectionsController = {
     /**
-     * Send a connection request
+     * Send a connection request (for mutual connections)
      */
     sendConnectionRequest: async (req, res) => {
       const senderId = req.user.id;
-      const { recipientId, message } = req.body;
+      const { recipientId, message, connectionType = 'mutual' } = req.body;
 
       if (!recipientId) {
         return res.status(400).json({ error: 'Recipient ID is required' });
@@ -39,10 +39,15 @@ function connectionsControllerFactory(socketService = null) {
 
         if (existingConnection.rows.length > 0) {
           const status = existingConnection.rows[0].status;
-          if (status === 'accepted') {
-            return res.status(400).json({ error: 'Connection already exists' });
+          const existingType = existingConnection.rows[0].connection_type;
+
+          if (status === 'accepted' && existingType === 'mutual') {
+            return res.status(400).json({ error: 'Mutual connection already exists' });
           }
-          if (status === 'pending') {
+          if (status === 'following' && connectionType === 'following') {
+            return res.status(400).json({ error: 'Already following this user' });
+          }
+          if (status === 'pending' && existingType === 'mutual') {
             return res.status(400).json({ error: 'Connection request already pending' });
           }
           if (status === 'blocked') {
@@ -50,7 +55,33 @@ function connectionsControllerFactory(socketService = null) {
           }
         }
 
-        // Check for existing invitation
+        // For following connections, create them immediately without invitation
+        if (connectionType === 'following') {
+          await db.query(
+            `INSERT INTO connections
+             (user_id, connection_id, status, connection_type, initiated_by, auto_accepted, visibility_level, accepted_at)
+             VALUES ($1, $2, 'following', 'following', $3, true, 'public', NOW())
+             ON CONFLICT (user_id, connection_id)
+             DO UPDATE SET status = 'following', connection_type = 'following', auto_accepted = true`,
+            [senderId, recipientId, senderId]
+          );
+
+          // Notify user they have a new follower
+          safeSocketService.notifyUser(recipientId, 'connection:new_follower', {
+            follower: {
+              id: req.user.id,
+              username: req.user.username,
+              full_name: req.user.full_name
+            }
+          });
+
+          return res.status(201).json({
+            message: 'Now following user',
+            connectionType: 'following'
+          });
+        }
+
+        // For mutual connections, check for existing invitation
         const existingInvitation = await db.query(
           `SELECT * FROM connection_invitations
            WHERE sender_id = $1 AND recipient_id = $2 AND status = 'pending'`,
@@ -61,7 +92,7 @@ function connectionsControllerFactory(socketService = null) {
           return res.status(400).json({ error: 'Invitation already sent' });
         }
 
-        // Create connection invitation
+        // Create connection invitation for mutual connections
         const invitation = await db.query(
           `INSERT INTO connection_invitations
            (sender_id, recipient_id, message, status)
@@ -70,18 +101,18 @@ function connectionsControllerFactory(socketService = null) {
           [senderId, recipientId, message]
         );
 
-        // Create pending connection records for both users
+        // Create pending connection records for both users (mutual type)
         await db.query(
           `INSERT INTO connections
-           (user_id, connection_id, status, initiated_by)
-           VALUES ($1, $2, 'pending', $3)`,
+           (user_id, connection_id, status, connection_type, initiated_by, visibility_level)
+           VALUES ($1, $2, 'pending', 'mutual', $3, 'friends')`,
           [senderId, recipientId, senderId]
         );
 
         await db.query(
           `INSERT INTO connections
-           (user_id, connection_id, status, initiated_by)
-           VALUES ($1, $2, 'pending', $3)`,
+           (user_id, connection_id, status, connection_type, initiated_by, visibility_level)
+           VALUES ($1, $2, 'pending', 'mutual', $3, 'friends')`,
           [recipientId, senderId, senderId]
         );
 
@@ -97,7 +128,8 @@ function connectionsControllerFactory(socketService = null) {
 
         res.status(201).json({
           message: 'Connection request sent',
-          invitation: invitation.rows[0]
+          invitation: invitation.rows[0],
+          connectionType: 'mutual'
         });
       } catch (error) {
         console.error('Error sending connection request:', error);
@@ -325,17 +357,43 @@ function connectionsControllerFactory(socketService = null) {
      */
     getConnections: async (req, res) => {
       const userId = req.user.id;
+      const { type = 'all' } = req.query; // 'all', 'mutual', 'following', 'followers'
 
       try {
+        let whereClause = `c.user_id = $1 AND (c.status = 'accepted' OR c.status = 'following')`;
+
+        if (type === 'mutual') {
+          whereClause = `c.user_id = $1 AND c.status = 'accepted' AND c.connection_type = 'mutual'`;
+        } else if (type === 'following') {
+          whereClause = `c.user_id = $1 AND c.status = 'following' AND c.connection_type = 'following'`;
+        } else if (type === 'followers') {
+          // Get users who are following the current user
+          const followersResult = await db.query(
+            `SELECT c.*,
+                    u.username, u.full_name, u.profile_image_url,
+                    ups.show_email_to_connections,
+                    CASE WHEN ups.show_email_to_connections = true THEN u.email ELSE NULL END as email,
+                    c.connection_type, c.visibility_level, c.auto_accepted
+             FROM connections c
+             JOIN users u ON u.id = c.user_id
+             LEFT JOIN user_privacy_settings ups ON ups.user_id = u.id
+             WHERE c.connection_id = $1 AND c.status = 'following' AND c.connection_type = 'following'
+             ORDER BY c.accepted_at DESC`,
+            [userId]
+          );
+          return res.json(followersResult.rows);
+        }
+
         const result = await db.query(
           `SELECT c.*,
                   u.username, u.full_name, u.profile_image_url,
                   ups.show_email_to_connections,
-                  CASE WHEN ups.show_email_to_connections = true THEN u.email ELSE NULL END as email
+                  CASE WHEN ups.show_email_to_connections = true THEN u.email ELSE NULL END as email,
+                  c.connection_type, c.visibility_level, c.auto_accepted
            FROM connections c
            JOIN users u ON u.id = c.connection_id
            LEFT JOIN user_privacy_settings ups ON ups.user_id = u.id
-           WHERE c.user_id = $1 AND c.status = 'accepted'
+           WHERE ${whereClause}
            ORDER BY c.accepted_at DESC`,
           [userId]
         );
@@ -343,6 +401,164 @@ function connectionsControllerFactory(socketService = null) {
         res.json(result.rows);
       } catch (error) {
         console.error('Error fetching connections:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    },
+
+    /**
+     * Follow a user (unidirectional connection)
+     */
+    followUser: async (req, res) => {
+      const followerId = req.user.id;
+      const { userId: followedId } = req.params;
+
+      if (followerId === followedId) {
+        return res.status(400).json({ error: 'Cannot follow yourself' });
+      }
+
+      try {
+        // Check if already following or has mutual connection
+        const existingConnection = await db.query(
+          `SELECT * FROM connections
+           WHERE user_id = $1 AND connection_id = $2`,
+          [followerId, followedId]
+        );
+
+        if (existingConnection.rows.length > 0) {
+          const { status, connection_type } = existingConnection.rows[0];
+          if (status === 'following' || (status === 'accepted' && connection_type === 'mutual')) {
+            return res.status(400).json({ error: 'Already connected with this user' });
+          }
+          if (status === 'blocked') {
+            return res.status(400).json({ error: 'Unable to follow this user' });
+          }
+        }
+
+        // Create following connection (auto-accepted)
+        await db.query(
+          `INSERT INTO connections
+           (user_id, connection_id, status, connection_type, initiated_by, auto_accepted, visibility_level, accepted_at)
+           VALUES ($1, $2, 'following', 'following', $3, true, 'public', NOW())
+           ON CONFLICT (user_id, connection_id)
+           DO UPDATE SET status = 'following', connection_type = 'following', auto_accepted = true, accepted_at = NOW()`,
+          [followerId, followedId, followerId]
+        );
+
+        // Notify user they have a new follower
+        safeSocketService.notifyUser(followedId, 'connection:new_follower', {
+          follower: {
+            id: req.user.id,
+            username: req.user.username,
+            full_name: req.user.full_name,
+            profile_image_url: req.user.profile_image_url
+          }
+        });
+
+        res.status(201).json({
+          message: 'Successfully followed user',
+          connectionType: 'following'
+        });
+      } catch (error) {
+        console.error('Error following user:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    },
+
+    /**
+     * Unfollow a user
+     */
+    unfollowUser: async (req, res) => {
+      const followerId = req.user.id;
+      const { userId: followedId } = req.params;
+
+      try {
+        const result = await db.query(
+          `DELETE FROM connections
+           WHERE user_id = $1 AND connection_id = $2
+           AND connection_type = 'following' AND status = 'following'
+           RETURNING *`,
+          [followerId, followedId]
+        );
+
+        if (result.rows.length === 0) {
+          return res.status(404).json({ error: 'Not following this user' });
+        }
+
+        // Notify user they lost a follower
+        safeSocketService.notifyUser(followedId, 'connection:unfollowed', {
+          unfollowedBy: {
+            id: req.user.id,
+            username: req.user.username
+          }
+        });
+
+        res.json({ message: 'Successfully unfollowed user' });
+      } catch (error) {
+        console.error('Error unfollowing user:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    },
+
+    /**
+     * Get followers of the current user
+     */
+    getFollowers: async (req, res) => {
+      const userId = req.user.id;
+
+      try {
+        const result = await db.query(
+          `SELECT c.*,
+                  u.username, u.full_name, u.profile_image_url,
+                  c.connection_type, c.visibility_level,
+                  EXISTS(
+                    SELECT 1 FROM connections fc
+                    WHERE fc.user_id = $1 AND fc.connection_id = u.id
+                    AND (fc.status = 'following' OR fc.status = 'accepted')
+                  ) as is_following_back
+           FROM connections c
+           JOIN users u ON u.id = c.user_id
+           WHERE c.connection_id = $1
+           AND c.status = 'following'
+           AND c.connection_type = 'following'
+           ORDER BY c.accepted_at DESC`,
+          [userId]
+        );
+
+        res.json(result.rows);
+      } catch (error) {
+        console.error('Error fetching followers:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    },
+
+    /**
+     * Get users the current user is following
+     */
+    getFollowing: async (req, res) => {
+      const userId = req.user.id;
+
+      try {
+        const result = await db.query(
+          `SELECT c.*,
+                  u.username, u.full_name, u.profile_image_url,
+                  c.connection_type, c.visibility_level,
+                  EXISTS(
+                    SELECT 1 FROM connections fc
+                    WHERE fc.user_id = u.id AND fc.connection_id = $1
+                    AND (fc.status = 'following' OR fc.status = 'accepted')
+                  ) as follows_back
+           FROM connections c
+           JOIN users u ON u.id = c.connection_id
+           WHERE c.user_id = $1
+           AND c.status = 'following'
+           AND c.connection_type = 'following'
+           ORDER BY c.accepted_at DESC`,
+          [userId]
+        );
+
+        res.json(result.rows);
+      } catch (error) {
+        console.error('Error fetching following list:', error);
         res.status(500).json({ error: 'Internal server error' });
       }
     },
@@ -679,6 +895,91 @@ function connectionsControllerFactory(socketService = null) {
         res.json(sanitizedResults);
       } catch (error) {
         console.error('Error searching users:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    },
+
+    /**
+     * Get expiring connection invitations (expiring within 5 days)
+     */
+    getExpiringInvitations: async (req, res) => {
+      const userId = req.user.id;
+
+      try {
+        // Get invitations that are expiring within 5 days
+        // Both sent and received invitations
+        const expiringInvitations = await db.query(
+          `SELECT
+            ci.*,
+            sender.username as sender_username,
+            sender.full_name as sender_full_name,
+            sender.profile_image_url as sender_profile_image,
+            recipient.username as recipient_username,
+            recipient.full_name as recipient_full_name,
+            recipient.profile_image_url as recipient_profile_image,
+            EXTRACT(DAY FROM (ci.expires_at - NOW())) as days_until_expiry,
+            CASE
+              WHEN ci.sender_id = $1 THEN 'sent'
+              WHEN ci.recipient_id = $1 THEN 'received'
+            END as invitation_type
+          FROM connection_invitations ci
+          JOIN users sender ON sender.id = ci.sender_id
+          JOIN users recipient ON recipient.id = ci.recipient_id
+          WHERE (ci.sender_id = $1 OR ci.recipient_id = $1)
+            AND ci.status = 'pending'
+            AND ci.expires_at <= NOW() + INTERVAL '5 days'
+            AND ci.expires_at > NOW()
+          ORDER BY ci.expires_at ASC`,
+          [userId]
+        );
+
+        // Group invitations by how soon they expire
+        const grouped = {
+          expiring_today: [],
+          expiring_tomorrow: [],
+          expiring_soon: [] // 2-5 days
+        };
+
+        expiringInvitations.rows.forEach(invitation => {
+          const daysLeft = Math.floor(invitation.days_until_expiry);
+
+          // Format the invitation data
+          const formattedInvitation = {
+            id: invitation.id,
+            type: invitation.invitation_type,
+            message: invitation.message,
+            created_at: invitation.created_at,
+            expires_at: invitation.expires_at,
+            days_until_expiry: daysLeft,
+            sender: {
+              id: invitation.sender_id,
+              username: invitation.sender_username,
+              full_name: invitation.sender_full_name,
+              profile_image_url: invitation.sender_profile_image
+            },
+            recipient: {
+              id: invitation.recipient_id,
+              username: invitation.recipient_username,
+              full_name: invitation.recipient_full_name,
+              profile_image_url: invitation.recipient_profile_image
+            }
+          };
+
+          if (daysLeft === 0) {
+            grouped.expiring_today.push(formattedInvitation);
+          } else if (daysLeft === 1) {
+            grouped.expiring_tomorrow.push(formattedInvitation);
+          } else {
+            grouped.expiring_soon.push(formattedInvitation);
+          }
+        });
+
+        res.json({
+          total: expiringInvitations.rows.length,
+          invitations: grouped
+        });
+      } catch (error) {
+        console.error('Error fetching expiring invitations:', error);
         res.status(500).json({ error: 'Internal server error' });
       }
     }

@@ -13,6 +13,7 @@ function createConnectionsRouter(connectionsController) {
   router.post('/request', authenticateJWT, connectionsController.sendConnectionRequest);
   router.get('/requests/pending', authenticateJWT, connectionsController.getPendingRequests);
   router.get('/requests/sent', authenticateJWT, connectionsController.getSentRequests);
+  router.get('/requests/expiring', authenticateJWT, connectionsController.getExpiringInvitations);
   router.post('/requests/:requestId/accept', authenticateJWT, connectionsController.acceptRequest);
   router.post('/requests/:requestId/decline', authenticateJWT, connectionsController.declineRequest);
   router.delete('/requests/:requestId/cancel', authenticateJWT, connectionsController.cancelRequest);
@@ -22,6 +23,12 @@ function createConnectionsRouter(connectionsController) {
   router.get('/status/:targetUserId', authenticateJWT, connectionsController.checkConnectionStatus);
   router.delete('/:connectionId', authenticateJWT, connectionsController.removeConnection);
   router.post('/block/:userIdToBlock', authenticateJWT, connectionsController.blockUser);
+
+  // Following/Unfollowing routes
+  router.post('/follow/:userId', authenticateJWT, connectionsController.followUser);
+  router.delete('/unfollow/:userId', authenticateJWT, connectionsController.unfollowUser);
+  router.get('/followers', authenticateJWT, connectionsController.getFollowers);
+  router.get('/following', authenticateJWT, connectionsController.getFollowing);
 
   // Privacy settings routes
   router.get('/privacy', authenticateJWT, connectionsController.getPrivacySettings);
