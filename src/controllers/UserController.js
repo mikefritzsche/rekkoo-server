@@ -47,48 +47,126 @@ function userControllerFactory(socketService = null) {
   };
 
   /**
-   * Get a user by ID
+   * Get a user by ID - respects ghost mode privacy
    */
   const getUserById = async (req, res) => {
     try {
       const { id } = req.params;
+      const requesterId = req.user?.id; // May be undefined for public access
 
-      // Join users table with user_settings to get profile header fields
-      const { rows } = await db.query(
-        `SELECT 
-          u.id, 
-          u.username, 
-          u.email, 
-          u.full_name, 
-          u.email_verified,
-          u.profile_image_url,
-          u.created_at,
-          u.updated_at,
-          -- Include user_settings fields for profile header
-          us.lists_header_background_type,
-          us.lists_header_background_value,
-          us.lists_header_image_url,
-          -- Map lists_header_image_url to profile_header_image_url for client compatibility
-          us.lists_header_image_url as profile_header_image_url
+      // First check if the viewer can see this user (ghost mode check)
+      const privacyCheck = await db.query(
+        `SELECT
+          us.privacy_settings->>'privacy_mode' as privacy_mode,
+          u.id,
+          u.deleted_at
         FROM users u
         LEFT JOIN user_settings us ON u.id = us.user_id
         WHERE u.id = $1`,
         [id]
       );
 
+      if (privacyCheck.rows.length === 0 || privacyCheck.rows[0].deleted_at) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      const privacy_mode = privacyCheck.rows[0].privacy_mode || 'private';
+
+      // Check if users are connected (for ghost/private mode checks)
+      let canViewFullProfile = false;
+      if (requesterId) {
+        if (requesterId === id) {
+          canViewFullProfile = true; // Users can always see their own profile
+        } else if (privacy_mode === 'ghost' || privacy_mode === 'private') {
+          // Check connection status
+          const connectionCheck = await db.query(
+            `SELECT EXISTS (
+              SELECT 1 FROM connections c1
+              WHERE c1.user_id = $1 AND c1.connection_id = $2
+                AND c1.status = 'accepted'
+                AND EXISTS (
+                  SELECT 1 FROM connections c2
+                  WHERE c2.user_id = $2 AND c2.connection_id = $1
+                    AND c2.status = 'accepted'
+                )
+            ) as are_connected`,
+            [requesterId, id]
+          );
+          canViewFullProfile = connectionCheck.rows[0].are_connected;
+        } else {
+          canViewFullProfile = true; // Standard/public users are viewable
+        }
+      }
+
+      // Ghost users are completely invisible except to connections
+      if (privacy_mode === 'ghost' && !canViewFullProfile) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      // Fetch user data with privacy-aware fields
+      const { rows } = await db.query(
+        `SELECT
+          u.id,
+          CASE
+            WHEN $2 = 'ghost' AND NOT $3 THEN 'Hidden User'
+            ELSE u.username
+          END as username,
+          CASE
+            WHEN $2 IN ('ghost', 'private') AND NOT $3 THEN NULL
+            ELSE u.email
+          END as email,
+          CASE
+            WHEN $2 IN ('ghost', 'private') AND NOT $3 THEN NULL
+            ELSE u.full_name
+          END as full_name,
+          u.email_verified,
+          CASE
+            WHEN $2 = 'ghost' AND NOT $3 THEN NULL
+            ELSE u.profile_image_url
+          END as profile_image_url,
+          u.created_at,
+          u.updated_at,
+          -- Include user_settings fields for profile header (only if viewable)
+          CASE
+            WHEN $2 = 'ghost' AND NOT $3 THEN NULL
+            ELSE us.lists_header_background_type
+          END as lists_header_background_type,
+          CASE
+            WHEN $2 = 'ghost' AND NOT $3 THEN NULL
+            ELSE us.lists_header_background_value
+          END as lists_header_background_value,
+          CASE
+            WHEN $2 = 'ghost' AND NOT $3 THEN NULL
+            ELSE us.lists_header_image_url
+          END as lists_header_image_url,
+          -- Map lists_header_image_url to profile_header_image_url for client compatibility
+          CASE
+            WHEN $2 = 'ghost' AND NOT $3 THEN NULL
+            ELSE us.lists_header_image_url
+          END as profile_header_image_url,
+          -- Include privacy mode for frontend handling
+          $2 as privacy_mode,
+          $3 as is_connected
+        FROM users u
+        LEFT JOIN user_settings us ON u.id = us.user_id
+        WHERE u.id = $1`,
+        [id, privacy_mode, canViewFullProfile]
+      );
+
       if (rows.length === 0) {
         return res.status(404).json({ error: 'User not found' });
       }
 
-      logger.info(`[UserController] getUserById returning user data:`, {
-        id: rows[0].id,
-        username: rows[0].username,
-        profile_image_url: rows[0].profile_image_url,
-        profile_header_image_url: rows[0].profile_header_image_url,
-        lists_header_background_type: rows[0].lists_header_background_type,
-        lists_header_background_value: rows[0].lists_header_background_value,
-        lists_header_image_url: rows[0].lists_header_image_url
-      });
+      // Commented out verbose logging to reduce server spam
+      // logger.info(`[UserController] getUserById returning user data:`, {
+      //   id: rows[0].id,
+      //   username: rows[0].username,
+      //   profile_image_url: rows[0].profile_image_url,
+      //   profile_header_image_url: rows[0].profile_header_image_url,
+      //   lists_header_background_type: rows[0].lists_header_background_type,
+      //   lists_header_background_value: rows[0].lists_header_background_value,
+      //   lists_header_image_url: rows[0].lists_header_image_url
+      // });
 
       res.json(rows[0]);
     } catch (err) {
@@ -200,7 +278,7 @@ function userControllerFactory(socketService = null) {
     const { userId } = req.params; // The ID of the user whose followers we want to get
     // const requestingUserId = req.user?.id; // ID of the user making the request, for permission checks if needed
 
-    logger.info(`[UserController] Request to get followers for user ${userId}`);
+    // logger.info(`[UserController] Request to get followers for user ${userId}`);
 
     try {
       // Query to get users who are following 'userId'
@@ -225,7 +303,7 @@ function userControllerFactory(socketService = null) {
     const { userId } = req.params; // The ID of the user whose followed list we want to get
     // const requestingUserId = req.user?.id; // ID of the user making the request
 
-    logger.info(`[UserController] Request to get users followed by user ${userId}`);
+    // logger.info(`[UserController] Request to get users followed by user ${userId}`);
 
     try {
       // Query to get users whom 'userId' is following
@@ -245,26 +323,113 @@ function userControllerFactory(socketService = null) {
     }
   };
 
-  // Get public lists of a specific user
+  // Get public lists of a specific user - respects privacy settings and connection status
   const getUserPublicLists = async (req, res) => {
     const { targetUserId } = req.params; // The ID of the user whose public lists we want to get
-    // const requestingUserId = req.user?.id; // ID of the user making the request, to potentially show more if they have special access
+    const requestingUserId = req.user?.id; // ID of the user making the request
 
-    logger.info(`[UserController] Request to get public lists for user ${targetUserId}`);
+    // logger.info(`[UserController] Request to get public lists for user ${targetUserId} from ${requestingUserId || 'anonymous'}`);
 
     try {
-      // Query to get lists owned by 'targetUserId' that are marked as public
-      const query = `
-        SELECT l.id, l.title, l.description, l.created_at, l.updated_at, l.is_public, l.owner_id,
-               l.background, l.image_url, l.list_type, l.occasion, l.sort_order,
-               (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
-               u.username as owner_username, u.profile_image_url as owner_profile_picture_url
-        FROM lists l
-        JOIN users u ON l.owner_id = u.id
-        WHERE l.owner_id = $1 AND l.is_public = TRUE AND l.deleted_at IS NULL
-        ORDER BY l.updated_at DESC;
-      `;
-      const { rows } = await db.query(query, [targetUserId]);
+      // First check the target user's privacy settings
+      const privacyCheck = await db.query(
+        `SELECT us.privacy_settings->>'privacy_mode' as privacy_mode,
+                u.id, u.username
+         FROM users u
+         LEFT JOIN user_settings us ON u.id = us.user_id
+         WHERE u.id = $1`,
+        [targetUserId]
+      );
+
+      if (privacyCheck.rows.length === 0) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      const targetUser = privacyCheck.rows[0];
+      const privacyMode = targetUser.privacy_mode || 'private'; // Default to private if not set
+
+      // Check if users are connected (if needed)
+      let areConnected = false;
+      if (requestingUserId && requestingUserId !== targetUserId) {
+        const connectionCheck = await db.query(
+          `SELECT EXISTS (
+            SELECT 1 FROM connections c1
+            WHERE c1.user_id = $1 AND c1.connection_id = $2
+              AND c1.status = 'accepted'
+              AND EXISTS (
+                SELECT 1 FROM connections c2
+                WHERE c2.user_id = $2 AND c2.connection_id = $1
+                  AND c2.status = 'accepted'
+              )
+          ) as are_connected`,
+          [requestingUserId, targetUserId]
+        );
+        areConnected = connectionCheck.rows[0].are_connected;
+      }
+
+      // Determine what lists to show based on privacy mode
+      let query;
+      let queryParams;
+
+      if (requestingUserId === targetUserId) {
+        // User viewing their own lists - show all
+        query = `
+          SELECT l.id, l.title, l.description, l.created_at, l.updated_at, l.is_public, l.owner_id,
+                 l.background, l.image_url, l.list_type, l.occasion, l.sort_order,
+                 (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
+                 u.username as owner_username, u.profile_image_url as owner_profile_picture_url
+          FROM lists l
+          JOIN users u ON l.owner_id = u.id
+          WHERE l.owner_id = $1 AND l.deleted_at IS NULL
+          ORDER BY l.updated_at DESC;
+        `;
+        queryParams = [targetUserId];
+      } else if (privacyMode === 'private' && !areConnected) {
+        // Private mode and not connected - no lists visible
+        // logger.info(`[UserController] User ${targetUserId} is private and not connected to ${requestingUserId}`);
+        return res.status(200).json([]);
+      } else if (privacyMode === 'standard' && !areConnected) {
+        // Standard mode and not connected - only show explicitly public lists
+        query = `
+          SELECT l.id, l.title, l.description, l.created_at, l.updated_at, l.is_public, l.owner_id,
+                 l.background, l.image_url, l.list_type, l.occasion, l.sort_order,
+                 (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
+                 u.username as owner_username, u.profile_image_url as owner_profile_picture_url
+          FROM lists l
+          JOIN users u ON l.owner_id = u.id
+          WHERE l.owner_id = $1 AND l.is_public = TRUE AND l.deleted_at IS NULL
+          ORDER BY l.updated_at DESC;
+        `;
+        queryParams = [targetUserId];
+      } else if (privacyMode === 'public' || areConnected) {
+        // Public mode OR connected users - show all public lists
+        query = `
+          SELECT l.id, l.title, l.description, l.created_at, l.updated_at, l.is_public, l.owner_id,
+                 l.background, l.image_url, l.list_type, l.occasion, l.sort_order,
+                 (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
+                 u.username as owner_username, u.profile_image_url as owner_profile_picture_url
+          FROM lists l
+          JOIN users u ON l.owner_id = u.id
+          WHERE l.owner_id = $1 AND l.is_public = TRUE AND l.deleted_at IS NULL
+          ORDER BY l.updated_at DESC;
+        `;
+        queryParams = [targetUserId];
+      } else {
+        // Default case - only public lists
+        query = `
+          SELECT l.id, l.title, l.description, l.created_at, l.updated_at, l.is_public, l.owner_id,
+                 l.background, l.image_url, l.list_type, l.occasion, l.sort_order,
+                 (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count,
+                 u.username as owner_username, u.profile_image_url as owner_profile_picture_url
+          FROM lists l
+          JOIN users u ON l.owner_id = u.id
+          WHERE l.owner_id = $1 AND l.is_public = TRUE AND l.deleted_at IS NULL
+          ORDER BY l.updated_at DESC;
+        `;
+        queryParams = [targetUserId];
+      }
+
+      const { rows } = await db.query(query, queryParams);
       res.status(200).json(rows);
     } catch (error) {
       logger.error(`[UserController] Error getting public lists for user ${targetUserId}:`, error);
@@ -282,7 +447,7 @@ function userControllerFactory(socketService = null) {
     const { targetUserId } = req.params;
     const viewingUserId = req.query.viewerId || req.user?.id;
     
-    logger.info(`[UserController] LIVE access check for user ${targetUserId}, viewer ${viewingUserId || 'anonymous'}`);
+    // logger.info(`[UserController] LIVE access check for user ${targetUserId}, viewer ${viewingUserId || 'anonymous'}`);
     
     // Validate that this is for viewing another user's lists
     if (!viewingUserId || viewingUserId === targetUserId) {
@@ -424,8 +589,8 @@ function userControllerFactory(socketService = null) {
         });
       }
       
-      logger.info(`[UserController] LIVE check returned ${rows.length} lists`);
-      logger.info(`[UserController] Individual shares check found ${individualShares.length} direct shares`);
+      // logger.info(`[UserController] LIVE check returned ${rows.length} lists`);
+      // logger.info(`[UserController] Individual shares check found ${individualShares.length} direct shares`);
       
       // Log individual shares in detail
       if (individualShares.length > 0) {
@@ -444,7 +609,7 @@ function userControllerFactory(socketService = null) {
       }
       
       // Log all lists with their access types
-      logger.info(`[UserController] All returned lists with access types:`);
+      // logger.info(`[UserController] All returned lists with access types:`);
       rows.forEach(row => {
         logger.info(`  - "${row.title}" (${row.id}): ${row.access_type}${row.is_public ? ' [PUBLIC]' : ' [PRIVATE]'}`);
       });
@@ -470,9 +635,10 @@ function userControllerFactory(socketService = null) {
     // Accept both viewerId and viewingUserId for backward compatibility
     const viewingUserId = req.query.viewerId || req.query.viewingUserId || req.user?.id; // Use query param or authenticated user
     
-    logger.info(`[UserController] Getting lists with access for user ${targetUserId}, viewed by ${viewingUserId || 'anonymous'}`);
-    logger.info(`[UserController] Query params:`, req.query);
-    logger.info(`[UserController] Authenticated user:`, req.user?.id);
+    // Reduced verbose logging
+    // logger.info(`[UserController] Getting lists with access for user ${targetUserId}, viewed by ${viewingUserId || 'anonymous'}`);
+    // logger.info(`[UserController] Query params:`, req.query);
+    // logger.info(`[UserController] Authenticated user:`, req.user?.id);
     
     // Declare these outside try block so they're accessible in catch
     let actualTargetUserId = targetUserId;
@@ -484,7 +650,7 @@ function userControllerFactory(socketService = null) {
         const targetUserQuery = await db.query('SELECT id FROM users WHERE username = $1', [targetUserId]);
         if (targetUserQuery.rows.length > 0) {
           actualTargetUserId = targetUserQuery.rows[0].id;
-          logger.info(`[UserController] Converted target username ${targetUserId} to ID ${actualTargetUserId}`);
+          // logger.info(`[UserController] Converted target username ${targetUserId} to ID ${actualTargetUserId}`);
         }
       }
       
@@ -493,13 +659,13 @@ function userControllerFactory(socketService = null) {
         const viewingUserQuery = await db.query('SELECT id FROM users WHERE username = $1', [viewingUserId]);
         if (viewingUserQuery.rows.length > 0) {
           actualViewingUserId = viewingUserQuery.rows[0].id;
-          logger.info(`[UserController] Converted viewing username ${viewingUserId} to ID ${actualViewingUserId}`);
+          // logger.info(`[UserController] Converted viewing username ${viewingUserId} to ID ${actualViewingUserId}`);
         } else {
           logger.warn(`[UserController] Could not find user with username ${viewingUserId}`);
         }
       }
       
-      logger.info(`[UserController] Final IDs - Target: ${actualTargetUserId}, Viewer: ${actualViewingUserId}`);
+      // logger.info(`[UserController] Final IDs - Target: ${actualTargetUserId}, Viewer: ${actualViewingUserId}`);
       
       // If viewing own lists, return all owned lists AND lists shared with them
       if (actualViewingUserId === actualTargetUserId) {
@@ -949,46 +1115,101 @@ function userControllerFactory(socketService = null) {
     }
   };
 
-  // Get user suggestions
+  // Get user suggestions - excludes ghost and private users unless connected
   const getUserSuggestions = async (req, res) => {
     const requestingUserId = req.user?.id;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const offset = (page - 1) * limit;
 
+    logger.info(`[UserController] getUserSuggestions - Request from user ${requestingUserId}, page ${page}, limit ${limit}`);
+
     try {
-      // Get users that are verified and active, including follow status
+      // Get users that are active and not in ghost mode (unless connected)
+      // Don't require email verification or user_settings to exist
       const query = `
         WITH active_follows AS (
-          SELECT followed_id 
-          FROM followers 
-          WHERE follower_id = $1 
+          SELECT followed_id
+          FROM followers
+          WHERE follower_id = $1
             AND deleted_at IS NULL  -- Only consider active follows
+        ),
+        connected_users AS (
+          SELECT c1.connection_id as user_id
+          FROM connections c1
+          WHERE c1.user_id = $1
+            AND c1.status = 'accepted'
+            AND EXISTS (
+              SELECT 1 FROM connections c2
+              WHERE c2.user_id = c1.connection_id
+                AND c2.connection_id = $1
+                AND c2.status = 'accepted'
+            )
         )
-        SELECT DISTINCT ON (u.id) 
-          u.id, 
-          u.username, 
-          u.full_name, 
+        SELECT DISTINCT ON (u.id)
+          u.id,
+          u.username,
+          u.full_name,
           u.profile_image_url,
           CASE WHEN f.id IS NOT NULL AND f.deleted_at IS NULL THEN TRUE ELSE FALSE END as is_followed,
           random() as sort_key  -- Include random() in SELECT for ORDER BY
         FROM users u
+        LEFT JOIN user_settings us ON u.id = us.user_id
         LEFT JOIN followers f ON u.id = f.followed_id AND f.follower_id = $1
         WHERE u.id != $1  -- Not the requesting user
-          AND u.email_verified = TRUE  -- Only verified users
           AND u.deleted_at IS NULL  -- Only active users
+          -- Exclude only ghost users completely unless connected
+          -- Users without settings are included by default
+          AND (
+            us.user_id IS NULL  -- Include users without settings
+            OR COALESCE(us.privacy_settings->>'privacy_mode', 'standard') != 'ghost'
+            OR u.id IN (SELECT user_id FROM connected_users)
+          )
+          -- Respect show_in_suggestions setting (default to true if not set or no settings)
+          AND (
+            us.user_id IS NULL  -- Include users without settings
+            OR us.privacy_settings->>'show_in_suggestions' IS NULL
+            OR COALESCE((us.privacy_settings->>'show_in_suggestions')::boolean, true) = true
+            OR u.id IN (SELECT user_id FROM connected_users)
+          )
         ORDER BY u.id, sort_key  -- Order by ID first to make DISTINCT ON work, then by random
         OFFSET $2
         LIMIT $3;
       `;
       
-      // Get total count for pagination
+      // Get total count for pagination (respecting privacy)
       const countQuery = `
+        WITH connected_users AS (
+          SELECT c1.connection_id as user_id
+          FROM connections c1
+          WHERE c1.user_id = $1
+            AND c1.status = 'accepted'
+            AND EXISTS (
+              SELECT 1 FROM connections c2
+              WHERE c2.user_id = c1.connection_id
+                AND c2.connection_id = $1
+                AND c2.status = 'accepted'
+            )
+        )
         SELECT COUNT(DISTINCT u.id) as total
         FROM users u
+        LEFT JOIN user_settings us ON u.id = us.user_id
         WHERE u.id != $1
-          AND u.email_verified = TRUE
-          AND u.deleted_at IS NULL;
+          AND u.deleted_at IS NULL
+          -- Exclude only ghost users unless connected
+          -- Users without settings are included by default
+          AND (
+            us.user_id IS NULL  -- Include users without settings
+            OR COALESCE(us.privacy_settings->>'privacy_mode', 'standard') != 'ghost'
+            OR u.id IN (SELECT user_id FROM connected_users)
+          )
+          -- Respect show_in_suggestions setting (default to true if not set or no settings)
+          AND (
+            us.user_id IS NULL  -- Include users without settings
+            OR us.privacy_settings->>'show_in_suggestions' IS NULL
+            OR COALESCE((us.privacy_settings->>'show_in_suggestions')::boolean, true) = true
+            OR u.id IN (SELECT user_id FROM connected_users)
+          );
       `;
       
       const [{ rows }, countResult] = await Promise.all([
@@ -996,11 +1217,16 @@ function userControllerFactory(socketService = null) {
         db.query(countQuery, [requestingUserId])
       ]);
 
-      logger.info(`[UserController] Found ${rows.length} suggestions for user ${requestingUserId} (page ${page})`);
-      
+      logger.info(`[UserController] getUserSuggestions - Found ${rows.length} suggestions for user ${requestingUserId} (page ${page}, limit ${limit}, offset ${offset})`);
+      logger.info(`[UserController] getUserSuggestions - Total eligible users: ${countResult.rows[0].total}`);
+
+      if (rows.length > 0) {
+        logger.info(`[UserController] getUserSuggestions - First suggestion: ${JSON.stringify(rows[0])}`);
+      }
+
       // Remove the sort_key from the response
       const suggestions = rows.map(({ sort_key, ...user }) => user);
-      
+
       res.status(200).json({
         data: suggestions,
         pagination: {
@@ -1026,14 +1252,14 @@ function userControllerFactory(socketService = null) {
         return res.status(400).json({ error: 'Please provide an array of user IDs' });
       }
 
-      logger.info(`[UserController] Fetching users by IDs: ${ids.join(', ')}`);
+      // logger.info(`[UserController] Fetching users by IDs: ${ids.join(', ')}`);
 
       const { rows } = await db.query(
         'SELECT id, username, email, full_name, profile_image_url FROM users WHERE id = ANY($1) AND deleted_at IS NULL',
         [ids]
       );
 
-      logger.info(`[UserController] Found ${rows.length} users`);
+      // logger.info(`[UserController] Found ${rows.length} users`);
       res.json({ users: rows });
     } catch (err) {
       logger.error('Error fetching users by IDs:', err);
@@ -1117,6 +1343,67 @@ function userControllerFactory(socketService = null) {
     }
   };
 
+  // Debug endpoint to check user eligibility for suggestions
+  const debugUserSuggestions = async (req, res) => {
+    const requestingUserId = req.user?.id;
+
+    try {
+      // Get all users with their privacy settings
+      const query = `
+        SELECT
+          u.id,
+          u.username,
+          u.email_verified,
+          u.deleted_at,
+          us.user_id as has_settings,
+          us.privacy_settings->>'privacy_mode' as privacy_mode,
+          us.privacy_settings->>'show_in_suggestions' as show_in_suggestions,
+          CASE
+            WHEN u.deleted_at IS NOT NULL THEN 'deleted'
+            WHEN us.user_id IS NULL THEN 'eligible (no settings)'
+            WHEN COALESCE(us.privacy_settings->>'privacy_mode', 'standard') = 'ghost' THEN 'ghost (hidden)'
+            WHEN us.privacy_settings->>'show_in_suggestions' = 'false' THEN 'hidden by preference'
+            ELSE 'eligible'
+          END as suggestion_status,
+          (SELECT COUNT(*) FROM followers f WHERE f.follower_id = $1 AND f.followed_id = u.id AND f.deleted_at IS NULL) as is_following
+        FROM users u
+        LEFT JOIN user_settings us ON u.id = us.user_id
+        WHERE u.id != $1
+        ORDER BY u.created_at DESC
+        LIMIT 30;
+      `;
+
+      const { rows } = await db.query(query, [requestingUserId]);
+
+      // Get counts by status
+      const statusCounts = {};
+      rows.forEach(row => {
+        statusCounts[row.suggestion_status] = (statusCounts[row.suggestion_status] || 0) + 1;
+      });
+
+      // Count users with and without settings
+      const withSettings = rows.filter(r => r.has_settings).length;
+      const withoutSettings = rows.filter(r => !r.has_settings).length;
+
+      logger.info(`[UserController] debugUserSuggestions - Found ${rows.length} users total`);
+      const eligible = rows.filter(r => r.suggestion_status.includes('eligible'));
+      logger.info(`[UserController] debugUserSuggestions - ${eligible.length} are eligible for suggestions`);
+      logger.info(`[UserController] debugUserSuggestions - ${withSettings} have settings, ${withoutSettings} don't have settings`);
+
+      res.status(200).json({
+        total_users: rows.length,
+        eligible_count: eligible.length,
+        users_with_settings: withSettings,
+        users_without_settings: withoutSettings,
+        status_counts: statusCounts,
+        users: rows
+      });
+    } catch (error) {
+      logger.error(`[UserController] Error in debugUserSuggestions:`, error);
+      res.status(500).json({ error: 'Failed to debug user suggestions', details: error.message });
+    }
+  };
+
   // Return all controller methods
   return {
     getUsers,
@@ -1130,6 +1417,7 @@ function userControllerFactory(socketService = null) {
     getUserListsWithAccess,
     getUserListsLive,
     getUserSuggestions,
+    debugUserSuggestions,
     getUsersByIds,
     searchUsers
   };

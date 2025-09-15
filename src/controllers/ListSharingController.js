@@ -137,13 +137,15 @@ class ListSharingController {
 
   /**
    * Get pending list invitations for the current user
+   * Includes both group-based and individual invitations
    * GET /api/lists/invitations/pending
    */
   async getPendingInvitations(req, res) {
     const userId = req.user.id;
 
     try {
-      const result = await db.query(
+      // Get direct list invitations (not group-based)
+      const groupInvitations = await db.query(
         `SELECT
           li.id,
           li.list_id,
@@ -157,20 +159,59 @@ class ListSharingController {
           l.list_type,
           u.username as inviter_username,
           u.full_name as inviter_name,
-          u.profile_image_url as inviter_avatar
+          u.profile_image_url as inviter_avatar,
+          'direct' as invitation_type,
+          NULL as group_id,
+          NULL as group_name,
+          EXTRACT(DAY FROM (li.expires_at - CURRENT_TIMESTAMP))::INTEGER as days_until_expiry
         FROM list_invitations li
         JOIN lists l ON l.id = li.list_id
         JOIN users u ON u.id = li.inviter_id
         WHERE li.invitee_id = $1
         AND li.status = 'pending'
-        AND li.expires_at > CURRENT_TIMESTAMP
-        ORDER BY li.created_at DESC`,
+        AND li.expires_at > CURRENT_TIMESTAMP`,
         [userId]
       );
 
+      // Get individual pending list invitations
+      const individualInvitations = await db.query(
+        `SELECT
+          pli.id,
+          pli.list_id,
+          pli.role,
+          pli.message,
+          pli.invitation_code,
+          pli.expires_at,
+          pli.created_at,
+          l.title as list_title,
+          l.description as list_description,
+          l.list_type,
+          u.username as inviter_username,
+          u.full_name as inviter_name,
+          u.profile_image_url as inviter_avatar,
+          'individual' as invitation_type,
+          pli.invitation_context,
+          CASE WHEN pli.invitation_context = 'connection_required' THEN true ELSE false END as requires_connection,
+          pli.connection_invitation_id,
+          EXTRACT(DAY FROM (pli.expires_at - CURRENT_TIMESTAMP))::INTEGER as days_until_expiry
+        FROM pending_list_invitations pli
+        JOIN lists l ON l.id = pli.list_id
+        JOIN users u ON u.id = pli.inviter_id
+        WHERE pli.invitee_id = $1
+        AND pli.status = 'pending'
+        AND pli.expires_at > CURRENT_TIMESTAMP`,
+        [userId]
+      );
+
+      // Combine both types of invitations
+      const allInvitations = [
+        ...groupInvitations.rows,
+        ...individualInvitations.rows
+      ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
       res.json({
         success: true,
-        invitations: result.rows
+        invitations: allInvitations
       });
 
     } catch (error) {
@@ -228,7 +269,7 @@ class ListSharingController {
   }
 
   /**
-   * Accept a list invitation
+   * Accept a list invitation (both group-based and individual)
    * POST /api/lists/invitations/:id/accept
    */
   async acceptInvitation(req, res) {
@@ -236,28 +277,86 @@ class ListSharingController {
     const { id } = req.params;
 
     try {
-      // Call the accept_list_invitation function
-      await db.query(
-        'SELECT accept_list_invitation($1, $2)',
+      // First check if it's a group-based invitation
+      const groupInvitation = await db.query(
+        `SELECT li.*, l.title as list_title
+         FROM list_invitations li
+         JOIN lists l ON l.id = li.list_id
+         WHERE li.id = $1 AND li.invitee_id = $2`,
         [id, userId]
       );
 
-      // Get the updated invitation details
-      const result = await db.query(
-        `SELECT
-          li.*,
-          l.title as list_title
-        FROM list_invitations li
-        JOIN lists l ON l.id = li.list_id
-        WHERE li.id = $1`,
-        [id]
-      );
+      if (groupInvitation.rows.length > 0) {
+        // Handle group-based invitation
+        await db.query(
+          'SELECT accept_list_invitation($1, $2)',
+          [id, userId]
+        );
 
-      res.json({
-        success: true,
-        message: 'List invitation accepted successfully',
-        invitation: result.rows[0]
-      });
+        res.json({
+          success: true,
+          message: 'List invitation accepted successfully',
+          invitation: groupInvitation.rows[0]
+        });
+      } else {
+        // Check if it's an individual invitation
+        const individualInvitation = await db.query(
+          `SELECT pli.*, l.name as list_title
+           FROM pending_list_invitations pli
+           JOIN lists l ON l.id = pli.list_id
+           WHERE pli.id = $1 AND pli.invitee_id = $2 AND pli.status = 'pending'`,
+          [id, userId]
+        );
+
+        if (individualInvitation.rows.length === 0) {
+          return res.status(404).json({
+            error: 'Invitation not found or already processed'
+          });
+        }
+
+        const invitation = individualInvitation.rows[0];
+
+        // Apply the list share
+        await db.query(
+          `INSERT INTO list_user_overrides (list_id, user_id, role, permissions)
+           VALUES ($1, $2, $3, $4::jsonb)
+           ON CONFLICT (list_id, user_id)
+           DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions, deleted_at = NULL, updated_at = CURRENT_TIMESTAMP`,
+          [invitation.list_id, userId, invitation.role, invitation.permissions]
+        );
+
+        // Mark invitation as accepted
+        await db.query(
+          `UPDATE pending_list_invitations
+           SET status = 'accepted', responded_at = CURRENT_TIMESTAMP
+           WHERE id = $1`,
+          [id]
+        );
+
+        // Create notifications
+        await db.query(
+          `INSERT INTO notifications (user_id, notification_type, title, body, data, is_read)
+           VALUES ($1, 'list_share_accepted', 'List share accepted', $2, $3::jsonb, false)`,
+          [
+            invitation.inviter_id,
+            `${req.user.username || 'Someone'} accepted your list share invitation`,
+            JSON.stringify({
+              list_id: invitation.list_id,
+              invitee_id: userId,
+              role: invitation.role
+            })
+          ]
+        );
+
+        res.json({
+          success: true,
+          message: 'List invitation accepted successfully',
+          invitation: {
+            ...invitation,
+            list_title: invitation.list_title
+          }
+        });
+      }
 
     } catch (error) {
       logger.error('Error accepting invitation:', error);
@@ -275,7 +374,7 @@ class ListSharingController {
   }
 
   /**
-   * Decline a list invitation
+   * Decline a list invitation (both group-based and individual)
    * POST /api/lists/invitations/:id/decline
    */
   async declineInvitation(req, res) {
@@ -283,7 +382,8 @@ class ListSharingController {
     const { id } = req.params;
 
     try {
-      const result = await db.query(
+      // Try to decline group-based invitation first
+      const groupResult = await db.query(
         `UPDATE list_invitations
          SET status = 'declined',
              declined_at = CURRENT_TIMESTAMP,
@@ -295,16 +395,50 @@ class ListSharingController {
         [id, userId]
       );
 
-      if (result.rows.length === 0) {
-        return res.status(404).json({
-          error: 'Invitation not found or already processed'
+      if (groupResult.rows.length > 0) {
+        res.json({
+          success: true,
+          message: 'List invitation declined'
+        });
+      } else {
+        // Try to decline individual invitation
+        const individualResult = await db.query(
+          `UPDATE pending_list_invitations
+           SET status = 'declined',
+               responded_at = CURRENT_TIMESTAMP
+           WHERE id = $1
+           AND invitee_id = $2
+           AND status = 'pending'
+           RETURNING *`,
+          [id, userId]
+        );
+
+        if (individualResult.rows.length === 0) {
+          return res.status(404).json({
+            error: 'Invitation not found or already processed'
+          });
+        }
+
+        // Notify the inviter
+        const invitation = individualResult.rows[0];
+        await db.query(
+          `INSERT INTO notifications (user_id, notification_type, title, body, data, is_read)
+           VALUES ($1, 'list_share_declined', 'List share declined', $2, $3::jsonb, false)`,
+          [
+            invitation.inviter_id,
+            `${req.user.username || 'Someone'} declined your list share invitation`,
+            JSON.stringify({
+              list_id: invitation.list_id,
+              invitee_id: userId
+            })
+          ]
+        );
+
+        res.json({
+          success: true,
+          message: 'List invitation declined'
         });
       }
-
-      res.json({
-        success: true,
-        message: 'List invitation declined'
-      });
 
     } catch (error) {
       logger.error('Error declining invitation:', error);

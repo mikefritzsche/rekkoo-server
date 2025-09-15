@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
+Implement
 ### Git Commit Messages
 - **IMPORTANT**: Never include any reference to Claude, AI, or automated generation in commit messages
 - Focus commit messages on WHAT changed and WHY, not WHO made the changes

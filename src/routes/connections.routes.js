@@ -11,6 +11,7 @@ function createConnectionsRouter(connectionsController) {
 
   // Connection request routes
   router.post('/request', authenticateJWT, connectionsController.sendConnectionRequest);
+  router.post('/connect-by-code', authenticateJWT, connectionsController.connectByCode);
   router.get('/requests/pending', authenticateJWT, connectionsController.getPendingRequests);
   router.get('/requests/sent', authenticateJWT, connectionsController.getSentRequests);
   router.get('/requests/expiring', authenticateJWT, connectionsController.getExpiringInvitations);

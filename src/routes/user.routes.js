@@ -17,6 +17,13 @@ function createUserRouter(userController) {
   router.get('/batch', authenticateJWT, userController.getUsersByIds);
 
   /**
+   * @route GET /suggestions/debug
+   * @desc Debug endpoint to check user eligibility for suggestions
+   * @access Private
+   */
+  router.get('/suggestions/debug', authenticateJWT, userController.debugUserSuggestions);
+
+  /**
    * @route GET /suggestions
    * @desc Get users to suggest following
    * @access Private

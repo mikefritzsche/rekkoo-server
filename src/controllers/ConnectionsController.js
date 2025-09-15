@@ -1061,6 +1061,133 @@ function connectionsControllerFactory(socketService = null) {
         console.error('Error fetching expiring invitations:', error);
         res.status(500).json({ error: 'Internal server error' });
       }
+    },
+
+    /**
+     * Connect with a user using their connection code
+     */
+    connectByCode: async (req, res) => {
+      const senderId = req.user.id;
+      const { connection_code, message } = req.body;
+
+      if (!connection_code) {
+        return res.status(400).json({ error: 'Connection code is required' });
+      }
+
+      // Normalize the code (uppercase, trim whitespace)
+      const normalizedCode = connection_code.toUpperCase().trim();
+
+      try {
+        // Find user with this connection code
+        const userResult = await db.query(
+          `SELECT u.id, u.username, u.email, u.full_name, u.avatar_url,
+                  us.privacy_settings
+           FROM users u
+           JOIN user_settings us ON u.id = us.user_id
+           WHERE UPPER(us.privacy_settings->>'connection_code') = $1
+             AND u.id != $2`,
+          [normalizedCode, senderId]
+        );
+
+        if (userResult.rows.length === 0) {
+          return res.status(404).json({
+            error: 'Invalid connection code or code not found',
+            code: 'INVALID_CODE'
+          });
+        }
+
+        const recipientUser = userResult.rows[0];
+        const recipientId = recipientUser.id;
+
+        // Check if the recipient's privacy mode allows connections
+        const privacySettings = recipientUser.privacy_settings || {};
+        if (privacySettings.privacy_mode === 'ghost') {
+          return res.status(403).json({
+            error: 'This user is not accepting connection requests',
+            code: 'USER_UNAVAILABLE'
+          });
+        }
+
+        // Check if connection already exists
+        const existingConnection = await db.query(
+          `SELECT * FROM connections
+           WHERE (user_id = $1 AND connected_user_id = $2)
+              OR (user_id = $2 AND connected_user_id = $1)`,
+          [senderId, recipientId]
+        );
+
+        if (existingConnection.rows.length > 0) {
+          const connection = existingConnection.rows[0];
+          if (connection.status === 'accepted') {
+            return res.status(400).json({
+              error: 'You are already connected with this user',
+              code: 'ALREADY_CONNECTED'
+            });
+          } else if (connection.status === 'pending') {
+            return res.status(400).json({
+              error: 'A connection request is already pending',
+              code: 'REQUEST_PENDING'
+            });
+          } else if (connection.status === 'blocked') {
+            return res.status(403).json({
+              error: 'Unable to send connection request',
+              code: 'CONNECTION_BLOCKED'
+            });
+          }
+        }
+
+        // Create connection request
+        const connectionResult = await db.query(
+          `INSERT INTO connections (user_id, connected_user_id, status, initiated_by, message, created_at, updated_at)
+           VALUES ($1, $2, 'pending', $1, $3, NOW(), NOW())
+           RETURNING *`,
+          [senderId, recipientId, message || `Connection request sent using your connection code: ${normalizedCode}`]
+        );
+
+        // Get sender details for the response
+        const senderResult = await db.query(
+          `SELECT id, username, email, full_name, avatar_url FROM users WHERE id = $1`,
+          [senderId]
+        );
+
+        // Create notification for the recipient
+        await db.query(
+          `INSERT INTO notifications (user_id, type, title, message, data, created_at)
+           VALUES ($1, 'connection_request', 'New Connection Request', $2, $3, NOW())`,
+          [
+            recipientId,
+            `${senderResult.rows[0].full_name || senderResult.rows[0].username} used your connection code to send you a connection request`,
+            JSON.stringify({
+              connection_id: connectionResult.rows[0].id,
+              sender_id: senderId,
+              sender_name: senderResult.rows[0].full_name || senderResult.rows[0].username,
+              sender_username: senderResult.rows[0].username,
+              sender_avatar: senderResult.rows[0].avatar_url,
+              used_connection_code: true,
+              message: message
+            })
+          ]
+        );
+
+        res.status(201).json({
+          success: true,
+          message: 'Connection request sent successfully',
+          connection: {
+            id: connectionResult.rows[0].id,
+            status: 'pending',
+            recipient: {
+              id: recipientUser.id,
+              username: recipientUser.username,
+              full_name: recipientUser.full_name,
+              avatar_url: recipientUser.avatar_url
+            },
+            created_at: connectionResult.rows[0].created_at
+          }
+        });
+      } catch (error) {
+        console.error('Error connecting by code:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
     }
   };
 

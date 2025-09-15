@@ -609,29 +609,33 @@ const CollaborationController = {
     }
   },
 
-  // List: set/remove per-user override
+  // List: set/remove per-user override (with connection and privacy checks)
   setUserRoleOverrideOnList: async (req, res) => {
     const { listId, userId } = req.params;
-    const { role, permissions = null } = req.body || {};
+    const { role, permissions = null, message = null } = req.body || {};
     const requester_id = req.user.id;
-    
+
     console.log('[setUserRoleOverrideOnList] Request received:', {
       listId,
       userId,
       role,
       permissions,
       requester_id,
+      message,
       body: req.body
     });
     
     try {
-      const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+      // Get list details
+      const { rows: listRows } = await db.query('SELECT id, name, owner_id FROM lists WHERE id = $1', [listId]);
       if (listRows.length === 0) {
         console.log('[setUserRoleOverrideOnList] List not found:', listId);
         return res.status(404).json({ error: 'List not found' });
       }
-      if (listRows[0].owner_id !== requester_id) {
-        console.log('[setUserRoleOverrideOnList] Permission denied. Owner:', listRows[0].owner_id, 'Requester:', requester_id);
+      const list = listRows[0];
+
+      if (list.owner_id !== requester_id) {
+        console.log('[setUserRoleOverrideOnList] Permission denied. Owner:', list.owner_id, 'Requester:', requester_id);
         return res.status(403).json({ error: 'Insufficient permissions' });
       }
 
@@ -642,22 +646,24 @@ const CollaborationController = {
 
       if (role === 'inherit') {
         console.log('[setUserRoleOverrideOnList] Removing override (role=inherit) for user:', userId, 'list:', listId);
-        
-        // First check if there's an existing override to remove
-        const { rows: existingRows } = await db.query(
-          `SELECT * FROM public.list_user_overrides 
-           WHERE list_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
-          [listId, userId]
-        );
-        console.log('[setUserRoleOverrideOnList] Existing overrides found:', existingRows.length);
-        
+
+        // Remove from list_user_overrides
         const { rowCount } = await db.query(
           `UPDATE public.list_user_overrides
              SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
            WHERE list_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
           [listId, userId]
         );
-        console.log('[setUserRoleOverrideOnList] Rows updated (soft deleted):', rowCount);
+
+        // Also remove any pending invitations
+        await db.query(
+          `UPDATE pending_list_invitations
+           SET status = 'cancelled', responded_at = CURRENT_TIMESTAMP
+           WHERE list_id = $1 AND invitee_id = $2 AND status = 'pending'`,
+          [listId, userId]
+        );
+
+        console.log('[setUserRoleOverrideOnList] Removed override and cancelled pending invitations');
 
         // Notify the user about access revocation (only if we actually removed an override)
         if (rowCount > 0) {
@@ -689,39 +695,48 @@ const CollaborationController = {
         return res.status(204).send();
       }
 
-      console.log('[setUserRoleOverrideOnList] Upserting role:', role, 'for user:', userId, 'list:', listId);
-      
-      // Check if there's an existing record first
-      const { rows: existingRows } = await db.query(
-        `SELECT * FROM public.list_user_overrides 
-         WHERE list_id = $1 AND user_id = $2`,
-        [listId, userId]
+      // Check if users are connected
+      console.log('[setUserRoleOverrideOnList] Checking connection status between users');
+      const { rows: connectionCheck } = await db.query(
+        `SELECT EXISTS (
+          SELECT 1 FROM connections c1
+          WHERE c1.user_id = $1 AND c1.connection_id = $2 AND c1.status = 'accepted'
+            AND EXISTS (
+              SELECT 1 FROM connections c2
+              WHERE c2.user_id = $2 AND c2.connection_id = $1 AND c2.status = 'accepted'
+            )
+        ) as are_connected`,
+        [requester_id, userId]
       );
-      console.log('[setUserRoleOverrideOnList] Existing records (including soft deleted):', existingRows.length);
-      if (existingRows.length > 0) {
-        console.log('[setUserRoleOverrideOnList] Existing record:', existingRows[0]);
-      }
-      
-      const upsert = await db.query(
-        `INSERT INTO public.list_user_overrides (id, list_id, user_id, role, permissions)
-           VALUES ($1, $2, $3, $4, $5::jsonb)
-         ON CONFLICT (list_id, user_id)
-           DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions, deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
-         RETURNING *`,
-        [uuidv4(), listId, userId, role, permissions ? JSON.stringify(permissions) : null]
+
+      const areConnected = connectionCheck[0].are_connected;
+      console.log('[setUserRoleOverrideOnList] Users connected:', areConnected);
+
+      // Get invitee's privacy settings
+      const { rows: privacyRows } = await db.query(
+        `SELECT COALESCE((privacy_settings->>'privacy_mode')::VARCHAR, 'standard') as privacy_mode
+         FROM user_settings WHERE user_id = $1`,
+        [userId]
       );
-      console.log('[setUserRoleOverrideOnList] Upsert successful:', upsert.rows[0]);
+
+      const privacyMode = privacyRows.length > 0 ? privacyRows[0].privacy_mode : 'standard';
+      console.log('[setUserRoleOverrideOnList] Invitee privacy mode:', privacyMode);
+
+      // If users are connected, apply the share immediately
+      if (areConnected) {
+        console.log('[setUserRoleOverrideOnList] Users are connected, applying share immediately');
+
+        const upsert = await db.query(
+          `INSERT INTO public.list_user_overrides (id, list_id, user_id, role, permissions)
+             VALUES ($1, $2, $3, $4, $5::jsonb)
+           ON CONFLICT (list_id, user_id)
+             DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions, deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
+           RETURNING *`,
+          [uuidv4(), listId, userId, role, permissions ? JSON.stringify(permissions) : null]
+        );
+        console.log('[setUserRoleOverrideOnList] Upsert successful:', upsert.rows[0]);
       
-      // Verify the insert actually worked
-      const verifyQuery = await db.query(
-        `SELECT * FROM public.list_user_overrides 
-         WHERE list_id = $1 AND user_id = $2`,
-        [listId, userId]
-      );
-      console.log('[setUserRoleOverrideOnList] Verification query found:', verifyQuery.rows.length, 'rows');
-      if (verifyQuery.rows.length > 0) {
-        console.log('[setUserRoleOverrideOnList] Verified data:', verifyQuery.rows[0]);
-      }
+        // Create change log and notify for connected users
 
       // Create a change_log entry for the newly shared/blocked user so they can sync the list
       if (userId !== requester_id) {
@@ -778,7 +793,117 @@ const CollaborationController = {
         }
       }
 
-      return res.status(201).json(upsert.rows[0]);
+        return res.status(201).json(upsert.rows[0]);
+      }
+
+      // Users are not connected - create a pending invitation
+      console.log('[setUserRoleOverrideOnList] Users not connected, creating pending invitation');
+
+      let connectionInvitationId = null;
+
+      // If invitee is private, create a connection request first
+      if (privacyMode === 'private') {
+        console.log('[setUserRoleOverrideOnList] Invitee is private, creating connection request with list context');
+
+        // Check if there's already a pending connection request
+        const { rows: existingConnection } = await db.query(
+          `SELECT id FROM connection_invitations
+           WHERE sender_id = $1 AND recipient_id = $2 AND status = 'pending'`,
+          [requester_id, userId]
+        );
+
+        if (existingConnection.length === 0) {
+          // Create connection request with list share context
+          const { rows: connectionInvite } = await db.query(
+            `INSERT INTO connection_invitations
+             (sender_id, recipient_id, status, invitation_context, metadata, message)
+             VALUES ($1, $2, 'pending', 'list_share', $3::jsonb, $4)
+             RETURNING id`,
+            [
+              requester_id,
+              userId,
+              JSON.stringify({
+                list_id: listId,
+                list_name: list.name,
+                role: role,
+                permissions: permissions
+              }),
+              message || `I'd like to share "${list.name}" with you`
+            ]
+          );
+
+          connectionInvitationId = connectionInvite[0].id;
+          console.log('[setUserRoleOverrideOnList] Created connection invitation:', connectionInvitationId);
+
+          // Create notification for connection request
+          await db.query(
+            `INSERT INTO notifications (user_id, notification_type, title, body, data, is_read)
+             VALUES ($1, 'connection_request', 'Connection Request with List Share', $2, $3::jsonb, false)`,
+            [
+              userId,
+              `${req.user.username || 'Someone'} wants to connect and share "${list.name}" with you`,
+              JSON.stringify({
+                sender_id: requester_id,
+                invitation_id: connectionInvitationId,
+                list_id: listId,
+                list_name: list.name,
+                role: role
+              })
+            ]
+          );
+        } else {
+          connectionInvitationId = existingConnection[0].id;
+          console.log('[setUserRoleOverrideOnList] Using existing connection invitation:', connectionInvitationId);
+        }
+      }
+
+      // Create pending list invitation
+      const { rows: pendingInvite } = await db.query(
+        `SELECT * FROM create_or_update_pending_list_invitation($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+        [listId, requester_id, userId, role, permissions, message, connectionInvitationId]
+      );
+
+      const invitation = pendingInvite[0];
+      console.log('[setUserRoleOverrideOnList] Created pending invitation:', invitation);
+
+      // Create notification for list invitation (if not requiring connection)
+      if (!invitation.requires_connection) {
+        await db.query(
+          `INSERT INTO notifications (user_id, notification_type, title, body, data, is_read)
+           VALUES ($1, 'list_invitation', 'List Invitation', $2, $3::jsonb, false)`,
+          [
+            userId,
+            `${req.user.username || 'Someone'} invited you to collaborate on "${list.name}"`,
+            JSON.stringify({
+              inviter_id: requester_id,
+              invitation_id: invitation.invitation_id,
+              list_id: listId,
+              list_name: list.name,
+              role: role
+            })
+          ]
+        );
+      }
+
+      // Return response indicating pending invitation was created
+      return res.status(201).json({
+        success: true,
+        status: 'pending',
+        requiresConnection: invitation.requires_connection,
+        invitation: {
+          id: invitation.invitation_id,
+          listId: listId,
+          inviteeId: userId,
+          role: role,
+          status: invitation.invitation_status,
+          requiresConnection: invitation.requires_connection,
+          connectionInvitationId: connectionInvitationId,
+          message: privacyMode === 'private'
+            ? 'Connection request sent. List will be shared once connection is accepted.'
+            : 'List invitation sent. Waiting for user to accept.'
+        }
+      });
+
     } catch (e) {
       console.error('[setUserRoleOverrideOnList] Error:', e.message, e.stack);
       return res.status(500).json({ error: 'Internal Server Error' });
@@ -970,13 +1095,52 @@ const CollaborationController = {
       }
 
       const { rows } = await db.query(
-        `SELECT m.group_id, m.user_id, m.role, m.joined_at, u.username, u.email, u.full_name,
-                u.profile_image_url AS avatar_url
-         FROM collaboration_group_members m
-         JOIN users u ON u.id = m.user_id
-         WHERE m.group_id = $1
-         ORDER BY m.joined_at ASC`,
-        [groupId]
+        `SELECT
+          m.group_id,
+          m.user_id,
+          m.role,
+          m.joined_at,
+          -- Ghost users show anonymized data unless viewer is connected
+          CASE
+            WHEN us.privacy_settings->>'privacy_mode' = 'ghost'
+                 AND NOT public.can_view_user($2::uuid, m.user_id)
+            THEN 'Anonymous Member'
+            ELSE u.username
+          END as username,
+          -- Hide email for ghost and private users
+          CASE
+            WHEN us.privacy_settings->>'privacy_mode' IN ('ghost', 'private')
+                 AND NOT public.can_view_user($2::uuid, m.user_id)
+            THEN NULL
+            ELSE u.email
+          END as email,
+          -- Hide full name for ghost users
+          CASE
+            WHEN us.privacy_settings->>'privacy_mode' = 'ghost'
+                 AND NOT public.can_view_user($2::uuid, m.user_id)
+            THEN NULL
+            WHEN us.privacy_settings->>'privacy_mode' = 'private'
+                 AND NOT public.can_view_user($2::uuid, m.user_id)
+            THEN NULL
+            ELSE u.full_name
+          END as full_name,
+          -- Hide avatar for ghost users
+          CASE
+            WHEN us.privacy_settings->>'privacy_mode' = 'ghost'
+                 AND NOT public.can_view_user($2::uuid, m.user_id)
+            THEN NULL
+            ELSE u.profile_image_url
+          END as avatar_url,
+          -- Include privacy mode for frontend handling
+          COALESCE(us.privacy_settings->>'privacy_mode', 'private') as privacy_mode,
+          -- Check if anonymous in groups setting is enabled
+          COALESCE((us.privacy_settings->>'anonymous_in_groups')::boolean, false) as anonymous_in_groups
+        FROM collaboration_group_members m
+        JOIN users u ON u.id = m.user_id
+        LEFT JOIN user_settings us ON u.id = us.user_id
+        WHERE m.group_id = $1
+        ORDER BY m.joined_at ASC`,
+        [groupId, requester_id]
       );
       res.status(200).json(rows);
     } catch (error) {
@@ -1445,6 +1609,114 @@ const CollaborationController = {
         } catch (error) {
             console.error('Error unclaiming gift:', error);
             res.status(500).json({ error: 'Internal Server Error' });
+        }
+    },
+
+    // Group List Attachment Consent endpoints
+
+    // Get pending consents for the current user
+    getPendingConsents: async (req, res) => {
+        const userId = req.user.id;
+
+        try {
+            const result = await db.query(
+                `SELECT * FROM get_pending_group_list_consents($1)`,
+                [userId]
+            );
+
+            return res.json({
+                success: true,
+                consents: result.rows
+            });
+        } catch (error) {
+            console.error('[getPendingConsents] Error:', error);
+            return res.status(500).json({ error: 'Failed to fetch pending consents' });
+        }
+    },
+
+    // Accept a consent for list attachment
+    acceptConsent: async (req, res) => {
+        const userId = req.user.id;
+        const { consentId } = req.params;
+
+        try {
+            // Get consent details first
+            const consentResult = await db.query(
+                `SELECT list_id, group_id FROM group_list_attachment_consents
+                 WHERE id = $1 AND user_id = $2 AND status = 'pending'`,
+                [consentId, userId]
+            );
+
+            if (consentResult.rows.length === 0) {
+                return res.status(404).json({ error: 'Consent not found or already processed' });
+            }
+
+            const consent = consentResult.rows[0];
+
+            // Accept the consent
+            const result = await db.query(
+                `SELECT accept_group_list_consent($1, $2, $3) as success`,
+                [userId, consent.list_id, consent.group_id]
+            );
+
+            if (result.rows[0].success) {
+                // Notify user via socket
+                safeSocketService.notifyUser(userId, 'list_access_granted', {
+                    listId: consent.list_id,
+                    groupId: consent.group_id,
+                    accessType: 'group_consent',
+                    timestamp: Date.now()
+                });
+
+                return res.json({
+                    success: true,
+                    message: 'Consent granted successfully'
+                });
+            }
+
+            return res.status(400).json({ error: 'Failed to grant consent' });
+        } catch (error) {
+            console.error('[acceptConsent] Error:', error);
+            return res.status(500).json({ error: 'Failed to accept consent' });
+        }
+    },
+
+    // Decline a consent for list attachment
+    declineConsent: async (req, res) => {
+        const userId = req.user.id;
+        const { consentId } = req.params;
+
+        try {
+            // Get consent details first
+            const consentResult = await db.query(
+                `SELECT list_id, group_id FROM group_list_attachment_consents
+                 WHERE id = $1 AND user_id = $2 AND status = 'pending'`,
+                [consentId, userId]
+            );
+
+            if (consentResult.rows.length === 0) {
+                return res.status(404).json({ error: 'Consent not found or already processed' });
+            }
+
+            const consent = consentResult.rows[0];
+
+            // Decline the consent
+            const result = await db.query(
+                `SELECT decline_group_list_consent($1, $2, $3) as success`,
+                [userId, consent.list_id, consent.group_id]
+            );
+
+            if (result.rows[0].success) {
+                return res.json({
+                    success: true,
+                    message: 'Consent declined successfully'
+                });
+            }
+
+            return res.status(400).json({ error: 'Failed to decline consent' });
+        } catch (error) {
+            console.error('[declineConsent] Error:', error);
+            return res.status(500).json({ error: 'Failed to decline consent' });
         }
     },
 

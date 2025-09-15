@@ -51,6 +51,11 @@ function createCollaborationRouter(collaborationController) {
   // List-specific per-group per-user roles
   router.put('/lists/:listId/groups/:groupId/users/:userId/role', authenticateJWT, collaborationController.setUserRoleForGroupOnList);
 
+  // Group List Attachment Consent routes
+  router.get('/consents/pending', authenticateJWT, collaborationController.getPendingConsents);
+  router.post('/consents/:consentId/accept', authenticateJWT, collaborationController.acceptConsent);
+  router.post('/consents/:consentId/decline', authenticateJWT, collaborationController.declineConsent);
+
   // "Shop For" routes
   router.post('/items/:itemId/claim', authenticateJWT, collaborationController.claimGift);
   router.delete('/items/:itemId/claim', authenticateJWT, collaborationController.unclaimGift);
