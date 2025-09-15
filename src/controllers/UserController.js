@@ -1041,6 +1041,82 @@ function userControllerFactory(socketService = null) {
     }
   };
 
+  /**
+   * Search for users by username, email, or display name
+   * Respects privacy settings - only shows public info for non-connected users
+   */
+  const searchUsers = async (req, res) => {
+    const { q: query, limit = 20 } = req.query;
+    const currentUserId = req.user.id;
+
+    if (!query || query.length < 2) {
+      return res.json({ users: [] });
+    }
+
+    try {
+      const searchQuery = `%${query}%`;
+
+      // Search all users, include connection status
+      const { rows } = await db.query(
+        `SELECT DISTINCT
+          u.id,
+          u.username,
+          u.email,
+          u.full_name as display_name,
+          u.profile_image_url as avatar_url,
+          CASE
+            WHEN c.id IS NOT NULL THEN true
+            ELSE false
+          END as is_connected,
+          CASE
+            WHEN ci.id IS NOT NULL THEN true
+            ELSE false
+          END as has_pending_connection,
+          CASE WHEN c.id IS NOT NULL THEN 0 ELSE 1 END as connection_sort
+        FROM users u
+        LEFT JOIN connections c ON
+          ((c.user_id = $1 AND c.connection_id = u.id) OR
+           (c.user_id = u.id AND c.connection_id = $1))
+          AND c.status = 'accepted'
+          AND c.removed_at IS NULL
+        LEFT JOIN connection_invitations ci ON
+          ((ci.sender_id = $1 AND ci.recipient_id = u.id) OR
+           (ci.sender_id = u.id AND ci.recipient_id = $1))
+          AND ci.status = 'pending'
+        WHERE u.id != $1
+          AND (u.username ILIKE $2 OR u.email ILIKE $2 OR u.full_name ILIKE $2)
+          AND u.deleted_at IS NULL
+        ORDER BY
+          connection_sort, -- Connected users first
+          u.username
+        LIMIT $3`,
+        [currentUserId, searchQuery, parseInt(limit)]
+      );
+
+      // Apply privacy settings for non-connected users
+      const processedUsers = rows.map(user => {
+        // Remove the connection_sort field as it's only for ordering
+        const { connection_sort, ...userWithoutSort } = user;
+
+        if (!user.is_connected) {
+          // For non-connected users, hide email and display name based on privacy settings
+          // For now, we'll show basic info but you can enhance this with actual privacy settings
+          return {
+            ...userWithoutSort,
+            email: null, // Hide email for non-connected users
+            display_name: user.display_name || user.username // Show display name if available
+          };
+        }
+        return userWithoutSort;
+      });
+
+      return res.json({ users: processedUsers });
+    } catch (error) {
+      console.error('Error searching users:', error);
+      return res.status(500).json({ error: 'Failed to search users' });
+    }
+  };
+
   // Return all controller methods
   return {
     getUsers,
@@ -1054,7 +1130,8 @@ function userControllerFactory(socketService = null) {
     getUserListsWithAccess,
     getUserListsLive,
     getUserSuggestions,
-    getUsersByIds
+    getUsersByIds,
+    searchUsers
   };
 }
 

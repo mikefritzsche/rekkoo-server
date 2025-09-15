@@ -79,6 +79,8 @@ const invitationRoutes = require('./routes/invitations.routes');
 const { log } = require('console');
 const osmRoutes = require('./routes/osm.routes');
 const giftRoutes = require('./routes/gifts.routes');
+const createGroupInvitationsController = require('./controllers/GroupInvitationsController');
+const createGroupInvitationsRoutes = require('./routes/group-invitations.routes');
 
 // --- 2. Initialize Express App and HTTP Server ---
 const app = express();
@@ -104,6 +106,7 @@ const searchController = searchControllerFactory(socketService);
 const recipeController = recipeControllerFactory(socketService);
 const publicListsController = publicListsControllerFactory();
 const listTypesController = listTypesControllerFactory();
+const groupInvitationsController = createGroupInvitationsController(socketService);
 
 console.log('CORS_ORIGIN', process.env.CORS_ORIGIN);
 
@@ -260,6 +263,7 @@ app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
 app.use('/v1.0/collaboration', createCollaborationRouter(collaborationController));
 app.use('/v1.0/connections', createConnectionsRouter(connectionsController));
+app.use('/v1.0/groups', createGroupInvitationsRoutes(groupInvitationsController));
 app.use('/v1.0/gifts', giftRoutes);
 
 // --- 7. Basic/Utility Routes ---

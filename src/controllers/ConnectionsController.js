@@ -146,6 +146,8 @@ function connectionsControllerFactory(socketService = null) {
       try {
         const result = await db.query(
           `SELECT ci.*,
+                  ci.invitation_context,
+                  ci.metadata,
                   u.username,
                   -- Only show full_name if sender's privacy mode is not 'private'
                   CASE

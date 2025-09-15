@@ -842,15 +842,32 @@ const CollaborationController = {
       return res.status(400).json({ error: 'Group name is required' });
     }
 
+    const client = await db.pool.connect();
     try {
-      const { rows } = await db.query(
+      await client.query('BEGIN');
+
+      // Create the group
+      const { rows } = await client.query(
         'INSERT INTO collaboration_groups (name, description, owner_id) VALUES ($1, $2, $3) RETURNING *',
         [name, description, owner_id]
       );
-      res.status(201).json(rows[0]);
+
+      const group = rows[0];
+
+      // Add the owner as a member with 'owner' role
+      await client.query(
+        'INSERT INTO collaboration_group_members (group_id, user_id, role) VALUES ($1, $2, $3)',
+        [group.id, owner_id, 'owner']
+      );
+
+      await client.query('COMMIT');
+      res.status(201).json(group);
     } catch (error) {
+      await client.query('ROLLBACK');
       console.error('Error creating group:', error);
       res.status(500).json({ error: 'Internal Server Error' });
+    } finally {
+      client.release();
     }
   },
 

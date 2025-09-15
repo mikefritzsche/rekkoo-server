@@ -38,6 +38,13 @@ function createUserRouter(userController) {
   router.delete('/', authenticateJWT, userController.deleteMultipleUsers);
 
   /**
+   * @route GET /search
+   * @desc Search for users by username, email, or display name
+   * @access Private
+   */
+  router.get('/search', authenticateJWT, userController.searchUsers);
+
+  /**
    * @route GET /:id
    * @desc Get user by ID
    * @access Private
