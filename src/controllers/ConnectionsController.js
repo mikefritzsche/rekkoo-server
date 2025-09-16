@@ -29,6 +29,22 @@ function connectionsControllerFactory(socketService = null) {
       }
 
       try {
+        // Check if user can send a connection request (rate limiting and history check)
+        const canSendCheck = await db.query(
+          `SELECT * FROM public.can_send_connection_request($1, $2)`,
+          [senderId, recipientId]
+        );
+
+        const canSend = canSendCheck.rows[0];
+        if (!canSend.can_send) {
+          return res.status(400).json({
+            error: canSend.reason,
+            retryAfter: canSend.retry_after,
+            attemptCount: canSend.attempt_count,
+            declinedCount: canSend.declined_count
+          });
+        }
+
         // Check if connection already exists
         const existingConnection = await db.query(
           `SELECT * FROM connections
@@ -343,18 +359,22 @@ function connectionsControllerFactory(socketService = null) {
     declineRequest: async (req, res) => {
       const userId = req.user.id;
       const { requestId } = req.params;
+      const { declineType = 'standard', declineMessage, notifySender = false } = req.body;
 
       try {
         // Begin transaction
         await db.query('BEGIN');
 
-        // Update invitation status
+        // Update invitation status with decline details
         const result = await db.query(
           `UPDATE connection_invitations
-           SET status = 'declined', responded_at = NOW()
+           SET status = 'declined',
+               responded_at = NOW(),
+               decline_type = $3,
+               decline_message = $4
            WHERE id = $1 AND recipient_id = $2 AND status = 'pending'
            RETURNING sender_id`,
-          [requestId, userId]
+          [requestId, userId, declineType, declineMessage]
         );
 
         if (result.rows.length === 0) {
@@ -363,6 +383,12 @@ function connectionsControllerFactory(socketService = null) {
         }
 
         const senderId = result.rows[0].sender_id;
+
+        // Record the decline in history (with soft block if requested)
+        await db.query(
+          `SELECT public.record_connection_decline($1, $2, $3, $4)`,
+          [senderId, userId, declineType, declineType === 'soft_block' ? 90 : null]
+        );
 
         // Remove pending connection records
         await db.query(
@@ -375,7 +401,34 @@ function connectionsControllerFactory(socketService = null) {
 
         await db.query('COMMIT');
 
-        res.json({ message: 'Connection request declined' });
+        // Check if sender should be notified (based on their privacy settings)
+        const senderSettings = await db.query(
+          `SELECT privacy_settings->>'notify_on_request_declined' as notify_declined
+           FROM user_settings WHERE user_id = $1`,
+          [senderId]
+        );
+
+        const shouldNotify = notifySender ||
+          (senderSettings.rows[0] && senderSettings.rows[0].notify_declined === 'true');
+
+        if (shouldNotify) {
+          // Notify sender that request was declined
+          safeSocketService.notifyUser(senderId, 'connection:declined', {
+            declinedBy: {
+              id: userId,
+              username: req.user.username
+            },
+            declineType,
+            message: declineType === 'soft_block'
+              ? 'Your connection request was declined. You cannot send another request to this user at this time.'
+              : 'Your connection request was declined.'
+          });
+        }
+
+        res.json({
+          message: 'Connection request declined',
+          declineType
+        });
       } catch (error) {
         await db.query('ROLLBACK');
         console.error('Error declining connection request:', error);
@@ -1191,6 +1244,147 @@ function connectionsControllerFactory(socketService = null) {
         });
       } catch (error) {
         console.error('Error connecting by code:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    },
+
+    /**
+     * Get connection request history for the current user
+     */
+    getRequestHistory: async (req, res) => {
+      const userId = req.user.id;
+      const { type = 'sent' } = req.query; // 'sent', 'received', 'all'
+
+      try {
+        let query;
+        let params = [userId];
+
+        if (type === 'sent') {
+          // Get requests sent by the user with history
+          query = `
+            SELECT
+              ucr.id,
+              ucr.recipient_id as user_id,
+              u.username,
+              u.full_name,
+              u.profile_image_url,
+              ucr.status,
+              ucr.message,
+              ucr.created_at,
+              ucr.responded_at,
+              ucr.decline_type,
+              ucr.decline_message,
+              ucr.total_attempts,
+              ucr.declined_count,
+              ucr.is_soft_blocked,
+              ucr.show_declined_status,
+              ucr.can_retry_after
+            FROM user_connection_requests ucr
+            JOIN users u ON u.id = ucr.recipient_id
+            WHERE ucr.sender_id = $1
+            ORDER BY ucr.created_at DESC
+            LIMIT 50`;
+        } else if (type === 'received') {
+          // Get requests received by the user
+          query = `
+            SELECT
+              ucr.id,
+              ucr.sender_id as user_id,
+              u.username,
+              u.full_name,
+              u.profile_image_url,
+              ucr.status,
+              ucr.message,
+              ucr.created_at,
+              ucr.responded_at,
+              ucr.decline_type,
+              ucr.total_attempts,
+              ucr.declined_count
+            FROM user_connection_requests ucr
+            JOIN users u ON u.id = ucr.sender_id
+            WHERE ucr.recipient_id = $1
+            ORDER BY ucr.created_at DESC
+            LIMIT 50`;
+        } else {
+          // Get all request history
+          query = `
+            SELECT * FROM (
+              SELECT
+                ucr.id,
+                'sent' as direction,
+                ucr.recipient_id as user_id,
+                u.username,
+                u.full_name,
+                ucr.status,
+                ucr.created_at,
+                ucr.total_attempts,
+                ucr.declined_count,
+                ucr.can_retry_after
+              FROM user_connection_requests ucr
+              JOIN users u ON u.id = ucr.recipient_id
+              WHERE ucr.sender_id = $1
+
+              UNION ALL
+
+              SELECT
+                ucr.id,
+                'received' as direction,
+                ucr.sender_id as user_id,
+                u.username,
+                u.full_name,
+                ucr.status,
+                ucr.created_at,
+                ucr.total_attempts,
+                ucr.declined_count,
+                NULL as can_retry_after
+              FROM user_connection_requests ucr
+              JOIN users u ON u.id = ucr.sender_id
+              WHERE ucr.recipient_id = $1
+            ) combined
+            ORDER BY created_at DESC
+            LIMIT 100`;
+        }
+
+        const result = await db.query(query, params);
+
+        res.json({
+          history: result.rows,
+          type
+        });
+      } catch (error) {
+        console.error('Error fetching request history:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    },
+
+    /**
+     * Check if a user can send a connection request
+     */
+    canSendRequest: async (req, res) => {
+      const senderId = req.user.id;
+      const { recipientId } = req.params;
+
+      if (!recipientId) {
+        return res.status(400).json({ error: 'Recipient ID is required' });
+      }
+
+      try {
+        const result = await db.query(
+          `SELECT * FROM public.can_send_connection_request($1, $2)`,
+          [senderId, recipientId]
+        );
+
+        const canSend = result.rows[0];
+
+        res.json({
+          canSend: canSend.can_send,
+          reason: canSend.reason,
+          retryAfter: canSend.retry_after,
+          attemptCount: canSend.attempt_count,
+          declinedCount: canSend.declined_count
+        });
+      } catch (error) {
+        console.error('Error checking if can send request:', error);
         res.status(500).json({ error: 'Internal server error' });
       }
     }
