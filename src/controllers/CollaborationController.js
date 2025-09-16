@@ -627,7 +627,7 @@ const CollaborationController = {
     
     try {
       // Get list details
-      const { rows: listRows } = await db.query('SELECT id, name, owner_id FROM lists WHERE id = $1', [listId]);
+      const { rows: listRows } = await db.query('SELECT id, title, owner_id FROM lists WHERE id = $1', [listId]);
       if (listRows.length === 0) {
         console.log('[setUserRoleOverrideOnList] List not found:', listId);
         return res.status(404).json({ error: 'List not found' });

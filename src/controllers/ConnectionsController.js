@@ -122,14 +122,19 @@ function connectionsControllerFactory(socketService = null) {
           sender: {
             id: req.user.id,
             username: req.user.username,
-            full_name: req.user.full_name
+            full_name: req.user.full_name,
+            profile_image_url: req.user.profile_image_url
           }
         });
 
+        // Check if the invitation was auto-accepted by the trigger
+        const wasAutoAccepted = invitation.rows[0].status === 'accepted';
+
         res.status(201).json({
-          message: 'Connection request sent',
+          message: wasAutoAccepted ? 'Connection automatically accepted' : 'Connection request sent',
           invitation: invitation.rows[0],
-          connectionType: 'mutual'
+          connectionType: 'mutual',
+          autoAccepted: wasAutoAccepted
         });
       } catch (error) {
         console.error('Error sending connection request:', error);
