@@ -47,6 +47,7 @@ const createCollaborationRouter = require('./routes/collaboration.routes.js');
 const createListTypesRouter = require('./routes/list-types.routes');
 const createConnectionsRouter = require('./routes/connections.routes');
 const createListSharingRouter = require('./routes/list-sharing.routes');
+const createPreferencesRouter = require('./routes/preferences.routes');
 
 // Import controllers that need initialization
 const favoritesControllerFactory = require('./controllers/FavoritesController');
@@ -65,6 +66,7 @@ const recipeControllerFactory = require('./controllers/RecipeController');
 const publicListsControllerFactory = require('./controllers/PublicListsController');
 const listTypesControllerFactory = require('./controllers/ListTypesController');
 const listSharingController = require('./controllers/ListSharingController');
+const preferencesControllerFactory = require('./controllers/PreferencesController');
 
 // Import standard routes
 const claudeRoutes = require('./routes/claude');
@@ -106,6 +108,7 @@ const searchController = searchControllerFactory(socketService);
 const recipeController = recipeControllerFactory(socketService);
 const publicListsController = publicListsControllerFactory();
 const listTypesController = listTypesControllerFactory();
+const preferencesController = preferencesControllerFactory(socketService);
 const groupInvitationsController = createGroupInvitationsController(socketService);
 
 console.log('CORS_ORIGIN', process.env.CORS_ORIGIN);
@@ -263,6 +266,7 @@ app.use('/api/chat', initializeChatRoutes(socketService));
 app.use('/sync', initializeSyncRoutes(socketService));
 app.use('/v1.0/collaboration', createCollaborationRouter(collaborationController));
 app.use('/v1.0/connections', createConnectionsRouter(connectionsController));
+app.use('/v1.0/preferences', createPreferencesRouter(preferencesController));
 app.use('/v1.0/groups', createGroupInvitationsRoutes(groupInvitationsController));
 app.use('/v1.0/gifts', giftRoutes);
 
