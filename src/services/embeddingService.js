@@ -28,7 +28,7 @@ class EmbeddingService {
             return this.dimension;
         } catch (error) {
             logger.error('Failed to fetch embedding dimensions from AI server:', error);
-            return 384; // Default to the model's dimension
+            return 768; // Default to the new model's dimension (updated from 384)
         }
     }
 
@@ -172,10 +172,10 @@ class EmbeddingService {
             const embedding = await this.generateEmbedding(content);
             
             const result = await db.query(
-                `INSERT INTO embeddings (content, embedding, metadata)
+                `INSERT INTO embeddings (related_entity_id, entity_type, embedding)
                  VALUES ($1, $2, $3)
-                 RETURNING id, content, metadata, created_at`,
-                [content, `[${embedding.join(',')}]`, metadata]
+                 RETURNING id, related_entity_id, entity_type, created_at`,
+                [metadata.entity_id || content, metadata.entity_type || 'generic', `[${embedding.join(',')}]`]
             );
 
             return result.rows[0];
@@ -349,6 +349,194 @@ class EmbeddingService {
         } catch (error) {
             logger.error('Failed to get embedding debug info:', error);
             throw new Error('Failed to get embedding debug info');
+        }
+    }
+
+    /**
+     * Find users similar to a given user based on their preferences
+     * @param {string} userId - The user ID to find similar users for
+     * @param {Object} options - Options for similarity search
+     * @returns {Array} Array of similar users with similarity scores
+     */
+    async findSimilarUsersByPreferences(userId, { limit = 10, threshold = 0.3 } = {}) {
+        try {
+            // Get the user's preference embedding
+            const userPrefQuery = `
+                SELECT embedding
+                FROM embeddings
+                WHERE related_entity_id = $1
+                  AND entity_type = 'user_preferences'
+                ORDER BY updated_at DESC
+                LIMIT 1
+            `;
+            const { rows: prefRows } = await db.query(userPrefQuery, [userId]);
+
+            if (!prefRows || prefRows.length === 0) {
+                logger.info(`No preference embedding found for user ${userId}`);
+                return [];
+            }
+
+            const userEmbedding = prefRows[0].embedding;
+
+            // Find other users with similar preference embeddings
+            const similarUsersQuery = `
+                SELECT
+                    u.id,
+                    u.username,
+                    u.full_name,
+                    u.profile_image_url,
+                    1 - (e.embedding <=> $1) as similarity
+                FROM embeddings e
+                JOIN users u ON e.related_entity_id = u.id
+                WHERE e.entity_type = 'user_preferences'
+                  AND e.related_entity_id != $2
+                  AND u.deleted_at IS NULL
+                  AND 1 - (e.embedding <=> $1) > $3
+                ORDER BY similarity DESC
+                LIMIT $4
+            `;
+
+            const { rows } = await db.query(similarUsersQuery, [
+                userEmbedding,
+                userId,
+                threshold,
+                limit
+            ]);
+
+            return rows;
+        } catch (error) {
+            logger.error('Failed to find similar users by preferences:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Find content similar to user preferences
+     * @param {string} userId - The user ID
+     * @param {Object} options - Options for similarity search
+     * @returns {Array} Array of content items with similarity scores
+     */
+    async findContentByUserPreferences(userId, options = {}) {
+        const {
+            limit = 20,
+            discoveryMode = 'balanced',
+            contentTypes = ['list_item', 'list'],
+            excludeUserContent = false
+        } = options;
+
+        try {
+            // Get the user's preference embedding
+            const userPrefQuery = `
+                SELECT embedding
+                FROM embeddings
+                WHERE related_entity_id = $1
+                  AND entity_type = 'user_preferences'
+                ORDER BY updated_at DESC
+                LIMIT 1
+            `;
+            const { rows: prefRows } = await db.query(userPrefQuery, [userId]);
+
+            if (!prefRows || prefRows.length === 0) {
+                logger.info(`No preference embedding found for user ${userId}`);
+                return [];
+            }
+
+            const userEmbedding = prefRows[0].embedding;
+
+            // Set threshold based on discovery mode
+            const thresholds = {
+                'focused': 0.7,    // High similarity only
+                'balanced': 0.5,   // Medium similarity
+                'explorer': 0.2    // Low similarity threshold
+            };
+            const threshold = thresholds[discoveryMode] || 0.5;
+
+            // Build content type filter
+            const typeFilter = contentTypes.length > 0
+                ? `AND e.entity_type = ANY($4)`
+                : '';
+
+            // Build user content exclusion filter
+            const userExclusionJoin = excludeUserContent
+                ? `LEFT JOIN list_items li ON e.related_entity_id = li.id AND e.entity_type = 'list_item'
+                   LEFT JOIN lists l ON e.related_entity_id = l.id AND e.entity_type = 'list'`
+                : '';
+
+            const userExclusionFilter = excludeUserContent
+                ? `AND (
+                     (e.entity_type = 'list_item' AND li.created_by != $5) OR
+                     (e.entity_type = 'list' AND l.created_by != $5) OR
+                     (e.entity_type NOT IN ('list_item', 'list'))
+                   )`
+                : '';
+
+            let paramIndex = 4;
+            const queryParams = [userEmbedding, threshold, limit];
+
+            if (contentTypes.length > 0) {
+                queryParams.push(contentTypes);
+                paramIndex++;
+            }
+
+            if (excludeUserContent) {
+                queryParams.push(userId);
+            }
+
+            const contentQuery = `
+                SELECT
+                    e.related_entity_id as id,
+                    e.entity_type,
+                    1 - (e.embedding <=> $1) as similarity
+                FROM embeddings e
+                ${userExclusionJoin}
+                WHERE 1 - (e.embedding <=> $1) > $2
+                  AND e.deleted_at IS NULL
+                  ${typeFilter}
+                  ${userExclusionFilter}
+                ORDER BY similarity DESC
+                LIMIT $3
+            `;
+
+            const { rows } = await db.query(contentQuery, queryParams);
+
+            return rows;
+        } catch (error) {
+            logger.error('Failed to find content by user preferences:', error);
+            return [];
+        }
+    }
+
+    /**
+     * Get preference similarity between two users
+     * @param {string} userId1 - First user ID
+     * @param {string} userId2 - Second user ID
+     * @returns {number|null} Similarity score between 0 and 1, or null if not computable
+     */
+    async getPreferenceSimilarity(userId1, userId2) {
+        try {
+            const query = `
+                SELECT
+                    1 - (e1.embedding <=> e2.embedding) as similarity
+                FROM embeddings e1
+                CROSS JOIN embeddings e2
+                WHERE e1.related_entity_id = $1
+                  AND e1.entity_type = 'user_preferences'
+                  AND e2.related_entity_id = $2
+                  AND e2.entity_type = 'user_preferences'
+                ORDER BY e1.updated_at DESC, e2.updated_at DESC
+                LIMIT 1
+            `;
+
+            const { rows } = await db.query(query, [userId1, userId2]);
+
+            if (rows.length === 0) {
+                return null;
+            }
+
+            return rows[0].similarity;
+        } catch (error) {
+            logger.error(`Failed to get preference similarity between users ${userId1} and ${userId2}:`, error);
+            return null;
         }
     }
 }

@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { logger } = require('../utils/logger');
+const embeddingService = require('../services/embeddingService');
 
 /**
  * Factory function that creates a PreferencesController
@@ -10,6 +11,135 @@ function preferencesControllerFactory(socketService = null) {
   // Create a dummy socket service if none is provided
   const safeSocketService = socketService || {
     notifyUser: () => {} // No-op function
+  };
+
+  /**
+   * Build a composite text representation of user preferences
+   * @param {number} userId - The user ID
+   * @param {Object} client - Database client for transactional queries
+   * @returns {Promise<string>} Composite preference text
+   */
+  const buildCompositePreferenceText = async (userId, client = null) => {
+    try {
+      const dbClient = client || db;
+
+      // Get all user preferences with category and subcategory details
+      const preferencesQuery = `
+        SELECT
+          c.name as category_name,
+          c.slug as category_slug,
+          s.name as subcategory_name,
+          s.slug as subcategory_slug,
+          s.keywords,
+          s.example_lists,
+          up.weight
+        FROM user_preferences up
+        JOIN preference_subcategories s ON s.id = up.subcategory_id
+        JOIN preference_categories c ON c.id = s.category_id
+        WHERE up.user_id = $1
+          AND up.weight > 0
+        ORDER BY up.weight DESC, c.display_order, s.name
+      `;
+
+      const { rows: preferences } = await dbClient.query(preferencesQuery, [userId]);
+
+      if (preferences.length === 0) {
+        return '';
+      }
+
+      // Build composite text from preferences
+      const textParts = [];
+
+      for (const pref of preferences) {
+        // Include category and subcategory names
+        const categoryText = `${pref.category_name} ${pref.subcategory_name}`;
+        textParts.push(categoryText);
+
+        // Include keywords if available
+        if (pref.keywords && Array.isArray(pref.keywords) && pref.keywords.length > 0) {
+          textParts.push(pref.keywords.join(' '));
+        }
+
+        // Include example lists if available
+        if (pref.example_lists && Array.isArray(pref.example_lists) && pref.example_lists.length > 0) {
+          textParts.push(pref.example_lists.join(' '));
+        }
+
+        // Weight the text by repeating important preferences
+        if (pref.weight > 1.5) {
+          textParts.push(categoryText); // Add once more for high-weight preferences
+        }
+      }
+
+      // Get discovery mode to add context
+      const settingsQuery = `
+        SELECT discovery_mode
+        FROM user_discovery_settings
+        WHERE user_id = $1
+      `;
+      const { rows: [settings] } = await dbClient.query(settingsQuery, [userId]);
+
+      if (settings && settings.discovery_mode) {
+        const modeContext = {
+          'focused': 'interested in specific focused content',
+          'balanced': 'interested in balanced mix of familiar and new content',
+          'explorer': 'interested in exploring diverse new content'
+        };
+        textParts.push(modeContext[settings.discovery_mode] || '');
+      }
+
+      return textParts.filter(text => text && text.trim()).join(' ');
+    } catch (error) {
+      logger.error(`Error building composite preference text for user ${userId}:`, error);
+      return '';
+    }
+  };
+
+  /**
+   * Generate and store preference embedding for a user
+   * @param {number} userId - The user ID
+   * @param {Object} client - Database client for transactional queries
+   */
+  const generatePreferenceEmbedding = async (userId, client = null) => {
+    try {
+      const dbClient = client || db;
+
+      // Build composite text from preferences
+      const compositeText = await buildCompositePreferenceText(userId, dbClient);
+
+      if (!compositeText) {
+        logger.info(`No preferences to generate embedding for user ${userId}`);
+        return null;
+      }
+
+      // Generate embedding
+      const embedding = await embeddingService.generateEmbedding(compositeText);
+
+      // Store embedding in embeddings table
+      const result = await dbClient.query(`
+        INSERT INTO embeddings (
+          related_entity_id,
+          entity_type,
+          embedding
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT (related_entity_id, entity_type)
+        DO UPDATE SET
+          embedding = EXCLUDED.embedding,
+          updated_at = CURRENT_TIMESTAMP
+        RETURNING id
+      `, [
+        userId,
+        'user_preferences',
+        `[${embedding.join(',')}]`
+      ]);
+
+      logger.info(`Generated preference embedding for user ${userId}, embedding ID: ${result.rows[0].id}`);
+      return result.rows[0].id;
+    } catch (error) {
+      logger.error(`Error generating preference embedding for user ${userId}:`, error);
+      return null;
+    }
   };
 
   /**
@@ -267,6 +397,9 @@ function preferencesControllerFactory(socketService = null) {
         `, [userId]);
       }
 
+      // Generate preference embedding after saving preferences
+      const embeddingId = await generatePreferenceEmbedding(userId, client);
+
       await client.query('COMMIT');
 
       // Emit socket event for real-time updates
@@ -279,7 +412,8 @@ function preferencesControllerFactory(socketService = null) {
       res.json({
         success: true,
         message: source === 'onboarding' ? 'Preferences saved successfully' : 'Preferences updated',
-        preferencesCount: preferences.length
+        preferencesCount: preferences.length,
+        embeddingGenerated: embeddingId !== null
       });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -349,11 +483,15 @@ function preferencesControllerFactory(socketService = null) {
         WHERE user_id = $1
       `, [userId]);
 
+      // Regenerate preference embedding after updating individual preference
+      const embeddingId = await generatePreferenceEmbedding(userId, client);
+
       await client.query('COMMIT');
 
       res.json({
         success: true,
-        message: action === 'remove' ? 'Preference removed' : 'Preference updated'
+        message: action === 'remove' ? 'Preference removed' : 'Preference updated',
+        embeddingRegenerated: embeddingId !== null
       });
     } catch (err) {
       await client.query('ROLLBACK');
@@ -368,7 +506,10 @@ function preferencesControllerFactory(socketService = null) {
    * Update discovery mode
    */
   const updateDiscoveryMode = async (req, res) => {
+    const client = await db.pool.connect();
     try {
+      await client.query('BEGIN');
+
       const userId = req.user.id;
       const { discoveryMode } = req.body;
 
@@ -376,7 +517,7 @@ function preferencesControllerFactory(socketService = null) {
         return res.status(400).json({ error: 'Invalid discovery mode' });
       }
 
-      await db.query(`
+      await client.query(`
         INSERT INTO user_discovery_settings (user_id, discovery_mode)
         VALUES ($1, $2)
         ON CONFLICT (user_id)
@@ -385,14 +526,68 @@ function preferencesControllerFactory(socketService = null) {
           updated_at = CURRENT_TIMESTAMP
       `, [userId, discoveryMode]);
 
+      // Regenerate preference embedding when discovery mode changes
+      // since discovery mode is included in the composite text
+      const embeddingId = await generatePreferenceEmbedding(userId, client);
+
+      await client.query('COMMIT');
+
       res.json({
         success: true,
         message: 'Discovery mode updated',
-        discoveryMode
+        discoveryMode,
+        embeddingRegenerated: embeddingId !== null
       });
     } catch (err) {
+      await client.query('ROLLBACK');
       logger.error('Error updating discovery mode:', err);
       res.status(500).json({ error: 'Failed to update discovery mode' });
+    } finally {
+      client.release();
+    }
+  };
+
+  /**
+   * Regenerate preference embedding for the current user
+   * Useful for users who saved preferences before embeddings were implemented
+   */
+  const regeneratePreferenceEmbedding = async (req, res) => {
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const userId = req.user.id;
+
+      // Check if user has preferences
+      const { rows: preferences } = await client.query(
+        'SELECT COUNT(*) as count FROM user_preferences WHERE user_id = $1 AND weight > 0',
+        [userId]
+      );
+
+      if (parseInt(preferences[0].count) === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No preferences found to generate embedding from'
+        });
+      }
+
+      // Generate the embedding
+      const embeddingId = await generatePreferenceEmbedding(userId, client);
+
+      await client.query('COMMIT');
+
+      res.json({
+        success: true,
+        message: 'Preference embedding regenerated successfully',
+        embeddingId,
+        hasEmbedding: embeddingId !== null
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      logger.error('Error regenerating preference embedding:', err);
+      res.status(500).json({ error: 'Failed to regenerate preference embedding' });
+    } finally {
+      client.release();
     }
   };
 
@@ -462,7 +657,8 @@ function preferencesControllerFactory(socketService = null) {
     saveUserPreferences,
     updatePreference,
     updateDiscoveryMode,
-    checkOnboardingStatus
+    checkOnboardingStatus,
+    regeneratePreferenceEmbedding
   };
 }
 

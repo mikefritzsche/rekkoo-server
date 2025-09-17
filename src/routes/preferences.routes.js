@@ -23,6 +23,9 @@ function createPreferencesRouter(preferencesController) {
   // Onboarding status
   router.get('/onboarding-status', authenticateJWT, preferencesController.checkOnboardingStatus);
 
+  // Regenerate preference embedding
+  router.post('/regenerate-embedding', authenticateJWT, preferencesController.regeneratePreferenceEmbedding);
+
   return router;
 }
 

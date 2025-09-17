@@ -24,11 +24,25 @@ function createUserRouter(userController) {
   router.get('/suggestions/debug', authenticateJWT, userController.debugUserSuggestions);
 
   /**
+   * @route GET /suggestions/preferences
+   * @desc Get user suggestions based on preference embeddings
+   * @access Private
+   */
+  router.get('/suggestions/preferences', authenticateJWT, userController.getUserSuggestionsWithPreferences);
+
+  /**
    * @route GET /suggestions
    * @desc Get users to suggest following
    * @access Private
    */
   router.get('/suggestions', authenticateJWT, userController.getUserSuggestions);
+
+  /**
+   * @route GET /preference-similarity/:targetUserId
+   * @desc Get preference similarity score between current user and target user
+   * @access Private
+   */
+  router.get('/preference-similarity/:targetUserId', authenticateJWT, userController.getPreferenceSimilarity);
 
   /**
    * @route GET /

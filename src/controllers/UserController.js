@@ -2,6 +2,7 @@ const db = require('../config/db');
 const bcrypt = require("bcrypt");
 const saltRounds = 12;
 const { logger } = require('../utils/logger');
+const embeddingService = require('../services/embeddingService');
 
 /**
  * Factory function that creates a UserController
@@ -1243,6 +1244,182 @@ function userControllerFactory(socketService = null) {
   };
 
   /**
+   * Get user suggestions based on preference embeddings
+   * Includes ALL users, with similarity scores for those with embeddings
+   */
+  const getUserSuggestionsWithPreferences = async (req, res) => {
+    const requestingUserId = req.user?.id;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+
+    logger.info(`[UserController] getUserSuggestionsWithPreferences - Request from user ${requestingUserId}, page ${page}, limit ${limit}`);
+
+    try {
+      // First get the user's discovery mode
+      const { rows: [settings] } = await db.query(`
+        SELECT discovery_mode
+        FROM user_discovery_settings
+        WHERE user_id = $1
+      `, [requestingUserId]);
+
+      const discoveryMode = settings?.discovery_mode || 'balanced';
+
+      // Get users with preference embeddings for similarity scoring
+      const similarUsers = await embeddingService.findSimilarUsersByPreferences(requestingUserId, {
+        limit: 100, // Get more to have good variety
+        threshold: 0.1 // Low threshold to get more candidates
+      });
+
+      // Create a map of user IDs to similarity scores
+      const similarityMap = new Map();
+      similarUsers.forEach(u => {
+        similarityMap.set(u.id, u.similarity);
+      });
+
+      // Get ALL eligible users (not just those with embeddings)
+      const allUsersQuery = `
+        WITH connected_users AS (
+          SELECT c1.connection_id as user_id
+          FROM connections c1
+          WHERE c1.user_id = $1
+            AND c1.status = 'accepted'
+            AND EXISTS (
+              SELECT 1 FROM connections c2
+              WHERE c2.user_id = c1.connection_id
+                AND c2.connection_id = $1
+                AND c2.status = 'accepted'
+            )
+        )
+        SELECT
+          u.id,
+          u.username,
+          u.full_name,
+          u.profile_image_url,
+          FALSE as is_followed  -- No more followers concept
+        FROM users u
+        LEFT JOIN user_settings us ON u.id = us.user_id
+        WHERE u.id != $1  -- Not the requesting user
+          AND u.deleted_at IS NULL
+          -- Exclude already connected users
+          AND u.id NOT IN (SELECT user_id FROM connected_users)
+          -- Exclude only ghost users unless connected
+          AND (
+            us.user_id IS NULL
+            OR COALESCE(us.privacy_settings->>'privacy_mode', 'standard') != 'ghost'
+          )
+          -- Respect show_in_suggestions setting
+          AND (
+            us.user_id IS NULL
+            OR us.privacy_settings->>'show_in_suggestions' IS NULL
+            OR COALESCE((us.privacy_settings->>'show_in_suggestions')::boolean, true) = true
+          )
+        ORDER BY random()  -- Random order for now, will sort by similarity later
+        LIMIT $2 OFFSET $3
+      `;
+
+      const { rows: allUsers } = await db.query(allUsersQuery, [requestingUserId, limit * 2, 0]);
+
+      // Add similarity scores to users who have them
+      const suggestions = allUsers.map(user => {
+        const similarity = similarityMap.get(user.id);
+        return {
+          ...user,
+          preference_similarity: similarity || undefined
+        };
+      });
+
+      // Sort by similarity (users with embeddings first, then random)
+      suggestions.sort((a, b) => {
+        if (a.preference_similarity && b.preference_similarity) {
+          return b.preference_similarity - a.preference_similarity; // Higher similarity first
+        }
+        if (a.preference_similarity) return -1; // Users with similarity come first
+        if (b.preference_similarity) return 1;
+        return 0; // Keep random order for users without similarity
+      });
+
+      // Apply pagination
+      const paginatedSuggestions = suggestions.slice(offset, offset + limit);
+
+      // Get total count of eligible users (not just those with embeddings)
+      const countQuery = `
+        WITH connected_users AS (
+          SELECT c1.connection_id as user_id
+          FROM connections c1
+          WHERE c1.user_id = $1
+            AND c1.status = 'accepted'
+            AND EXISTS (
+              SELECT 1 FROM connections c2
+              WHERE c2.user_id = c1.connection_id
+                AND c2.connection_id = $1
+                AND c2.status = 'accepted'
+            )
+        )
+        SELECT COUNT(*) as total
+        FROM users u
+        LEFT JOIN user_settings us ON u.id = us.user_id
+        WHERE u.id != $1
+          AND u.deleted_at IS NULL
+          AND u.id NOT IN (SELECT user_id FROM connected_users)
+          AND (
+            us.user_id IS NULL
+            OR COALESCE(us.privacy_settings->>'privacy_mode', 'standard') != 'ghost'
+          )
+          AND (
+            us.user_id IS NULL
+            OR us.privacy_settings->>'show_in_suggestions' IS NULL
+            OR COALESCE((us.privacy_settings->>'show_in_suggestions')::boolean, true) = true
+          )
+      `;
+      const { rows: [countResult] } = await db.query(countQuery, [requestingUserId]);
+
+      logger.info(`[UserController] getUserSuggestionsWithPreferences - Returning ${paginatedSuggestions.length} suggestions (${similarUsers.length} with embeddings)`);
+
+      res.status(200).json({
+        data: paginatedSuggestions,
+        pagination: {
+          total: parseInt(countResult.total),
+          page,
+          limit,
+          has_more: offset + paginatedSuggestions.length < parseInt(countResult.total)
+        },
+        mode: 'preference-based',
+        discovery_mode: discoveryMode
+      });
+    } catch (error) {
+      logger.error(`[UserController] Error getting preference-based suggestions for user ${requestingUserId}:`, error);
+      // Fall back to regular suggestions on error
+      return getUserSuggestions(req, res);
+    }
+  };
+
+  /**
+   * Get preference similarity score between the current user and another user
+   */
+  const getPreferenceSimilarity = async (req, res) => {
+    try {
+      const currentUserId = req.user.id;
+      const { targetUserId } = req.params;
+
+      if (!targetUserId) {
+        return res.status(400).json({ error: 'Target user ID is required' });
+      }
+
+      const similarity = await embeddingService.getPreferenceSimilarity(currentUserId, targetUserId);
+
+      res.json({
+        success: true,
+        similarity,
+        hasPreferences: similarity !== null
+      });
+    } catch (error) {
+      logger.error('Error getting preference similarity:', error);
+      res.status(500).json({ error: 'Failed to get preference similarity' });
+    }
+  };
+
+  /**
    * Get multiple users by their IDs
    */
   const getUsersByIds = async (req, res) => {
@@ -1417,6 +1594,8 @@ function userControllerFactory(socketService = null) {
     getUserListsWithAccess,
     getUserListsLive,
     getUserSuggestions,
+    getUserSuggestionsWithPreferences,
+    getPreferenceSimilarity,
     debugUserSuggestions,
     getUsersByIds,
     searchUsers
