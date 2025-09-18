@@ -353,7 +353,22 @@ const CollaborationController = {
          ORDER BY cg.name ASC`,
         [listId]
       );
-      return res.json(rows);
+
+      // DEBUG: Log what we're about to send
+      console.log('[getListGroupsWithRoles] Database rows:', JSON.stringify(rows, null, 2));
+
+      // Filter out any owner items that shouldn't be here
+      const filteredRows = rows.filter(row => {
+        const name = row.name || '';
+        const isOwnerItem = name.includes('Owner:') || name.toLowerCase() === 'owner';
+        if (isOwnerItem) {
+          console.log('[getListGroupsWithRoles] WARNING: Found owner item in database results:', row);
+        }
+        return !isOwnerItem;
+      });
+
+      console.log('[getListGroupsWithRoles] Sending filtered response:', JSON.stringify(filteredRows, null, 2));
+      return res.json(filteredRows);
     } catch (e) {
       console.error('Error fetching list groups:', e);
       return res.status(500).json({ error: 'Internal Server Error' });
