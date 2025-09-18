@@ -1581,6 +1581,101 @@ function userControllerFactory(socketService = null) {
     }
   };
 
+  /**
+   * Discover users that are not connected to the current user
+   * Excludes connected users and returns up to the limit
+   */
+  const discoverUsers = async (req, res) => {
+    const { limit = 20, exclude_connected = 'true' } = req.query;
+    const currentUserId = req.user.id;
+
+    try {
+      let query;
+      let params;
+
+      if (exclude_connected === 'true') {
+        // Get users who are NOT connected to the current user
+        query = `
+          SELECT
+            u.id,
+            u.username,
+            u.email,
+            u.full_name,
+            u.profile_image_url,
+            false as is_connected,
+            CASE
+              WHEN ci.id IS NOT NULL THEN true
+              ELSE false
+            END as has_pending_connection,
+            us.privacy_settings->>'privacy_mode' as privacy_mode
+          FROM users u
+          LEFT JOIN user_settings us ON us.user_id = u.id
+          LEFT JOIN connections c ON
+            ((c.user_id = $1 AND c.connection_id = u.id) OR
+             (c.user_id = u.id AND c.connection_id = $1))
+            AND c.status IN ('accepted', 'following')
+            AND c.removed_at IS NULL
+          LEFT JOIN connection_invitations ci ON
+            ((ci.sender_id = $1 AND ci.recipient_id = u.id) OR
+             (ci.sender_id = u.id AND ci.recipient_id = $1))
+            AND ci.status = 'pending'
+          WHERE u.id != $1
+            AND c.id IS NULL  -- Exclude connected users
+            AND u.deleted_at IS NULL
+            AND (us.privacy_settings->>'privacy_mode' IS NULL OR us.privacy_settings->>'privacy_mode' != 'ghost')  -- Exclude only ghost users
+            -- Remove the searchable_by_username filter - all non-ghost users should be discoverable
+          ORDER BY RANDOM()  -- Random discovery
+          LIMIT $2`;
+        params = [currentUserId, parseInt(limit)];
+      } else {
+        // Get all users (for debugging)
+        query = `
+          SELECT
+            u.id,
+            u.username,
+            u.email,
+            u.full_name,
+            u.profile_image_url,
+            CASE
+              WHEN c.id IS NOT NULL THEN true
+              ELSE false
+            END as is_connected,
+            CASE
+              WHEN ci.id IS NOT NULL THEN true
+              ELSE false
+            END as has_pending_connection,
+            us.privacy_settings->>'privacy_mode' as privacy_mode
+          FROM users u
+          LEFT JOIN user_settings us ON us.user_id = u.id
+          LEFT JOIN connections c ON
+            ((c.user_id = $1 AND c.connection_id = u.id) OR
+             (c.user_id = u.id AND c.connection_id = $1))
+            AND c.status IN ('accepted', 'following')
+            AND c.removed_at IS NULL
+          LEFT JOIN connection_invitations ci ON
+            ((ci.sender_id = $1 AND ci.recipient_id = u.id) OR
+             (ci.sender_id = u.id AND ci.recipient_id = $1))
+            AND ci.status = 'pending'
+          WHERE u.id != $1
+            AND u.deleted_at IS NULL
+            AND (us.privacy_settings->>'privacy_mode' IS NULL OR us.privacy_settings->>'privacy_mode' != 'ghost')
+          ORDER BY RANDOM()
+          LIMIT $2`;
+        params = [currentUserId, parseInt(limit)];
+      }
+
+      const { rows } = await db.query(query, params);
+
+      res.json({
+        users: rows,
+        count: rows.length
+      });
+    } catch (error) {
+      console.error('Error discovering users:', error);
+      res.status(500).json({ error: 'Failed to discover users' });
+    }
+  };
+
   // Return all controller methods
   return {
     getUsers,
@@ -1598,7 +1693,8 @@ function userControllerFactory(socketService = null) {
     getPreferenceSimilarity,
     debugUserSuggestions,
     getUsersByIds,
-    searchUsers
+    searchUsers,
+    discoverUsers
   };
 }
 

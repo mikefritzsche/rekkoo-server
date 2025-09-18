@@ -23,6 +23,7 @@ function createCollaborationRouter(collaborationController) {
   router.delete('/groups/:groupId/members/:userId', authenticateJWT, collaborationController.removeMemberFromGroup);
 
   // Group invitation routes
+  router.get('/groups/:groupId/invitations', authenticateJWT, collaborationController.getGroupInvitations);
   router.post('/groups/:groupId/invitations', authenticateJWT, collaborationController.inviteUserToGroup);
   router.get('/groups/invitations/pending', authenticateJWT, collaborationController.getPendingGroupInvitations);
   router.post('/groups/invitations/:invitationId/accept', authenticateJWT, collaborationController.acceptGroupInvitation);

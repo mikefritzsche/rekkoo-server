@@ -1800,11 +1800,93 @@ const CollaborationController = {
             
             // No access found
             return res.json({ role: 'viewer' });
-            
+
         } catch (e) {
             console.error('Error fetching user list role:', e);
             return res.status(500).json({ error: 'Internal Server Error' });
         }
+    },
+
+    // Get all invitations for a specific group
+    getGroupInvitations: async (req, res) => {
+      const { groupId } = req.params;
+      const userId = req.user?.id;
+
+      try {
+        // First check if user is a member or owner of the group
+        const memberCheck = await db.query(
+          `SELECT 1 FROM collaboration_groups WHERE id = $1 AND owner_id = $2
+           UNION
+           SELECT 1 FROM collaboration_group_members WHERE group_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+          [groupId, userId]
+        );
+
+        if (memberCheck.rows.length === 0) {
+          return res.status(403).json({ error: 'Not authorized to view group invitations' });
+        }
+
+        // Get all pending invitations for the group
+        const result = await db.query(
+          `WITH group_invitations_data AS (
+            -- Regular invitations
+            SELECT
+              gi.id,
+              gi.group_id,
+              gi.inviter_id,
+              gi.invitee_id,
+              gi.role,
+              gi.status,
+              gi.message,
+              gi.created_at,
+              gi.expires_at,
+              'invitation' as invitation_type
+            FROM group_invitations gi
+            WHERE gi.group_id = $1
+              AND gi.status = 'pending'
+              AND gi.expires_at > NOW()
+
+            UNION ALL
+
+            -- Pending group invitations (connection-based)
+            SELECT
+              pgi.id::uuid,
+              pgi.group_id,
+              pgi.inviter_id,
+              pgi.invitee_id,
+              'member' as role,
+              CASE
+                WHEN ci.status = 'declined' THEN 'pending_connection'::text
+                ELSE 'pending_connection'::text
+              END as status,
+              pgi.message,
+              pgi.created_at,
+              CURRENT_TIMESTAMP + INTERVAL '30 days' as expires_at,
+              'pending' as invitation_type
+            FROM pending_group_invitations pgi
+            LEFT JOIN connections ci ON ci.id = pgi.connection_invitation_id
+            WHERE pgi.group_id = $1
+          )
+          SELECT
+            gid.*,
+            u.username as invitee_username,
+            u.full_name as invitee_name,
+            u.profile_image_url as invitee_profile_picture,
+            inviter.username as inviter_username,
+            inviter.full_name as inviter_name
+          FROM group_invitations_data gid
+          JOIN users u ON u.id = gid.invitee_id
+          JOIN users inviter ON inviter.id = gid.inviter_id
+          ORDER BY gid.created_at DESC`,
+          [groupId]
+        );
+
+        res.json({
+          invitations: result.rows
+        });
+      } catch (error) {
+        console.error('Error fetching group invitations:', error);
+        res.status(500).json({ error: 'Failed to fetch group invitations' });
+      }
     },
 };
 
