@@ -1090,26 +1090,28 @@ const CollaborationController = {
     const requester_id = req.user.id;
     try {
       // First check if the group exists and get owner
-      const groupResult = await db.query('SELECT owner_id FROM collaboration_groups WHERE id = $1', [groupId]);
+      const groupResult = await db.query('SELECT owner_id, name FROM collaboration_groups WHERE id = $1', [groupId]);
       if (groupResult.rows.length === 0) {
         return res.status(404).json({ error: 'Group not found' });
       }
-      
-      const isOwner = groupResult.rows[0].owner_id === requester_id;
-      
+
+      const groupOwnerId = groupResult.rows[0].owner_id;
+      const isOwner = groupOwnerId === requester_id;
+
       // If not owner, check if user is a member of this group
       if (!isOwner) {
         const { rows: memberRows } = await db.query(
           'SELECT 1 FROM collaboration_group_members WHERE group_id = $1 AND user_id = $2 LIMIT 1',
           [groupId, requester_id]
         );
-        
+
         if (memberRows.length === 0) {
           return res.status(403).json({ error: 'Only group members can view the member list' });
         }
       }
 
-      const { rows } = await db.query(
+      // Get regular members from collaboration_group_members
+      const { rows: members } = await db.query(
         `SELECT
           m.group_id,
           m.user_id,
@@ -1157,7 +1159,38 @@ const CollaborationController = {
         ORDER BY m.joined_at ASC`,
         [groupId, requester_id]
       );
-      res.status(200).json(rows);
+
+      // Always include the owner in the member list (even if not explicitly a member)
+      // Get owner details
+      const { rows: ownerRows } = await db.query(
+        `SELECT
+          $1::uuid as group_id,
+          u.id as user_id,
+          'owner' as role,
+          cg.created_at as joined_at,
+          u.username,
+          u.email,
+          u.full_name,
+          u.profile_image_url as avatar_url,
+          COALESCE(us.privacy_settings->>'privacy_mode', 'private') as privacy_mode,
+          COALESCE((us.privacy_settings->>'anonymous_in_groups')::boolean, false) as anonymous_in_groups
+        FROM users u
+        LEFT JOIN user_settings us ON u.id = us.user_id
+        LEFT JOIN collaboration_groups cg ON cg.id = $1
+        WHERE u.id = $2`,
+        [groupId, groupOwnerId]
+      );
+
+      // Check if owner is already in members array (they might have explicitly joined)
+      const ownerAlreadyInMembers = members.some(m => m.user_id === groupOwnerId);
+
+      // Combine results: Owner first (if not already in members), then other members
+      let allMembers = members;
+      if (!ownerAlreadyInMembers && ownerRows.length > 0) {
+        allMembers = [...ownerRows, ...members];
+      }
+
+      res.status(200).json(allMembers);
     } catch (error) {
       console.error('Error fetching group members:', error);
       res.status(500).json({ error: 'Internal Server Error' });
@@ -1229,12 +1262,50 @@ const CollaborationController = {
 
     try {
       // Check if the current user is the owner of the group
-      const groupResult = await db.query('SELECT owner_id FROM collaboration_groups WHERE id = $1', [groupId]);
+      const groupResult = await db.query('SELECT owner_id, name FROM collaboration_groups WHERE id = $1', [groupId]);
       if (groupResult.rows.length === 0 || groupResult.rows[0].owner_id !== owner_id) {
         return res.status(403).json({ error: 'Only the group owner can remove members' });
       }
 
+      const groupName = groupResult.rows[0].name;
+
+      // Get all lists shared with this group before removing the member
+      const listsResult = await db.query(`
+        SELECT DISTINCT l.id, l.title
+        FROM lists l
+        JOIN collaboration_group_lists cgl ON l.id = cgl.list_id
+        WHERE cgl.group_id = $1
+      `, [groupId]);
+
       await db.query('DELETE FROM collaboration_group_members WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
+
+      // Notify the removed user about losing access to each list
+      if (socketService && listsResult.rows.length > 0) {
+        console.log(`[CollaborationController] Notifying user ${userId} about removal from group ${groupId} and loss of access to ${listsResult.rows.length} lists`);
+
+        // Send a notification for each list they're losing access to
+        for (const list of listsResult.rows) {
+          socketService.notifyUser(userId, 'list_access_revoked', {
+            listId: list.id,
+            listTitle: list.title,
+            groupId: groupId,
+            groupName: groupName,
+            accessType: 'group',
+            reason: 'removed_from_group',
+            updatedBy: owner_id,
+            timestamp: Date.now()
+          });
+        }
+
+        // Also send a general group removal notification
+        socketService.notifyUser(userId, 'group:member-removed', {
+          groupId: groupId,
+          groupName: groupName,
+          removedBy: owner_id,
+          timestamp: Date.now()
+        });
+      }
+
       res.status(204).send();
     } catch (error) {
       console.error('Error removing member from group:', error);
