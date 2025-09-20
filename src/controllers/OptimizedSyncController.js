@@ -373,6 +373,9 @@ function optimizedSyncControllerFactory(socketService) {
       // Step 7: Handle initial sync (baseline data)
       if (lastPulledAt === 0) {
         try {
+          logger.info(`[OptimizedSyncController] Starting baseline data fetch for user ${userId}`);
+          logger.info(`[OptimizedSyncController] Accessible list IDs count: ${listIdsArray.length}`);
+
           // Include all tags
           const catRes = await db.query(`SELECT * FROM public.tags WHERE deleted_at IS NULL`);
           for (const row of catRes.rows) {
@@ -382,34 +385,61 @@ function optimizedSyncControllerFactory(socketService) {
             changes.tags.created.push(row);
           }
 
-          // Include all accessible lists (using pre-fetched list IDs)
-          const listsQuery = `
-            SELECT * FROM public.lists
-            WHERE deleted_at IS NULL
-              AND (owner_id = $1 OR id = ANY($2::uuid[]))
-          `;
-          const listsRes = await db.query(listsQuery, [userId, listIdsArray]);
+          // Include all accessible lists
+          // Fix: Ensure we fetch owned lists even if listIdsArray is empty
+          const listsQuery = listIdsArray.length > 0
+            ? `SELECT * FROM public.lists
+               WHERE deleted_at IS NULL
+                 AND (owner_id = $1 OR id = ANY($2::uuid[]))`
+            : `SELECT * FROM public.lists
+               WHERE deleted_at IS NULL
+                 AND owner_id = $1`;
+
+          const listsQueryParams = listIdsArray.length > 0
+            ? [userId, listIdsArray]
+            : [userId];
+
+          const listsRes = await db.query(listsQuery, listsQueryParams);
+          logger.info(`[OptimizedSyncController] Found ${listsRes.rows.length} lists for initial sync`);
+
           for (const row of listsRes.rows) {
             if (row.created_at) row.created_at = new Date(row.created_at).getTime();
             if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
             changes.lists.created.push(row);
           }
 
-          // Include all items from accessible lists (using pre-fetched list IDs)
-          const itemsQuery = `
-            SELECT
-              li.*,
-              gd.quantity,
-              gd.where_to_buy,
-              gd.amazon_url,
-              gd.web_link,
-              gd.rating
-            FROM public.list_items li
-            LEFT JOIN public.gift_details gd ON li.gift_detail_id = gd.id
-            WHERE li.deleted_at IS NULL
-              AND (li.owner_id = $1 OR li.list_id = ANY($2::uuid[]))
-          `;
-          const itemsRes = await db.query(itemsQuery, [userId, listIdsArray]);
+          // Include all items from accessible lists
+          // Fix: Ensure we fetch owned items even if listIdsArray is empty
+          const itemsQuery = listIdsArray.length > 0
+            ? `SELECT
+                 li.*,
+                 gd.quantity,
+                 gd.where_to_buy,
+                 gd.amazon_url,
+                 gd.web_link,
+                 gd.rating
+               FROM public.list_items li
+               LEFT JOIN public.gift_details gd ON li.gift_detail_id = gd.id
+               WHERE li.deleted_at IS NULL
+                 AND (li.owner_id = $1 OR li.list_id = ANY($2::uuid[]))`
+            : `SELECT
+                 li.*,
+                 gd.quantity,
+                 gd.where_to_buy,
+                 gd.amazon_url,
+                 gd.web_link,
+                 gd.rating
+               FROM public.list_items li
+               LEFT JOIN public.gift_details gd ON li.gift_detail_id = gd.id
+               WHERE li.deleted_at IS NULL
+                 AND li.owner_id = $1`;
+
+          const itemsQueryParams = listIdsArray.length > 0
+            ? [userId, listIdsArray]
+            : [userId];
+
+          const itemsRes = await db.query(itemsQuery, itemsQueryParams);
+          logger.info(`[OptimizedSyncController] Found ${itemsRes.rows.length} items for initial sync`);
           for (const row of itemsRes.rows) {
             if (row.created_at) row.created_at = new Date(row.created_at).getTime();
             if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
