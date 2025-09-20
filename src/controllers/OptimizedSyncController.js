@@ -487,7 +487,20 @@ function optimizedSyncControllerFactory(socketService) {
             });
           }
 
-          logger.info(`[OptimizedSyncController] Initial sync for user ${userId}: ${listsRes.rows.length} lists, ${itemsRes.rows.length} items`);
+          // Include user settings for initial sync
+          const settingsRes = await db.query(
+            `SELECT * FROM public.user_settings WHERE user_id = $1`,
+            [userId]
+          );
+          if (settingsRes.rows.length > 0) {
+            const settings = settingsRes.rows[0];
+            if (settings.created_at) settings.created_at = new Date(settings.created_at).getTime();
+            if (settings.updated_at) settings.updated_at = new Date(settings.updated_at).getTime();
+            changes.user_settings.created.push(settings);
+            logger.info(`[OptimizedSyncController] Including user_settings in initial sync for user ${userId}`);
+          }
+
+          logger.info(`[OptimizedSyncController] Initial sync for user ${userId}: ${listsRes.rows.length} lists, ${itemsRes.rows.length} items, ${settingsRes.rows.length} user_settings`);
         } catch (err) {
           logger.error('[OptimizedSyncController] Failed to fetch baseline data:', err);
         }
