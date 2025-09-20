@@ -9,6 +9,8 @@ ORDER BY ordinal_position;
 
 -- 2. Add user_id column if it doesn't exist
 DO $$
+DECLARE
+    rows_updated INTEGER;
 BEGIN
     IF NOT EXISTS (
         SELECT 1
@@ -17,11 +19,48 @@ BEGIN
         AND column_name = 'user_id'
     ) THEN
         ALTER TABLE change_log ADD COLUMN user_id UUID;
+        RAISE NOTICE 'Added user_id column to change_log table';
 
-        -- Try to populate user_id from data if it's stored there
+        -- Try to populate user_id from data JSON if it's stored there
         UPDATE change_log
         SET user_id = (data->>'user_id')::uuid
-        WHERE data->>'user_id' IS NOT NULL;
+        WHERE data->>'user_id' IS NOT NULL
+          AND user_id IS NULL;
+
+        GET DIAGNOSTICS rows_updated = ROW_COUNT;
+        RAISE NOTICE 'Populated user_id from data JSON for % rows', rows_updated;
+
+        -- For lists table, get owner_id
+        UPDATE change_log cl
+        SET user_id = (SELECT owner_id FROM lists WHERE id::text = cl.record_id LIMIT 1)
+        WHERE table_name = 'lists' AND user_id IS NULL;
+
+        GET DIAGNOSTICS rows_updated = ROW_COUNT;
+        RAISE NOTICE 'Populated user_id from lists table for % rows', rows_updated;
+
+        -- For list_items table, get owner_id
+        UPDATE change_log cl
+        SET user_id = (SELECT owner_id FROM list_items WHERE id::text = cl.record_id LIMIT 1)
+        WHERE table_name = 'list_items' AND user_id IS NULL;
+
+        GET DIAGNOSTICS rows_updated = ROW_COUNT;
+        RAISE NOTICE 'Populated user_id from list_items table for % rows', rows_updated;
+
+        -- For users table, record_id IS the user_id
+        UPDATE change_log
+        SET user_id = record_id::uuid
+        WHERE table_name = 'users'
+          AND user_id IS NULL
+          AND record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+
+        GET DIAGNOSTICS rows_updated = ROW_COUNT;
+        RAISE NOTICE 'Populated user_id from users table for % rows', rows_updated;
+
+        RAISE NOTICE 'Final stats - Records with user_id: %, Records without: %',
+            (SELECT COUNT(*) FROM change_log WHERE user_id IS NOT NULL),
+            (SELECT COUNT(*) FROM change_log WHERE user_id IS NULL);
+    ELSE
+        RAISE NOTICE 'user_id column already exists';
     END IF;
 END $$;
 

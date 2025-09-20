@@ -70,58 +70,29 @@ function optimizedSyncControllerFactory(socketService) {
       let changeLogResult = { rows: [] };
 
       if (lastPulledAt > 0) {
-        // Check which column names exist (handle both migration versions)
-        const checkColumnsQuery = `
-          SELECT column_name
-          FROM information_schema.columns
-          WHERE table_name = 'change_log'
-            AND column_name IN ('created_at', 'changed_at', 'user_id')
+        // Convert milliseconds timestamp to ISO string for better index usage
+        const lastPulledDate = new Date(lastPulledAt).toISOString();
+
+        // Use optimized query with proper timestamp format
+        const changesQuery = `
+          SELECT
+            cl.table_name,
+            cl.record_id,
+            cl.operation,
+            cl.created_at,
+            cl.change_data
+          FROM public.change_log cl
+          WHERE cl.user_id = $1
+            AND cl.created_at > $2::timestamptz
+          ORDER BY cl.created_at ASC
+          LIMIT 1000
         `;
-        const columnsResult = await db.query(checkColumnsQuery);
-        const columns = columnsResult.rows.map(r => r.column_name);
 
-        const hasUserId = columns.includes('user_id');
-        const timestampColumn = columns.includes('created_at') ? 'created_at' : 'changed_at';
+        changeLogResult = await db.query(changesQuery, [userId, lastPulledDate]);
 
-        // Build query based on available columns
-        let changesQuery;
-        let queryParams = [];
-
-        if (hasUserId) {
-          // New structure with user_id
-          changesQuery = `
-            SELECT
-              cl.table_name,
-              cl.record_id,
-              cl.operation,
-              cl.${timestampColumn} as created_at,
-              cl.change_data
-            FROM public.change_log cl
-            WHERE cl.user_id = $1
-              AND cl.${timestampColumn} > to_timestamp($2 / 1000.0)
-            ORDER BY cl.${timestampColumn} ASC
-            LIMIT 1000
-          `;
-          queryParams = [userId, lastPulledAt];
-        } else {
-          // Old structure without user_id - need to filter differently
-          logger.warn(`[OptimizedSyncController] change_log table missing user_id column - sync may be slow`);
-          changesQuery = `
-            SELECT
-              cl.table_name,
-              cl.record_id,
-              cl.operation,
-              cl.${timestampColumn} as created_at,
-              cl.data as change_data
-            FROM public.change_log cl
-            WHERE cl.${timestampColumn} > to_timestamp($1 / 1000.0)
-            ORDER BY cl.${timestampColumn} ASC
-            LIMIT 1000
-          `;
-          queryParams = [lastPulledAt];
+        if (changeLogResult.rows.length === 1000) {
+          logger.warn(`[OptimizedSyncController] Hit 1000 row limit for user ${userId} - may need pagination`);
         }
-
-        changeLogResult = await db.query(changesQuery, queryParams);
       } else {
         logger.info(`[OptimizedSyncController] Initial sync for user ${userId}: skipping change log, using baseline data only`);
       }
