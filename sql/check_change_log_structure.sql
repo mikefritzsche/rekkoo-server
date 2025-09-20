@@ -2,9 +2,6 @@
 -- Run this first to understand the column names
 
 -- 1. Show all columns in change_log table
-\d change_log
-
--- Alternative if \d doesn't work:
 SELECT
     column_name,
     data_type,
