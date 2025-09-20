@@ -32,19 +32,20 @@ LIMIT 1000;
 -- 3. Verify the index is being used
 SELECT
     schemaname,
-    tablename,
+    relname as tablename,
     indexname,
     idx_scan as times_used,
     idx_tup_read as rows_read,
     idx_tup_fetch as rows_fetched
 FROM pg_stat_user_indexes
-WHERE tablename = 'change_log'
+WHERE relname = 'change_log'
 ORDER BY idx_scan DESC;
 
 -- 4. Check table statistics
 ANALYZE change_log;
 
 SELECT
+    relname as tablename,
     n_live_tup as live_rows,
     n_dead_tup as dead_rows,
     last_vacuum,
@@ -52,4 +53,4 @@ SELECT
     last_analyze,
     last_autoanalyze
 FROM pg_stat_user_tables
-WHERE tablename = 'change_log';
+WHERE relname = 'change_log';
