@@ -24,7 +24,7 @@ DROP INDEX IF EXISTS idx_change_log_user_created;
 
 CREATE INDEX IF NOT EXISTS idx_change_log_user_created_composite
 ON change_log (user_id, created_at, table_name, operation)
-INCLUDE (record_id, change_data);
+INCLUDE (record_id);
 
 -- Index for lists to speed up owner and permission checks
 CREATE INDEX IF NOT EXISTS idx_lists_owner_deleted
