@@ -66,21 +66,28 @@ function optimizedSyncControllerFactory(socketService) {
       const listIdsArray = Array.from(accessibleListIds);
 
       // Step 2: Get change log entries (lightweight, no subqueries)
-      const changesQuery = `
-        SELECT
-          cl.table_name,
-          cl.record_id,
-          cl.operation,
-          cl.created_at,
-          cl.change_data
-        FROM public.change_log cl
-        WHERE cl.user_id = $1
-          AND cl.created_at > to_timestamp($2 / 1000.0)
-        ORDER BY cl.created_at ASC
-        LIMIT 1000
-      `;
+      // Skip change log entirely for initial sync since we fetch baseline data separately
+      let changeLogResult = { rows: [] };
 
-      const changeLogResult = await db.query(changesQuery, [userId, lastPulledAt]);
+      if (lastPulledAt > 0) {
+        const changesQuery = `
+          SELECT
+            cl.table_name,
+            cl.record_id,
+            cl.operation,
+            cl.created_at,
+            cl.change_data
+          FROM public.change_log cl
+          WHERE cl.user_id = $1
+            AND cl.created_at > to_timestamp($2 / 1000.0)
+          ORDER BY cl.created_at ASC
+          LIMIT 1000
+        `;
+
+        changeLogResult = await db.query(changesQuery, [userId, lastPulledAt]);
+      } else {
+        logger.info(`[OptimizedSyncController] Initial sync for user ${userId}: skipping change log, using baseline data only`);
+      }
 
       // Step 3: Group record IDs by table for batch fetching
       const recordIdsByTable = {
