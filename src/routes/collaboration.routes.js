@@ -15,12 +15,14 @@ function createCollaborationRouter(collaborationController) {
   // Group routes
   router.post('/groups', authenticateJWT, collaborationController.createGroup);
   router.get('/groups', authenticateJWT, collaborationController.getGroupsForUser);
+  router.get('/groups/:groupId', authenticateJWT, collaborationController.getGroupById);
 
   // Group member routes
   router.post('/groups/:groupId/members', authenticateJWT, collaborationController.addMemberToGroup);
   router.get('/groups/:groupId/members', authenticateJWT, collaborationController.getGroupMembers);
   router.post('/groups/bulk-members', authenticateJWT, collaborationController.getBulkGroupMembers);
   router.delete('/groups/:groupId/members/:userId', authenticateJWT, collaborationController.removeMemberFromGroup);
+  router.post('/groups/:groupId/leave', authenticateJWT, collaborationController.leaveGroup);
 
   // Group invitation routes
   router.get('/groups/:groupId/invitations', authenticateJWT, collaborationController.getGroupInvitations);

@@ -1011,6 +1011,99 @@ const CollaborationController = {
     }
   },
 
+  // Get a single group's details
+  getGroupById: async (req, res) => {
+    const { groupId } = req.params;
+    const user_id = req.user.id;
+
+    try {
+      // First get the group details and check if user has access
+      const { rows: groupRows } = await db.query(
+        `SELECT g.*,
+          (g.owner_id = $2) as is_owner,
+          m.role as user_role,
+          (SELECT COUNT(*) FROM collaboration_group_members WHERE group_id = g.id) + 1 as member_count,
+          (SELECT COUNT(DISTINCT lg.list_id) FROM collaboration_group_lists lg WHERE lg.group_id = g.id) as list_count
+         FROM collaboration_groups g
+         LEFT JOIN collaboration_group_members m ON g.id = m.group_id AND m.user_id = $2
+         WHERE g.id = $1
+           AND (g.owner_id = $2 OR m.user_id = $2)
+           AND g.deleted_at IS NULL`,
+        [groupId, user_id]
+      );
+
+      if (groupRows.length === 0) {
+        return res.status(404).json({ error: 'Group not found' });
+      }
+
+      const group = groupRows[0];
+
+      // Get members - exclude owner from members table to prevent duplication
+      const { rows: members } = await db.query(
+        `SELECT
+          m.user_id as id,
+          m.role,
+          m.joined_at,
+          u.username as name,
+          u.email,
+          u.profile_image_url as avatar_url,
+          u.profile_image_url
+         FROM collaboration_group_members m
+         JOIN users u ON m.user_id = u.id
+         WHERE m.group_id = $1
+           AND m.user_id != (SELECT owner_id FROM collaboration_groups WHERE id = $1)
+
+         UNION
+
+         SELECT
+          g.owner_id as id,
+          'owner' as role,
+          g.created_at as joined_at,
+          u.username as name,
+          u.email,
+          u.profile_image_url as avatar_url,
+          u.profile_image_url
+         FROM collaboration_groups g
+         JOIN users u ON g.owner_id = u.id
+         WHERE g.id = $1
+
+         ORDER BY role DESC, joined_at ASC`,
+        [groupId]
+      );
+
+      // Get recent activity (placeholder for now - tables don't exist yet)
+      // TODO: Implement when comment and activity tracking tables are added
+      const activity = [];
+
+      // Get shared lists
+      const { rows: sharedLists } = await db.query(
+        `SELECT
+          l.id,
+          l.title as name,
+          l.list_type,
+          (SELECT COUNT(*) FROM list_items WHERE list_id = l.id) as item_count,
+          (SELECT COUNT(*) FROM gift_reservations WHERE list_id = l.id) as reserved_count,
+          lg.created_at as attached_at
+         FROM lists l
+         JOIN collaboration_group_lists lg ON lg.list_id = l.id
+         WHERE lg.group_id = $1
+           AND l.deleted_at IS NULL
+         ORDER BY lg.created_at DESC`,
+        [groupId]
+      );
+
+      res.status(200).json({
+        group,
+        members,
+        activity,
+        shared_lists: sharedLists
+      });
+    } catch (error) {
+      console.error('Error fetching group details:', error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
   // Get all groups for a user (owned and member of)
   getGroupsForUser: async (req, res) => {
     // Allow fetching groups for a specific user via query param (for collaboration checking)
@@ -1309,6 +1402,42 @@ const CollaborationController = {
       res.status(204).send();
     } catch (error) {
       console.error('Error removing member from group:', error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
+  // Leave a group (member removes themselves)
+  leaveGroup: async (req, res) => {
+    const { groupId } = req.params;
+    const user_id = req.user.id;
+
+    try {
+      // Check if the group exists
+      const groupResult = await db.query('SELECT owner_id, name FROM collaboration_groups WHERE id = $1', [groupId]);
+      if (groupResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Group not found' });
+      }
+
+      // Cannot leave if you're the owner
+      if (groupResult.rows[0].owner_id === user_id) {
+        return res.status(400).json({ error: 'Group owner cannot leave the group. Transfer ownership or delete the group instead.' });
+      }
+
+      // Remove user from group members
+      const result = await db.query(
+        'DELETE FROM collaboration_group_members WHERE group_id = $1 AND user_id = $2 RETURNING *',
+        [groupId, user_id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'You are not a member of this group' });
+      }
+
+      console.log(`[CollaborationController] User ${user_id} left group ${groupId}`);
+
+      res.status(200).json({ message: 'Successfully left the group' });
+    } catch (error) {
+      console.error('Error leaving group:', error);
       res.status(500).json({ error: 'Internal Server Error' });
     }
   },

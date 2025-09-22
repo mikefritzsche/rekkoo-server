@@ -1596,7 +1596,66 @@ function syncControllerFactory(socketService) {
     const userIdentifierColumn = getUserIdentifierColumn(table);
 
     try {
-      const query = `SELECT * FROM ${db.escapeIdentifier(table)} WHERE id = $1 AND ${db.escapeIdentifier(userIdentifierColumn)} = $2`;
+      // Special handling for list_items - need to check list permissions
+      if (table === 'list_items') {
+        // First get the item to check which list it belongs to
+        const escapedItemsTable = `"list_items"`;
+        const itemQuery = `SELECT list_id FROM ${escapedItemsTable} WHERE id = $1 AND deleted_at IS NULL`;
+        const itemResult = await db.query(itemQuery, [id]);
+
+        if (itemResult.rows.length === 0) {
+          return res.status(404).json({ message: 'Record not found or access denied' });
+        }
+
+        const listId = itemResult.rows[0].list_id;
+
+        // Check if user has access to this list
+        const hasAccess = await userCanEditList(db, userId, listId);
+        if (!hasAccess) {
+          // Check if user can at least view the list (read-only access)
+          const viewQuery = `
+            SELECT 1 FROM public.lists WHERE id = $1 AND (
+              owner_id = $2
+              OR is_public = true
+              OR id IN (
+                SELECT list_id FROM public.list_sharing ls
+                JOIN public.collaboration_group_members cgm ON ls.shared_with_group_id = cgm.group_id
+                WHERE cgm.user_id = $2 AND ls.deleted_at IS NULL AND cgm.deleted_at IS NULL
+              )
+            ) AND deleted_at IS NULL
+          `;
+          const viewResult = await db.query(viewQuery, [listId, userId]);
+          if (viewResult.rows.length === 0) {
+            return res.status(404).json({ message: 'Record not found or access denied' });
+          }
+        }
+
+        // User has access, fetch the complete item with gift details
+        const fullQuery = `
+          SELECT
+            li.*,
+            gd.quantity,
+            gd.where_to_buy,
+            gd.amazon_url,
+            gd.web_link,
+            gd.rating
+          FROM ${escapedItemsTable} li
+          LEFT JOIN gift_details gd ON li.gift_detail_id = gd.id
+          WHERE li.id = $1 AND li.deleted_at IS NULL
+        `;
+        const result = await db.query(fullQuery, [id]);
+
+        if (result.rows.length === 0) {
+          return res.status(404).json({ message: 'Record not found or access denied' });
+        }
+
+        return res.status(200).json(result.rows[0]);
+      }
+
+      // For other tables, use the original logic
+      const escapedTable = `"${table.replace(/"/g, '""')}"`;
+      const escapedUserColumn = `"${userIdentifierColumn.replace(/"/g, '""')}"`;
+      const query = `SELECT * FROM ${escapedTable} WHERE id = $1 AND ${escapedUserColumn} = $2`;
       const result = await db.query(query, [id, userId]);
       if (result.rows.length === 0) {
         return res.status(404).json({ message: 'Record not found or access denied' });
