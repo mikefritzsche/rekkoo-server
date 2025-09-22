@@ -367,6 +367,7 @@ workflows:
   
   # Automatic production deployment
   production-deploy:
+    max_auto_reruns: 4
     jobs:
       - deploy-prod:
           context:
