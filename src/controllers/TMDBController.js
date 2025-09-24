@@ -1,10 +1,42 @@
 const fetch = require('node-fetch');
+const { cacheFetch, redis } = require('../utils/cache');
 
 // TMDB configuration
 const TMDB_CONFIG = {
   apiKey: process.env.TMDB_API_KEY,
   baseUrl: 'https://api.themoviedb.org/3'
 };
+
+// Rate limiting configuration
+const RATE_LIMITS = {
+  // TMDB allows ~40 requests per 10 seconds
+  requestsPer10Seconds: 40,
+  windowMs: 10000, // 10 seconds
+  retryDelay: 250 // Base delay between requests
+};
+
+// Simple in-memory rate limiter for concurrent requests
+const requestQueue = [];
+let lastRequestTime = 0;
+
+/**
+ * Rate limiting wrapper for TMDB requests
+ */
+async function rateLimitedFetch(url) {
+  const now = Date.now();
+  const timeSinceLastRequest = now - lastRequestTime;
+
+  // Calculate minimum delay needed
+  const minDelay = RATE_LIMITS.windowMs / RATE_LIMITS.requestsPer10Seconds;
+  const delay = Math.max(0, minDelay - timeSinceLastRequest);
+
+  if (delay > 0) {
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+
+  lastRequestTime = Date.now();
+  return fetch(url);
+}
 
 /**
  * Factory function that creates a TMDBController
@@ -19,9 +51,20 @@ function tmdbControllerFactory(socketService = null) {
 
   async function getConfiguration(req, res) {
     try {
-      const response = await fetch(`${TMDB_CONFIG.baseUrl}/configuration?api_key=${TMDB_CONFIG.apiKey}`);
-      const data = await response.json();
-      
+      const cacheKey = {
+        type: 'configuration'
+      };
+
+      const data = await cacheFetch('tmdb', cacheKey, async () => {
+        const response = await rateLimitedFetch(`${TMDB_CONFIG.baseUrl}/configuration?api_key=${TMDB_CONFIG.apiKey}`);
+
+        if (!response.ok) {
+          throw new Error(`TMDB API error: ${response.status}`);
+        }
+
+        return await response.json();
+      }, 30 * 24 * 60 * 60); // Cache for 30 days (configuration rarely changes)
+
       res.json({...data});
     } catch (error) {
       res.status(500).json({error});
@@ -29,18 +72,27 @@ function tmdbControllerFactory(socketService = null) {
   }
 
   /**
-   * Utility function for movie search
+   * Utility function for movie search with caching
    */
-  async function searchSingleMovie(query, page = 1, include_adult) {
-    const searchUrl = `${TMDB_CONFIG.baseUrl}/search/multi?api_key=${TMDB_CONFIG.apiKey}&query=${encodeURIComponent(query)}&page=${page}&include_adult=${include_adult}`;
+  async function searchSingleMovie(query, page = 1, include_adult = false) {
+    const cacheKey = {
+      query,
+      page,
+      include_adult,
+      type: 'search'
+    };
 
-    const response = await fetch(searchUrl);
+    return cacheFetch('tmdb', cacheKey, async () => {
+      const searchUrl = `${TMDB_CONFIG.baseUrl}/search/multi?api_key=${TMDB_CONFIG.apiKey}&query=${encodeURIComponent(query)}&page=${page}&include_adult=${include_adult}`;
 
-    if (!response.ok) {
-      throw new Error(`TMDB API error: ${response.status}`);
-    }
+      const response = await rateLimitedFetch(searchUrl);
 
-    return await response.json();
+      if (!response.ok) {
+        throw new Error(`TMDB API error: ${response.status}`);
+      }
+
+      return await response.json();
+    }, 24 * 60 * 60); // Cache for 24 hours
   }
 
   /**
@@ -68,7 +120,7 @@ function tmdbControllerFactory(socketService = null) {
   };
 
   /**
-   * Get movie or TV show details
+   * Get movie or TV show details with caching
    */
   const getMediaDetails = async (req, res) => {
     const { mediaType, id } = req.params;
@@ -79,9 +131,25 @@ function tmdbControllerFactory(socketService = null) {
     const appendToResponse = 'recommendations,similar,videos,external_ids,images,credits,watch/providers';
     const searchUrl = `${TMDB_CONFIG.baseUrl}/${mediaType}/${id}?api_key=${TMDB_CONFIG.apiKey}&language=en-US&${appendToResponseString}=${appendToResponse}`;
     console.log('searchUrl', searchUrl);
+
     try {
-      const response = await fetch(searchUrl);
-      const data = await response.json();
+      const cacheKey = {
+        mediaType,
+        id,
+        appendToResponse,
+        type: 'details'
+      };
+
+      const data = await cacheFetch('tmdb', cacheKey, async () => {
+        const response = await rateLimitedFetch(searchUrl);
+
+        if (!response.ok) {
+          throw new Error(`TMDB API error: ${response.status}`);
+        }
+
+        return await response.json();
+      }, 7 * 24 * 60 * 60); // Cache for 7 days (details change less frequently)
+
       res.json({...data});
     } catch (error) {
       res.status(500).json({error, searchUrl});
@@ -136,12 +204,92 @@ function tmdbControllerFactory(socketService = null) {
     }
   };
 
+  /**
+   * Clear TMDB cache entries
+   */
+  async function clearTMDBCache(req, res) {
+    try {
+      const pattern = 'tmdb:*';
+      let cursor = '0';
+      let deletedCount = 0;
+
+      do {
+        const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        if (keys.length > 0) {
+          deletedCount += await redis.del(...keys);
+        }
+        cursor = nextCursor;
+      } while (cursor !== '0');
+
+      res.json({
+        success: true,
+        deletedKeys: deletedCount,
+        message: `Cleared ${deletedCount} TMDB cache entries`
+      });
+    } catch (error) {
+      console.error('Error clearing TMDB cache:', error);
+      res.status(500).json({ error: 'Failed to clear TMDB cache' });
+    }
+  }
+
+  /**
+   * Get TMDB cache statistics
+   */
+  async function getTMDBCacheStats(req, res) {
+    try {
+      const pattern = 'tmdb:*';
+      let cursor = '0';
+      const cacheKeys = [];
+      let totalMemory = 0;
+
+      do {
+        const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        cacheKeys.push(...keys);
+        cursor = nextCursor;
+      } while (cursor !== '0');
+
+      // Get memory usage for each key
+      const keyInfo = await Promise.all(
+        cacheKeys.map(async (key) => {
+          const memory = await redis.call('MEMORY', 'USAGE', key) || 0;
+          const ttl = await redis.ttl(key);
+          totalMemory += memory;
+          return { key, memory: Number(memory), ttl };
+        })
+      );
+
+      // Group by type
+      const byType = keyInfo.reduce((acc, { key, memory, ttl }) => {
+        const type = key.split(':')[1] || 'unknown';
+        if (!acc[type]) {
+          acc[type] = { count: 0, memory: 0, keys: [] };
+        }
+        acc[type].count++;
+        acc[type].memory += memory;
+        acc[type].keys.push({ key, memory, ttl });
+        return acc;
+      }, {});
+
+      res.json({
+        totalKeys: cacheKeys.length,
+        totalMemory,
+        byType,
+        cacheHitRate: 'Cache stats available via /cache/stats endpoint'
+      });
+    } catch (error) {
+      console.error('Error getting TMDB cache stats:', error);
+      res.status(500).json({ error: 'Failed to get TMDB cache stats' });
+    }
+  }
+
   // Return all controller methods
   return {
     getConfiguration,
     searchMedia,
     getMediaDetails,
-    searchMultipleMedia
+    searchMultipleMedia,
+    clearTMDBCache,
+    getTMDBCacheStats
   };
 }
 

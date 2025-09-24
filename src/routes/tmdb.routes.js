@@ -29,7 +29,26 @@ function createTMDBRouter(tmdbController) {
    */
   router.post('/search/multiple', tmdbController.searchMultipleMedia);
 
+  /**
+   * @route GET /configuration
+   * @desc Get TMDB configuration
+   * @access Public
+   */
   router.get('/configuration', tmdbController.getConfiguration);
+
+  /**
+   * @route DELETE /cache
+   * @desc Clear TMDB cache entries
+   * @access Admin
+   */
+  router.delete('/cache', tmdbController.clearTMDBCache);
+
+  /**
+   * @route GET /cache/stats
+   * @desc Get TMDB cache statistics
+   * @access Admin
+   */
+  router.get('/cache/stats', tmdbController.getTMDBCacheStats);
 
   return router;
 }
