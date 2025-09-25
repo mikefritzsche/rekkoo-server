@@ -487,11 +487,11 @@ const refreshToken = async (req, res) => {
       const newRefreshToken = generateRefreshToken();
       await client.query(
         `INSERT INTO refresh_tokens (token, user_id, expires_at)
-         VALUES ($1, $2, NOW() + INTERVAL '7 days')`,
+         VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
         [newRefreshToken, user.id]
       );
 
-      return { accessToken, refreshToken: newRefreshToken };
+      return { accessToken, refreshToken: newRefreshToken, userId: user.id };
     });
 
     return res.status(200).json(result);

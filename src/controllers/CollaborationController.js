@@ -1109,15 +1109,22 @@ const CollaborationController = {
     // Allow fetching groups for a specific user via query param (for collaboration checking)
     // Default to the authenticated user if no userId is provided
     const user_id = req.query.userId || req.user.id;
-
+    console.log([`[CollaborationController] Fetching groups for user ${user_id}`]);
     try {
       const { rows } = await db.query(
-        `SELECT DISTINCT g.*, 
+        `SELECT DISTINCT g.*,
           (g.owner_id = $1) as is_owner,
-          m.role
+          COALESCE(m.role,
+            CASE WHEN g.owner_id = $1 THEN 'owner' ELSE NULL END
+          ) as role,
+          (SELECT COUNT(*)
+           FROM collaboration_group_members m2
+           WHERE m2.group_id = g.id
+             AND m2.user_id != g.owner_id
+          ) as member_count
          FROM collaboration_groups g
-         LEFT JOIN collaboration_group_members m ON g.id = m.group_id
-         WHERE (g.owner_id = $1 OR m.user_id = $1) 
+         LEFT JOIN collaboration_group_members m ON g.id = m.group_id AND m.user_id = $1
+         WHERE (g.owner_id = $1 OR m.user_id = $1)
            AND g.deleted_at IS NULL`,
         [user_id]
       );

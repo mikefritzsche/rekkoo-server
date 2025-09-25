@@ -18,7 +18,7 @@ function connectionsControllerFactory(socketService = null) {
      */
     sendConnectionRequest: async (req, res) => {
       const senderId = req.user.id;
-      const { recipientId, message, connectionType = 'mutual' } = req.body;
+      const { recipientId, message, connectionType = 'mutual', invitation_context, metadata } = req.body;
 
       if (!recipientId) {
         return res.status(400).json({ error: 'Recipient ID is required' });
@@ -69,6 +69,23 @@ function connectionsControllerFactory(socketService = null) {
           if (status === 'blocked') {
             return res.status(400).json({ error: 'Unable to send connection request' });
           }
+          if (status === 'removed') {
+            // Allow new connection request when connection was previously removed
+            console.log(`Recreating removed connection between ${senderId} and ${recipientId}`);
+          }
+          // Special case: If user has a 'following' relationship but wants mutual connection,
+          // we should allow it and upgrade the relationship
+          else if (status === 'following' && connectionType === 'mutual') {
+            // Continue - we'll update the existing connection to mutual
+            console.log(`Upgrading following relationship to mutual between ${senderId} and ${recipientId}`);
+          } else {
+            // For any other existing connection, return a specific error
+            return res.status(400).json({
+              error: `Connection already exists with status: ${status}`,
+              existingStatus: status,
+              existingType: existingType
+            });
+          }
         }
 
         // For following connections, create them immediately without invitation
@@ -97,38 +114,102 @@ function connectionsControllerFactory(socketService = null) {
           });
         }
 
-        // For mutual connections, check for existing invitation
-        const existingInvitation = await db.query(
-          `SELECT * FROM connection_invitations
-           WHERE sender_id = $1 AND recipient_id = $2 AND status = 'pending'`,
-          [senderId, recipientId]
-        );
+        // For mutual connections, first update any existing non-pending invitations
+      await db.query(
+        `UPDATE connection_invitations
+         SET status = 'pending',
+             message = $3,
+             invitation_context = $4,
+             metadata = $5,
+             created_at = CURRENT_TIMESTAMP,
+             expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days'
+         WHERE sender_id = $1 AND recipient_id = $2
+         AND status IN ('rejected', 'expired')
+         RETURNING *`,
+        [senderId, recipientId, message, invitation_context || null, metadata || null]
+      );
 
-        if (existingInvitation.rows.length > 0) {
-          return res.status(400).json({ error: 'Invitation already sent' });
-        }
+      // Check if we updated an existing invitation
+      const updatedInvitation = await db.query(
+        `SELECT * FROM connection_invitations
+         WHERE sender_id = $1 AND recipient_id = $2 AND status = 'pending'
+         AND expires_at > NOW()`,
+        [senderId, recipientId]
+      );
 
-        // Create connection invitation for mutual connections
-        const invitation = await db.query(
-          `INSERT INTO connection_invitations
-           (sender_id, recipient_id, message, status)
-           VALUES ($1, $2, $3, 'pending')
-           RETURNING *`,
-          [senderId, recipientId, message]
-        );
+      if (updatedInvitation.rows.length > 0) {
+        // Use the updated invitation
+        const invitation = updatedInvitation.rows[0];
+
+        // Notify recipient via socket
+        safeSocketService.notifyUser(recipientId, 'connection:request', {
+          invitation,
+          sender: {
+            id: req.user.id,
+            username: req.user.username,
+            full_name: req.user.full_name,
+            profile_image_url: req.user.profile_image_url
+          }
+        });
+
+        return res.status(201).json({
+          message: 'Connection request resent',
+          invitation,
+          connectionType: 'mutual'
+        });
+      }
+
+      // Check for existing pending invitation
+      const existingInvitation = await db.query(
+        `SELECT * FROM connection_invitations
+         WHERE sender_id = $1 AND recipient_id = $2 AND status = 'pending'
+         AND expires_at > NOW()`,
+        [senderId, recipientId]
+      );
+
+      if (existingInvitation.rows.length > 0) {
+        return res.status(400).json({ error: 'Invitation already sent' });
+      }
+
+      // Create new connection invitation for mutual connections
+      const invitation = await db.query(
+        `INSERT INTO connection_invitations
+         (sender_id, recipient_id, message, status, invitation_context, metadata)
+         VALUES ($1, $2, $3, 'pending', $4, $5)
+         RETURNING *`,
+        [senderId, recipientId, message, invitation_context || null, metadata || null]
+      );
 
         // Create pending connection records for both users (mutual type)
+        // Use ON CONFLICT to handle cases where records already exist
+        // If upgrading from following to mutual, or recreating removed connection, update the status and type
         await db.query(
           `INSERT INTO connections
            (user_id, connection_id, status, connection_type, initiated_by, visibility_level)
-           VALUES ($1, $2, 'pending', 'mutual', $3, 'friends')`,
+           VALUES ($1, $2, 'pending', 'mutual', $3, 'friends')
+           ON CONFLICT (user_id, connection_id) DO UPDATE SET
+             status = CASE
+               WHEN connections.connection_type = 'following' THEN 'pending'
+               WHEN connections.status = 'removed' THEN 'pending'
+               ELSE connections.status
+             END,
+             connection_type = 'mutual',
+             updated_at = CURRENT_TIMESTAMP`,
           [senderId, recipientId, senderId]
         );
 
         await db.query(
           `INSERT INTO connections
            (user_id, connection_id, status, connection_type, initiated_by, visibility_level)
-           VALUES ($1, $2, 'pending', 'mutual', $3, 'friends')`,
+           VALUES ($1, $2, 'pending', 'mutual', $3, 'friends')
+           ON CONFLICT (user_id, connection_id) DO UPDATE SET
+             status = CASE
+               WHEN connections.connection_type = 'following' THEN 'pending'
+               WHEN connections.status = 'removed' THEN 'pending'
+               ELSE connections.status
+             END,
+             connection_type = 'mutual',
+             updated_at = CURRENT_TIMESTAMP`,
           [recipientId, senderId, senderId]
         );
 

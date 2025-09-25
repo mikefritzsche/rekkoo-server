@@ -14,9 +14,11 @@ const {
 const { performHardDelete } = require('../services/hardDeleteService');
 const { exportUserData } = require('../services/exportService');
 const r2AdminControllerFactory = require('../controllers/R2AdminController');
+const bcrypt = require('bcrypt');
 
 const router = express.Router();
 const r2AdminController = r2AdminControllerFactory();
+const saltRounds = 12;
 
 // Helper to verify admin role via user_roles table
 async function ensureAdmin(userId) {
@@ -178,6 +180,67 @@ router.put('/users/:userId/roles', authenticateJWT, async (req, res) => {
     }
   } catch (err) {
     console.error('Admin assign roles error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// POST /v1.0/admin/users/:userId/password – change user password as admin
+router.post('/users/:userId/password', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const { userId } = req.params;
+    // The admin app sends { password }, not { newPassword }
+    const { password, newPassword } = req.body;
+    const passwordToUse = password || newPassword;
+
+    // Debug logging
+    console.log('Admin password change request:', {
+      userId,
+      hasPassword: !!password,
+      hasNewPassword: !!newPassword,
+      passwordToUse: passwordToUse ? '***' : 'undefined',
+      passwordLength: passwordToUse ? passwordToUse.length : 0,
+      bodyKeys: Object.keys(req.body),
+      fullBody: req.body
+    });
+
+    // Validate new password
+    if (!passwordToUse || passwordToUse.length < 8) {
+      console.log('Password validation failed:', {
+        hasPassword: !!passwordToUse,
+        length: passwordToUse ? passwordToUse.length : 0
+      });
+      return res.status(400).json({ message: 'Password must be at least 8 characters long' });
+    }
+
+    // Check if user exists
+    const userCheck = await db.query(
+      'SELECT id FROM users WHERE id = $1 AND deleted_at IS NULL',
+      [userId]
+    );
+
+    if (userCheck.rows.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Hash the new password
+    const newPasswordHash = await bcrypt.hash(passwordToUse, saltRounds);
+
+    // Update the user's password
+    await db.query(
+      `UPDATE users
+       SET password_hash = $1,
+           updated_at = NOW()
+       WHERE id = $2`,
+      [newPasswordHash, userId]
+    );
+
+    res.json({ success: true, message: 'Password updated successfully' });
+  } catch (err) {
+    console.error('Admin password change error', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
