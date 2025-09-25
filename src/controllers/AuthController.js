@@ -102,7 +102,7 @@ const register = async (req, res) => {
          VALUES ($1, $2, NOW(), NOW())
          ON CONFLICT (user_id) DO NOTHING`,
         [userId, JSON.stringify({
-          privacy_mode: 'private',
+          privacy_mode: 'standard',
           show_email_to_connections: false,
           allow_connection_requests: true,
           allow_group_invites_from_connections: true,
@@ -923,7 +923,7 @@ const oauthCallback = async (req, res) => {
                VALUES ($1, $2, NOW(), NOW())
                ON CONFLICT (user_id) DO NOTHING`,
               [user.id, JSON.stringify({
-                privacy_mode: 'private',
+                privacy_mode: 'standard',
                 show_email_to_connections: false,
                 allow_connection_requests: true,
                 allow_group_invites_from_connections: true,
@@ -1295,7 +1295,7 @@ const mobileOauth = async (req, res) => {
                VALUES ($1, $2, NOW(), NOW())
                ON CONFLICT (user_id) DO NOTHING`,
               [user.id, JSON.stringify({
-                privacy_mode: 'private',
+                privacy_mode: 'standard',
                 show_email_to_connections: false,
                 allow_connection_requests: true,
                 allow_group_invites_from_connections: true,
@@ -1718,7 +1718,7 @@ const enhancedOAuthCallback = async (req, res) => {
              VALUES ($1, $2, NOW(), NOW())
              ON CONFLICT (user_id) DO NOTHING`,
             [user.id, JSON.stringify({
-              privacy_mode: 'private',
+              privacy_mode: 'standard',
               show_email_to_connections: false,
               allow_connection_requests: true,
               allow_group_invites_from_connections: true,
