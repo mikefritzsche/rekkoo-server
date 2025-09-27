@@ -1011,6 +1011,80 @@ const CollaborationController = {
     }
   },
 
+  // Delete a collaboration group
+  deleteGroup: async (req, res) => {
+    const { groupId } = req.params;
+    const user_id = req.user.id;
+
+    console.log('[deleteGroup] Request received:', {
+      groupId: groupId,
+      groupIdType: typeof groupId,
+      userId: user_id,
+      params: req.params
+    });
+
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Check if user owns the group
+      const { rows: groupRows } = await client.query(
+        'SELECT owner_id FROM collaboration_groups WHERE id = $1',
+        [groupId]
+      );
+
+      if (groupRows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Group not found' });
+      }
+
+      if (groupRows[0].owner_id !== user_id) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Only group owner can delete the group' });
+      }
+
+      // Delete group memberships
+      await client.query(
+        'DELETE FROM collaboration_group_members WHERE group_id = $1',
+        [groupId]
+      );
+
+      // Delete group list associations
+      await client.query(
+        'DELETE FROM collaboration_group_lists WHERE group_id = $1',
+        [groupId]
+      );
+
+      // Delete list sharing with groups
+      await client.query(
+        'DELETE FROM list_sharing WHERE shared_with_group_id = $1',
+        [groupId]
+      );
+
+      // Delete list group roles
+      await client.query(
+        'DELETE FROM list_group_roles WHERE group_id = $1',
+        [groupId]
+      );
+
+      // Soft delete the group
+      await client.query(
+        'UPDATE collaboration_groups SET deleted_at = CURRENT_TIMESTAMP WHERE id = $1',
+        [groupId]
+      );
+
+      await client.query('COMMIT');
+      console.log('[deleteGroup] Group soft deleted successfully:', groupId);
+      res.status(200).json({ message: 'Group deleted successfully' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Error deleting group:', error);
+      res.status(500).json({ error: 'Internal Server Error' });
+    } finally {
+      client.release();
+    }
+  },
+
   // Get a single group's details
   getGroupById: async (req, res) => {
     const { groupId } = req.params;
@@ -1980,27 +2054,24 @@ const CollaborationController = {
             
             // Check for group-based access with the most permissive role
             const { rows: groupRoles } = await db.query(
-                `SELECT 
+                `SELECT
                     COALESCE(lgur.role, lgr.role, 'viewer') as effective_role,
-                    CASE 
+                    CASE
                         WHEN lgur.role IS NOT NULL THEN 'user_group_override'
                         WHEN lgr.role IS NOT NULL THEN 'group_role'
                         ELSE 'default'
                     END as role_source
-                 FROM list_sharing ls
-                 JOIN collaboration_group_members cgm ON cgm.group_id = ls.shared_with_group_id
-                 LEFT JOIN list_group_roles lgr ON lgr.list_id = ls.list_id 
-                    AND lgr.group_id = ls.shared_with_group_id 
+                 FROM collaboration_group_members cgm
+                 LEFT JOIN list_group_roles lgr ON lgr.list_id = $1
+                    AND lgr.group_id = cgm.group_id
                     AND lgr.deleted_at IS NULL
-                 LEFT JOIN list_group_user_roles lgur ON lgur.list_id = ls.list_id 
-                    AND lgur.group_id = ls.shared_with_group_id 
-                    AND lgur.user_id = cgm.user_id 
+                 LEFT JOIN list_group_user_roles lgur ON lgur.list_id = $1
+                    AND lgur.group_id = cgm.group_id
+                    AND lgur.user_id = cgm.user_id
                     AND lgur.deleted_at IS NULL
-                 WHERE ls.list_id = $1 
-                    AND cgm.user_id = $2 
-                    AND ls.deleted_at IS NULL
+                 WHERE cgm.user_id = $2
                     AND cgm.deleted_at IS NULL
-                 ORDER BY 
+                 ORDER BY
                     CASE COALESCE(lgur.role, lgr.role, 'viewer')
                         WHEN 'admin' THEN 1
                         WHEN 'editor' THEN 2
@@ -2027,6 +2098,96 @@ const CollaborationController = {
             console.error('Error fetching user list role:', e);
             return res.status(500).json({ error: 'Internal Server Error' });
         }
+    },
+
+    // Get sent group invitations for the current user
+    getSentGroupInvitations: async (req, res) => {
+      const userId = req.user?.id;
+
+      try {
+        const result = await db.query(
+          `WITH sent_invitations AS (
+            -- Regular group invitations sent by user
+            SELECT
+              gi.id,
+              gi.group_id,
+              g.name as group_name,
+              gi.invitee_id,
+              gi.role,
+              gi.status,
+              gi.message,
+              gi.created_at,
+              gi.expires_at,
+              'group_invitation' as invitation_type,
+              NULL as connection_invitation_id
+            FROM group_invitations gi
+            JOIN collaboration_groups g ON g.id = gi.group_id
+            WHERE gi.inviter_id = $1
+              AND g.deleted_at IS NULL
+
+            UNION ALL
+
+            -- Connection invitations with group context sent by user
+            SELECT
+              ci.id,
+              cg.id as group_id,
+              cg.name as group_name,
+              ci.recipient_id as invitee_id,
+              'member' as role,
+              ci.status,
+              ci.message,
+              ci.created_at,
+              ci.expires_at,
+              'connection_invitation' as invitation_type,
+              ci.id as connection_invitation_id
+            FROM connection_invitations ci
+            JOIN collaboration_groups cg ON cg.id = ci.context_id
+            WHERE ci.sender_id = $1
+              AND ci.invitation_context = 'group_invitation'
+              AND cg.deleted_at IS NULL
+
+            UNION ALL
+
+            -- Pending group invitations (from connection flow) sent by user
+            SELECT
+              pgi.id,
+              cg.id as group_id,
+              cg.name as group_name,
+              pgi.invitee_id,
+              'member' as role,
+              pgi.status,
+              pgi.message,
+              pgi.created_at,
+              pgi.created_at + INTERVAL '30 days' as expires_at,
+              'pending_group_invitation' as invitation_type,
+              pgi.connection_invitation_id
+            FROM pending_group_invitations pgi
+            JOIN collaboration_groups cg ON cg.id = pgi.group_id
+            WHERE pgi.inviter_id = $1
+              AND cg.deleted_at IS NULL
+          )
+          SELECT
+            si.*,
+            u.username as invitee_username,
+            u.full_name as invitee_name,
+            u.profile_image_url as invitee_profile_picture,
+            CASE
+              WHEN si.status = 'accepted' THEN true
+              WHEN si.status = 'pending_connection' THEN false
+              WHEN si.status = 'processed' THEN true
+              ELSE false
+            END as is_connected
+          FROM sent_invitations si
+          LEFT JOIN users u ON u.id = si.invitee_id
+          ORDER BY si.created_at DESC`,
+          [userId]
+        );
+
+        res.json({ invitations: result.rows });
+      } catch (error) {
+        console.error('Error fetching sent group invitations:', error);
+        res.status(500).json({ error: 'Internal server error' });
+      }
     },
 
     // Get all invitations for a specific group
@@ -2085,7 +2246,7 @@ const CollaborationController = {
               CURRENT_TIMESTAMP + INTERVAL '30 days' as expires_at,
               'pending' as invitation_type
             FROM pending_group_invitations pgi
-            LEFT JOIN connections ci ON ci.id = pgi.connection_invitation_id
+            LEFT JOIN connection_invitations ci ON ci.id = pgi.connection_invitation_id
             WHERE pgi.group_id = $1
           )
           SELECT

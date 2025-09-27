@@ -328,10 +328,17 @@ function connectionsControllerFactory(socketService = null) {
       const { requestId } = req.params;
 
       try {
-        // Get the invitation
+        // Get the invitation with group context
         const invitation = await db.query(
-          `SELECT * FROM connection_invitations
-           WHERE id = $1 AND recipient_id = $2 AND status = 'pending'`,
+          `SELECT ci.*,
+                  cg.id as group_id,
+                  cg.name as group_name,
+                  u_sender.username as sender_username,
+                  u_sender.full_name as sender_full_name
+           FROM connection_invitations ci
+           LEFT JOIN collaboration_groups cg ON ci.context_id = cg.id
+           LEFT JOIN users u_sender ON ci.sender_id = u_sender.id
+           WHERE ci.id = $1 AND ci.recipient_id = $2 AND ci.status = 'pending'`,
           [requestId, userId]
         );
 
@@ -339,12 +346,13 @@ function connectionsControllerFactory(socketService = null) {
           return res.status(404).json({ error: 'Invitation not found' });
         }
 
-        const { sender_id } = invitation.rows[0];
+        const inv = invitation.rows[0];
+        const hasGroupContext = inv.invitation_context === 'group_invitation' && inv.group_id;
 
         // Begin transaction
         await db.query('BEGIN');
 
-        // Update invitation status
+        // Update invitation status - this will trigger the auto-group addition
         await db.query(
           `UPDATE connection_invitations
            SET status = 'accepted', responded_at = NOW()
@@ -358,21 +366,68 @@ function connectionsControllerFactory(socketService = null) {
            SET status = 'accepted', accepted_at = NOW()
            WHERE ((user_id = $1 AND connection_id = $2)
               OR (user_id = $2 AND connection_id = $1))`,
-          [userId, sender_id]
+          [userId, inv.sender_id]
         );
+
+        // Check if user was auto-added to group (if group context exists)
+        let groupNotificationData = null;
+        if (hasGroupContext) {
+          // Check if user is now a member of the group
+          const memberCheck = await db.query(
+            `SELECT 1 FROM collaboration_group_members
+             WHERE group_id = $1 AND user_id = $2 AND deleted_at IS NULL`,
+            [inv.group_id, userId]
+          );
+
+          if (memberCheck.rows.length > 0) {
+            // User was auto-added to the group
+            groupNotificationData = {
+              groupId: inv.group_id,
+              groupName: inv.group_name,
+              memberId: userId,
+              memberUsername: req.user.username,
+              autoAdded: true
+            };
+
+            // Send group membership notification to the sender (User A)
+            safeSocketService.notifyUser(inv.sender_id, 'group:member-auto-added', {
+              group: {
+                id: inv.group_id,
+                name: inv.group_name
+              },
+              member: {
+                id: userId,
+                username: req.user.username,
+                full_name: req.user.full_name
+              }
+            });
+          }
+        }
 
         await db.query('COMMIT');
 
         // Notify sender via socket
-        safeSocketService.notifyUser(sender_id, 'connection:accepted', {
+        safeSocketService.notifyUser(inv.sender_id, 'connection:accepted', {
           acceptedBy: {
             id: userId,
             username: req.user.username,
             full_name: req.user.full_name
-          }
+          },
+          groupContext: hasGroupContext ? {
+            groupId: inv.group_id,
+            groupName: inv.group_name,
+            autoAdded: !!groupNotificationData
+          } : null
         });
 
-        res.json({ message: 'Connection request accepted' });
+        res.json({
+          message: 'Connection request accepted',
+          groupContext: hasGroupContext ? {
+            groupId: inv.group_id,
+            groupName: inv.group_name,
+            autoAdded: !!groupNotificationData
+          } : null
+        });
       } catch (error) {
         await db.query('ROLLBACK');
         console.error('Error accepting connection request:', error);
@@ -900,7 +955,8 @@ function connectionsControllerFactory(socketService = null) {
           'searchable_by_username',
           'searchable_by_email',
           'searchable_by_name',
-          'show_mutual_connections'
+          'show_mutual_connections',
+          'autoAddPreferences'
         ];
 
         const updatedSettings = { ...currentSettings };

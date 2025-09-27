@@ -185,6 +185,7 @@ function createGroupInvitationsController(socketService) {
             pgi.connection_invitation_id
           FROM pending_group_invitations pgi
           WHERE pgi.inviter_id = $1
+            AND pgi.status != 'processed'
         )
         SELECT
           ai.*,
@@ -204,7 +205,7 @@ function createGroupInvitationsController(socketService) {
         FROM all_invitations ai
         JOIN collaboration_groups g ON g.id = ai.group_id
         JOIN users u ON u.id = ai.invitee_id
-        LEFT JOIN connections ci ON ci.id = ai.connection_invitation_id
+        LEFT JOIN connection_invitations ci ON ci.id = ai.connection_invitation_id
         ORDER BY ai.created_at DESC
         LIMIT 50`,
           [userId]

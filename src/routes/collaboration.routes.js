@@ -16,6 +16,7 @@ function createCollaborationRouter(collaborationController) {
   router.post('/groups', authenticateJWT, collaborationController.createGroup);
   router.get('/groups', authenticateJWT, collaborationController.getGroupsForUser);
   router.get('/groups/:groupId', authenticateJWT, collaborationController.getGroupById);
+  router.delete('/groups/:groupId', authenticateJWT, collaborationController.deleteGroup);
 
   // Group member routes
   router.post('/groups/:groupId/members', authenticateJWT, collaborationController.addMemberToGroup);
@@ -28,6 +29,7 @@ function createCollaborationRouter(collaborationController) {
   router.get('/groups/:groupId/invitations', authenticateJWT, collaborationController.getGroupInvitations);
   router.post('/groups/:groupId/invitations', authenticateJWT, collaborationController.inviteUserToGroup);
   router.get('/groups/invitations/pending', authenticateJWT, collaborationController.getPendingGroupInvitations);
+  router.get('/groups/invitations/sent', authenticateJWT, collaborationController.getSentGroupInvitations);
   router.post('/groups/invitations/:invitationId/accept', authenticateJWT, collaborationController.acceptGroupInvitation);
   router.post('/groups/invitations/:invitationId/decline', authenticateJWT, collaborationController.declineGroupInvitation);
 
