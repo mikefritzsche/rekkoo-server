@@ -114,12 +114,22 @@ const checkPermissions = (requiredPermissions) => {
 
         const userPermissions = permissionsResult.rows.map(row => row.name);
 
+        // Admins automatically satisfy all permission checks
+        const adminCheck = await db.query(
+          `SELECT 1 FROM user_roles ur
+             JOIN roles r ON r.id = ur.role_id
+           WHERE ur.user_id = $1 AND r.name = 'admin'
+           LIMIT 1`,
+          [req.user.id]
+        );
+        const isAdmin = adminCheck.rows.length > 0;
+
         // Check if user has all required permissions
         const hasAllPermissions = requiredPermissions.every(
           permission => userPermissions.includes(permission)
         );
 
-        if (!hasAllPermissions) {
+        if (!hasAllPermissions && !isAdmin) {
           return res.status(403).json({ message: 'Insufficient permissions' });
         }
 
