@@ -810,6 +810,13 @@ BEGIN
         AND ((inviter_id = v_removing_user_id AND invitee_id = v_removed_user_id)
           OR (inviter_id = v_removed_user_id AND invitee_id = v_removing_user_id));
 
+        -- CANCEL PENDING CONNECTION INVITATIONS BETWEEN THESE USERS
+        UPDATE connection_invitations
+        SET status = 'cancelled'
+        WHERE status = 'pending'
+        AND ((sender_id = v_removing_user_id AND recipient_id = v_removed_user_id)
+          OR (sender_id = v_removed_user_id AND recipient_id = v_removing_user_id));
+
         -- Revoke list sharing permissions where one user shared with the other
         DELETE FROM list_collaborators
         WHERE (owner_id = v_removing_user_id AND user_id = v_removed_user_id)
@@ -851,7 +858,7 @@ BEGIN
             jsonb_build_object(
                 'removed_user_id', v_removed_user_id,
                 'cascade_type', 'connection_removal',
-                'affected_tables', ARRAY['group_members', 'group_invitations', 'list_collaborators', 'list_invitations'],
+                'affected_tables', ARRAY['group_members', 'group_invitations', 'connection_invitations', 'list_collaborators', 'list_invitations'],
                 'schema_compatibility', v_responded_at_column_exists
             ),
             CURRENT_TIMESTAMP
@@ -869,7 +876,7 @@ ALTER FUNCTION public.cascade_connection_removal() OWNER TO admin;
 -- Name: FUNCTION cascade_connection_removal(); Type: COMMENT; Schema: public; Owner: admin
 --
 
-COMMENT ON FUNCTION public.cascade_connection_removal() IS 'Handles cascade deletion when a connection is removed, revoking all group memberships, list access, and pending invitations. Compatible with both old and new list_invitations schema.';
+COMMENT ON FUNCTION public.cascade_connection_removal() IS 'Handles cascade deletion when a connection is removed, revoking all group memberships, list access, and pending invitations (including connection invitations). Compatible with both old and new list_invitations schema.';
 
 
 --
@@ -987,6 +994,52 @@ ALTER FUNCTION public.clean_expired_collaboration_cache() OWNER TO admin;
 --
 
 COMMENT ON FUNCTION public.clean_expired_collaboration_cache() IS 'Removes expired cache entries, returns count of deleted rows';
+
+
+--
+-- Name: cleanup_duplicate_connections(); Type: FUNCTION; Schema: public; Owner: admin
+--
+
+CREATE FUNCTION public.cleanup_duplicate_connections() RETURNS TABLE(cleaned_count integer, error_message text)
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_cleaned_count INTEGER := 0;
+BEGIN
+    -- Delete duplicate records keeping the most recent one
+    WITH duplicates AS (
+        SELECT
+            ctid,
+            user_id,
+            connection_id,
+            ROW_NUMBER() OVER (PARTITION BY user_id, connection_id ORDER BY updated_at DESC, created_at DESC) as rn
+        FROM connections
+        WHERE (user_id, connection_id) IN (
+            SELECT user_id, connection_id
+            FROM connections
+            GROUP BY user_id, connection_id
+            HAVING COUNT(*) > 1
+        )
+    )
+    DELETE FROM connections
+    WHERE ctid IN (SELECT ctid FROM duplicates WHERE rn > 1);
+
+    GET DIAGNOSTICS v_cleaned_count = ROW_COUNT;
+
+    RETURN QUERY SELECT v_cleaned_count, NULL::TEXT;
+EXCEPTION WHEN OTHERS THEN
+    RETURN QUERY SELECT 0, SQLERRM;
+END;
+$$;
+
+
+ALTER FUNCTION public.cleanup_duplicate_connections() OWNER TO admin;
+
+--
+-- Name: FUNCTION cleanup_duplicate_connections(); Type: COMMENT; Schema: public; Owner: admin
+--
+
+COMMENT ON FUNCTION public.cleanup_duplicate_connections() IS ' cleans up duplicate connection records that might cause constraint violations';
 
 
 --
@@ -1612,6 +1665,41 @@ $$;
 ALTER FUNCTION public.ensure_private_mode_defaults() OWNER TO admin;
 
 --
+-- Name: ensure_standard_mode_defaults(); Type: FUNCTION; Schema: public; Owner: admin
+--
+
+CREATE FUNCTION public.ensure_standard_mode_defaults() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    -- Only set defaults if privacy_settings is null or doesn't have privacy_mode
+    IF NEW.privacy_settings IS NULL OR NOT (NEW.privacy_settings ? 'privacy_mode') THEN
+        NEW.privacy_settings = jsonb_build_object(
+            'privacy_mode', 'standard',
+            'show_email_to_connections', false,
+            'allow_connection_requests', true,
+            'allow_group_invites_from_connections', true,
+            'searchable_by_username', true,
+            'searchable_by_email', false,
+            'searchable_by_name', false,
+            'show_mutual_connections', true,
+            'show_in_suggestions', true,
+            'auto_accept_connections', false,
+            'require_approval_for_all', true,
+            'allowListInvitations', 'connections',
+            'show_in_group_members', true,
+            'anonymous_in_groups', false
+        );
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION public.ensure_standard_mode_defaults() OWNER TO admin;
+
+--
 -- Name: expire_old_group_invitations(); Type: FUNCTION; Schema: public; Owner: admin
 --
 
@@ -2081,6 +2169,68 @@ COMMENT ON FUNCTION public.get_user_pending_invitations(p_user_id uuid) IS 'Upda
 
 
 --
+-- Name: handle_connection_group_invitation(); Type: FUNCTION; Schema: public; Owner: admin
+--
+
+CREATE FUNCTION public.handle_connection_group_invitation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_group_id UUID;
+    v_group_name TEXT;
+    v_pending_exists BOOLEAN;
+BEGIN
+    -- Check if this is a group invitation context
+    IF NEW.invitation_context = 'group_invitation' AND
+       (NEW.metadata->>'group_id') IS NOT NULL THEN
+        v_group_id := NEW.metadata->>'group_id';
+        v_group_name := COALESCE(NEW.metadata->>'group_name', 'Unknown Group');
+
+        -- Check if a pending invitation already exists
+        SELECT EXISTS(
+            SELECT 1 FROM pending_group_invitations
+            WHERE group_id = v_group_id
+            AND invitee_id = NEW.recipient_id
+            AND status = 'waiting'
+        ) INTO v_pending_exists;
+
+        -- Only create if doesn't exist
+        IF NOT v_pending_exists THEN
+            -- Create pending group invitation
+            INSERT INTO pending_group_invitations (
+                id,
+                group_id,
+                inviter_id,
+                invitee_id,
+                message,
+                connection_invitation_id,
+                status,
+                created_at
+            ) VALUES (
+                gen_random_uuid(),
+                v_group_id,
+                NEW.sender_id,
+                NEW.recipient_id,
+                'Group invitation will be sent after connection is accepted',
+                NEW.id,
+                'waiting',
+                CURRENT_TIMESTAMP
+            );
+
+            RAISE NOTICE 'Created pending group invitation for connection % to group %', NEW.id, v_group_id;
+        ELSE
+            RAISE NOTICE 'Pending group invitation already exists for group % and user %', v_group_id, NEW.recipient_id;
+        END IF;
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION public.handle_connection_group_invitation() OWNER TO admin;
+
+--
 -- Name: handle_following_auto_accept(); Type: FUNCTION; Schema: public; Owner: admin
 --
 
@@ -2478,6 +2628,8 @@ CREATE FUNCTION public.process_connection_acceptance() RETURNS trigger
 DECLARE
     pending_rec RECORD;
     v_invitation_code VARCHAR(255);
+    v_notification_exists BOOLEAN;
+    v_group_name TEXT;
 BEGIN
     -- Only process when connection invitation is accepted
     IF NEW.status = 'accepted' AND OLD.status = 'pending' THEN
@@ -2494,49 +2646,99 @@ BEGIN
             SELECT id, group_id, inviter_id, invitee_id, message
             FROM pending_group_invitations
             WHERE connection_invitation_id = NEW.id
-            AND (status IS NULL OR status IN ('pending', 'waiting'))
+            AND status = 'waiting'
         LOOP
+            -- Get group name for better messaging
+            SELECT name INTO v_group_name
+            FROM collaboration_groups
+            WHERE id = pending_rec.group_id;
+
             -- Generate invitation code
             v_invitation_code := LOWER(CONCAT('GI-', REPLACE(gen_random_uuid()::TEXT, '-', '')));
 
-            -- Try to create accepted invitation (may fail due to triggers, that's ok)
-            BEGIN
-                INSERT INTO group_invitations (
-                    id, group_id, inviter_id, invitee_id, invitation_code,
-                    message, status, created_at, responded_at, expires_at
+            -- Create PENDING group invitation (not auto-accepted)
+            INSERT INTO group_invitations (
+                id, group_id, inviter_id, invitee_id, invitation_code,
+                message, status, role, created_at, expires_at
+            ) VALUES (
+                gen_random_uuid(),
+                pending_rec.group_id,
+                pending_rec.inviter_id,
+                pending_rec.invitee_id,
+                v_invitation_code,
+                'You have been invited to join the group "' || v_group_name || '"',
+                'pending',
+                'member',
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP + INTERVAL '30 days'
+            )
+            ON CONFLICT (group_id, invitee_id)
+            DO UPDATE SET
+                status = 'pending',
+                invitation_code = v_invitation_code,
+                message = 'You have been invited to join the group "' || v_group_name || '"',
+                created_at = CURRENT_TIMESTAMP,
+                expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days';
+
+            -- Check if notification already exists to prevent duplicates
+            SELECT EXISTS(
+                SELECT 1 FROM notifications
+                WHERE user_id = pending_rec.invitee_id
+                AND notification_type = 'group_invitation'
+                AND reference_id = pending_rec.group_id
+                AND reference_type = 'collaboration_groups'
+                AND created_at > CURRENT_TIMESTAMP - INTERVAL '5 minutes'
+            ) INTO v_notification_exists;
+
+            -- Only create notification if doesn't exist
+            IF NOT v_notification_exists THEN
+                INSERT INTO notifications (
+                    user_id,
+                    notification_type,
+                    title,
+                    body,
+                    reference_id,
+                    reference_type,
+                    created_at
                 ) VALUES (
-                    gen_random_uuid(),
-                    pending_rec.group_id,
-                    pending_rec.inviter_id,
                     pending_rec.invitee_id,
-                    v_invitation_code,
-                    COALESCE(pending_rec.message, 'Auto-accepted via connection'),
-                    'accepted',
-                    CURRENT_TIMESTAMP,
-                    CURRENT_TIMESTAMP,
-                    CURRENT_TIMESTAMP + INTERVAL '30 days'
-                )
-                ON CONFLICT (group_id, invitee_id) DO NOTHING;
-            EXCEPTION WHEN OTHERS THEN
-                -- If invitation creation fails, continue
-                RAISE NOTICE 'Could not create group invitation for user % group %',
-                    pending_rec.invitee_id, pending_rec.group_id;
-            END;
+                    'group_invitation',
+                    'Group Invitation',
+                    'You have been invited to join the group "' || v_group_name || '"',
+                    pending_rec.group_id,
+                    'collaboration_groups',
+                    CURRENT_TIMESTAMP
+                );
+            END IF;
 
-            -- Most important: Add to group members regardless of invitation status
-            BEGIN
-                INSERT INTO collaboration_group_members (group_id, user_id, role, joined_at)
-                VALUES (pending_rec.group_id, pending_rec.invitee_id, 'member', CURRENT_TIMESTAMP)
-                ON CONFLICT (group_id, user_id) DO NOTHING;
-            EXCEPTION WHEN OTHERS THEN
-                RAISE NOTICE 'Could not add member % to group %',
-                    pending_rec.invitee_id, pending_rec.group_id;
-            END;
-
-            -- Mark as processed
+            -- Mark pending invitation as processed
             UPDATE pending_group_invitations
             SET status = 'processed', processed_at = CURRENT_TIMESTAMP
             WHERE id = pending_rec.id;
+
+            -- Log the successful processing
+            INSERT INTO audit_logs (
+                action_type,
+                table_name,
+                record_id,
+                user_id,
+                details,
+                created_at
+            ) VALUES (
+                'group_invitation_created',
+                'group_invitations',
+                pending_rec.group_id,
+                pending_rec.invitee_id,
+                jsonb_build_object(
+                    'trigger', 'connection_accepted',
+                    'connection_invitation_id', NEW.id,
+                    'group_id', pending_rec.group_id,
+                    'inviter_id', pending_rec.inviter_id,
+                    'invitation_status', 'pending',
+                    'group_name', v_group_name
+                ),
+                CURRENT_TIMESTAMP
+            );
         END LOOP;
     END IF;
 
@@ -2546,13 +2748,6 @@ $$;
 
 
 ALTER FUNCTION public.process_connection_acceptance() OWNER TO admin;
-
---
--- Name: FUNCTION process_connection_acceptance(); Type: COMMENT; Schema: public; Owner: admin
---
-
-COMMENT ON FUNCTION public.process_connection_acceptance() IS 'Fixed in migration 069 - focuses on adding members, handles invitation errors gracefully';
-
 
 --
 -- Name: record_connection_decline(uuid, uuid, character varying, integer); Type: FUNCTION; Schema: public; Owner: admin
@@ -3087,6 +3282,11 @@ BEGIN
             jsonb_build_object('connection_code', public.generate_user_connection_code());
     END IF;
 
+    -- Remove connection code if not in private mode
+    IF NEW.privacy_settings->>'privacy_mode' != 'private' THEN
+        NEW.privacy_settings = NEW.privacy_settings - 'connection_code';
+    END IF;
+
     -- Update settings based on privacy mode
     IF NEW.privacy_settings->>'privacy_mode' = 'ghost' THEN
         -- Ghost mode: completely invisible
@@ -3109,14 +3309,24 @@ BEGIN
                 'searchable_by_name', false
                 -- Remove forced 'show_in_suggestions', false
             );
+    ELSIF NEW.privacy_settings->>'privacy_mode' = 'standard' THEN
+        -- Standard mode: balanced privacy with auto-additions enabled by default
+        NEW.privacy_settings = NEW.privacy_settings ||
+            jsonb_build_object(
+                'searchable_by_username', true,
+                'show_in_suggestions', true,
+                'show_mutual_connections', true,
+                'show_in_group_members', true
+            );
     ELSIF NEW.privacy_settings->>'privacy_mode' = 'public' THEN
         -- Public mode: fully discoverable
         NEW.privacy_settings = NEW.privacy_settings ||
             jsonb_build_object(
                 'searchable_by_username', true,
                 'searchable_by_name', true,
+                'searchable_by_email', true,
                 'show_in_suggestions', true,
-                'auto_accept_connections', COALESCE((NEW.privacy_settings->>'auto_accept_connections')::boolean, false)
+                'auto_accept_connections', COALESCE((NEW.privacy_settings->>'auto_accept_connections')::boolean, true)
             );
     END IF;
 
@@ -5176,7 +5386,7 @@ ALTER TABLE public.roles OWNER TO admin;
 CREATE TABLE public.user_settings (
     theme character varying(20) DEFAULT 'light'::character varying,
     notification_preferences jsonb DEFAULT '{"push": true, "email": true}'::jsonb,
-    privacy_settings jsonb DEFAULT jsonb_build_object('privacy_mode', 'private', 'show_email_to_connections', false, 'allow_connection_requests', true, 'allow_group_invites_from_connections', true, 'searchable_by_username', false, 'searchable_by_email', false, 'searchable_by_name', false, 'show_mutual_connections', false, 'connection_code', NULL::unknown),
+    privacy_settings jsonb DEFAULT jsonb_build_object('privacy_mode', 'standard', 'show_email_to_connections', false, 'allow_connection_requests', true, 'allow_group_invites_from_connections', true, 'searchable_by_username', true, 'searchable_by_email', false, 'searchable_by_name', false, 'show_mutual_connections', true, 'show_in_suggestions', true, 'auto_accept_connections', false, 'require_approval_for_all', true, 'allowListInvitations', 'connections', 'show_in_group_members', true, 'anonymous_in_groups', false),
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     user_id uuid DEFAULT public.uuid_generate_v4() NOT NULL,
     deleted_at timestamp with time zone,
@@ -5201,14 +5411,15 @@ ALTER TABLE public.user_settings OWNER TO admin;
 COMMENT ON COLUMN public.user_settings.privacy_settings IS 'User privacy preferences. Privacy modes:
 - ghost: Completely invisible, only discoverable via connection code (show_in_suggestions always false)
 - private: Limited visibility, requires connection to see details (show_in_suggestions can be true/false)
-- standard: Balanced privacy with user controls (show_in_suggestions defaults to true)
+- standard: Balanced privacy with user controls (show_in_suggestions defaults to true, auto-additions enabled)
 - public: Fully discoverable and visible (show_in_suggestions always true)
 
 Key settings:
 - show_in_suggestions: Whether user appears in connection suggestions (user-controlled except for ghost/public modes)
 - searchable_by_username/email/name: Search visibility controls
 - auto_accept_connections: Automatically accept connection requests (public mode only)
-- connection_code: Required for private mode users to be discovered';
+- connection_code: Required for private mode users to be discovered
+- autoAddPreferences: Control automatic group/list additions (enabled by default in standard mode)';
 
 
 --
@@ -6591,6 +6802,14 @@ ALTER TABLE ONLY public.connections
 
 ALTER TABLE ONLY public.embedding_queue
     ADD CONSTRAINT unique_entity UNIQUE (entity_id, entity_type);
+
+
+--
+-- Name: group_invitations unique_group_invitation; Type: CONSTRAINT; Schema: public; Owner: admin
+--
+
+ALTER TABLE ONLY public.group_invitations
+    ADD CONSTRAINT unique_group_invitation UNIQUE (group_id, invitee_id);
 
 
 --
@@ -8390,6 +8609,13 @@ CREATE TRIGGER ensure_private_mode_defaults_trigger BEFORE INSERT ON public.user
 
 
 --
+-- Name: user_settings ensure_user_privacy_defaults; Type: TRIGGER; Schema: public; Owner: admin
+--
+
+CREATE TRIGGER ensure_user_privacy_defaults BEFORE INSERT OR UPDATE OF privacy_settings ON public.user_settings FOR EACH ROW WHEN (((new.privacy_settings IS NULL) OR (NOT (new.privacy_settings ? 'privacy_mode'::text)))) EXECUTE FUNCTION public.ensure_standard_mode_defaults();
+
+
+--
 -- Name: gift_details gift_details_updated_at_trigger; Type: TRIGGER; Schema: public; Owner: admin
 --
 
@@ -8642,10 +8868,17 @@ CREATE TRIGGER trigger_create_group_invitation_response_notification AFTER UPDAT
 
 
 --
+-- Name: connection_invitations trigger_handle_connection_group_invitation; Type: TRIGGER; Schema: public; Owner: admin
+--
+
+CREATE TRIGGER trigger_handle_connection_group_invitation AFTER INSERT OR UPDATE ON public.connection_invitations FOR EACH ROW WHEN ((((new.status)::text = 'pending'::text) AND ((new.invitation_context)::text = 'group_invitation'::text))) EXECUTE FUNCTION public.handle_connection_group_invitation();
+
+
+--
 -- Name: connection_invitations trigger_process_connection_acceptance; Type: TRIGGER; Schema: public; Owner: admin
 --
 
-CREATE TRIGGER trigger_process_connection_acceptance AFTER UPDATE ON public.connection_invitations FOR EACH ROW EXECUTE FUNCTION public.process_connection_acceptance();
+CREATE TRIGGER trigger_process_connection_acceptance AFTER UPDATE ON public.connection_invitations FOR EACH ROW WHEN ((((new.status)::text = 'accepted'::text) AND ((old.status)::text = 'pending'::text))) EXECUTE FUNCTION public.process_connection_acceptance();
 
 
 --
