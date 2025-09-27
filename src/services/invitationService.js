@@ -137,6 +137,54 @@ class InvitationService {
     }
 
     /**
+     * Add an email address to the beta waitlist
+     */
+    async addToBetaWaitlist(email, metadata = {}) {
+        const normalizedEmail = email.trim().toLowerCase();
+
+        try {
+            const existingUser = await db.query(
+                'SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL LIMIT 1',
+                [normalizedEmail]
+            );
+
+            const existingInvitation = await db.query(
+                `SELECT id, status FROM invitations
+                 WHERE email = $1 AND deleted_at IS NULL
+                 ORDER BY created_at DESC
+                 LIMIT 1`,
+                [normalizedEmail]
+            );
+
+            const derivedMetadata = {
+                ...metadata,
+                has_account: existingUser.rows.length > 0,
+                existing_invitation_status: existingInvitation.rows[0]?.status || null,
+            };
+
+            const result = await db.query(`
+                INSERT INTO beta_waitlist (email, metadata)
+                VALUES ($1, $2::jsonb)
+                ON CONFLICT (email) DO UPDATE
+                SET metadata = COALESCE(beta_waitlist.metadata, '{}'::jsonb) || EXCLUDED.metadata,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING *
+            `, [normalizedEmail, JSON.stringify(derivedMetadata)]);
+
+            logger.info('Beta waitlist entry stored', {
+                email: normalizedEmail,
+                hasAccount: derivedMetadata.has_account,
+                invitationStatus: derivedMetadata.existing_invitation_status
+            });
+
+            return result.rows[0];
+        } catch (error) {
+            logger.error('Error adding beta waitlist entry:', error);
+            throw error;
+        }
+    }
+
+    /**
      * Get invitations by inviter
      */
     async getInvitationsByInviter(inviterUserId, limit = 50, offset = 0) {
@@ -427,9 +475,9 @@ class InvitationService {
     async cleanupExpiredInvitations() {
         try {
             const result = await db.query(`
-                UPDATE invitations 
+                UPDATE invitations
                 SET status = 'expired', updated_at = CURRENT_TIMESTAMP
-                WHERE status = 'pending' 
+                WHERE status = 'pending'
                 AND expires_at < CURRENT_TIMESTAMP
                 RETURNING id
             `);
@@ -438,6 +486,70 @@ class InvitationService {
             return result.rows.length;
         } catch (error) {
             logger.error('Error cleaning up expired invitations:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Get beta program statistics
+     */
+    async getBetaStats() {
+        try {
+            const result = await db.query(`
+                SELECT
+                    -- Total beta invitations
+                    COUNT(*) FILTER (WHERE metadata->>'source' = 'beta_program') as total_beta_invitations,
+
+                    -- Beta invitations by status
+                    COUNT(*) FILTER (WHERE metadata->>'source' = 'beta_program' AND status = 'pending') as pending_beta_invitations,
+                    COUNT(*) FILTER (WHERE metadata->>'source' = 'beta_program' AND status = 'accepted') as accepted_beta_invitations,
+                    COUNT(*) FILTER (WHERE metadata->>'source' = 'beta_program' AND status = 'expired') as expired_beta_invitations,
+
+                    -- Beta user registration stats
+                    COUNT(DISTINCT u.id) FILTER (WHERE i.metadata->>'source' = 'beta_program') as total_beta_users,
+
+                    -- Recent registrations (last 7 days)
+                    COUNT(DISTINCT u.id) FILTER (
+                        WHERE i.metadata->>'source' = 'beta_program'
+                        AND u.created_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+                    ) as recent_beta_registrations,
+
+                    -- Batch statistics
+                    COUNT(DISTINCT metadata->>'batch_id') FILTER (WHERE metadata->>'source' = 'beta_program') as total_batches,
+
+                    -- Average time to accept (in hours)
+                    AVG(EXTRACT(EPOCH FROM (i.accepted_at - i.created_at)) / 3600) FILTER (
+                        WHERE i.metadata->>'source' = 'beta_program'
+                        AND i.accepted_at IS NOT NULL
+                    ) as avg_acceptance_hours
+                FROM invitations i
+                LEFT JOIN users u ON i.accepted_by_user_id = u.id
+                WHERE i.deleted_at IS NULL
+            `);
+
+            // Get top inviters for beta program
+            const topInviters = await db.query(`
+                SELECT
+                    u.username,
+                    u.email,
+                    COUNT(i.id) as invitations_sent,
+                    COUNT(i.id) FILTER (WHERE i.status = 'accepted') as invitations_accepted,
+                    ROUND(COUNT(i.id) FILTER (WHERE i.status = 'accepted') * 100.0 / COUNT(i.id), 2) as acceptance_rate
+                FROM invitations i
+                JOIN users u ON i.inviter_id = u.id
+                WHERE i.metadata->>'source' = 'beta_program'
+                AND i.deleted_at IS NULL
+                GROUP BY u.id, u.username, u.email
+                ORDER BY invitations_sent DESC
+                LIMIT 10
+            `);
+
+            return {
+                ...result.rows[0],
+                top_inviters: topInviters.rows
+            };
+        } catch (error) {
+            logger.error('Error getting beta stats:', error);
             throw error;
         }
     }

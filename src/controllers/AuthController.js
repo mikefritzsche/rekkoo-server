@@ -53,7 +53,22 @@ const getClientUrl = (type) => {
 const register = async (req, res) => {
   // Your existing register implementation
   try {
-    const { username, email, password } = req.body;
+    const { username, email, password, invitationCode } = req.body;
+
+    // Import invitation service
+    const invitationService = require('../services/invitationService');
+
+    // Validate invitation code before proceeding
+    if (!invitationCode) {
+      return res.status(400).json({ message: 'Invitation code is required for beta registration' });
+    }
+
+    const validation = await invitationService.validateInvitation(invitationCode);
+    if (!validation.valid) {
+      return res.status(400).json({
+        message: validation.error || 'Invalid or expired invitation code'
+      });
+    }
 
     const result = await db.transaction(async (client) => {
       // Check if user already exists
@@ -75,7 +90,7 @@ const register = async (req, res) => {
       // Create user
       const newUser = await client.query(
         `INSERT INTO users (
-           username, email, password_hash, verification_token, 
+           username, email, password_hash, verification_token,
            verification_token_expires_at, created_at, updated_at
          )
          VALUES ($1, $2, $3, $4, NOW() + INTERVAL '24 hours', NOW(), NOW())
@@ -114,7 +129,10 @@ const register = async (req, res) => {
         })]
       );
 
-      return { userId, verificationToken, username, email };
+      // Accept the invitation
+      await invitationService.acceptInvitation(validation.invitation.id, userId);
+
+      return { userId, verificationToken, username, email, invitationId: validation.invitation.id };
     });
 
     // Send verification email
@@ -128,7 +146,7 @@ const register = async (req, res) => {
     }
 
     return res.status(201).json({
-      message: 'User registered successfully. Please check your email to verify your account.',
+      message: 'Welcome to the beta! Please check your email to verify your account.',
       userId: result.userId
     });
   } catch (error) {
@@ -1145,7 +1163,7 @@ const mobileOauth = async (req, res) => {
     return res.status(400).json({ message: 'Unsupported provider' });
   }
 
-  const { accessToken, idToken, userInfo } = req.body || {};
+  const { accessToken, idToken, userInfo, invitationCode } = req.body || {};
 
   if (!idToken && !accessToken) {
     return res.status(400).json({ message: 'idToken or accessToken is required' });
@@ -1266,6 +1284,18 @@ const mobileOauth = async (req, res) => {
               [user.id, providerRowId, providerId, accessToken]
             );
           } else {
+            // For new OAuth users, require invitation code
+            if (!invitationCode) {
+              throw { status: 400, message: 'Invitation code required for beta registration' };
+            }
+
+            // Import invitation service (inside try-catch to avoid import issues)
+            const invitationService = require('../services/invitationService');
+            const validation = await invitationService.validateInvitation(invitationCode);
+            if (!validation.valid) {
+              throw { status: 400, message: validation.error || 'Invalid or expired invitation code' };
+            }
+
             const newUserResult = await client.query(
               `INSERT INTO users (username, email, email_verified, profile_image_url, created_at, updated_at)
                VALUES ($1, $2, $3, $4, NOW(), NOW()) RETURNING *`,
@@ -1306,6 +1336,9 @@ const mobileOauth = async (req, res) => {
                 connection_code: connectionCodeResult.rows[0].code
               })]
             );
+
+            // Accept the invitation
+            await invitationService.acceptInvitation(validation.invitation.id, user.id);
           }
         } else {
           throw { status: 400, message: 'Verified email required' };

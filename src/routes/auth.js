@@ -254,6 +254,12 @@ router.post('/register', [
   .withMessage('Password must be at least 8 characters long')
   .matches(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
   .withMessage('Password must contain at least one uppercase letter, one lowercase letter, and one number'),
+  body('invitationCode')
+  .isString()
+  .isLength({ min: 6, max: 6 })
+  .withMessage('Invitation code must be 6 characters')
+  .matches(/^[A-Z0-9]+$/)
+  .withMessage('Invitation code must contain only uppercase letters and numbers'),
   validateRequest
 ], AuthController.register);
 
