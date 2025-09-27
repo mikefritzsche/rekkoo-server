@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { body, validationResult } = require('express-validator');
+const { body, validationResult, query } = require('express-validator');
 const { authenticateJWT, checkPermissions } = require('../auth/middleware');
 const invitationService = require('../services/invitationService');
 
@@ -272,6 +272,63 @@ router.get('/stats', authenticateJWT, async (req, res) => {
         res.json({ success: true, stats });
     } catch (error) {
         res.status(500).json({ error: error.message });
+    }
+});
+
+// Admin endpoint to view beta waitlist entries
+router.get('/admin/beta-waitlist', [
+    authenticateJWT,
+    checkPermissions(['admin:manage_invitations']),
+    query('status').optional().isIn(['pending', 'invited', 'dismissed', 'all']),
+    query('limit').optional().isInt({ min: 1, max: 200 }),
+    query('offset').optional().isInt({ min: 0 }),
+    validateRequest
+], async (req, res) => {
+    try {
+        const { status = 'pending', limit = 50, offset = 0 } = req.query;
+        const result = await invitationService.getBetaWaitlist({
+            status: status,
+            limit: Number(limit),
+            offset: Number(offset)
+        });
+        res.json({ success: true, ...result });
+    } catch (error) {
+        console.error('Error fetching beta waitlist:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Admin endpoint to approve a waitlist entry
+router.post('/admin/beta-waitlist/:id/approve', [
+    authenticateJWT,
+    checkPermissions(['admin:manage_invitations']),
+    validateRequest
+], async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await invitationService.approveBetaWaitlistEntry(id, req.user.id);
+        res.json({ success: true, entry: result.entry, invitation: result.invitation });
+    } catch (error) {
+        console.error('Error approving beta waitlist entry:', error);
+        res.status(400).json({ success: false, error: error.message });
+    }
+});
+
+// Admin endpoint to dismiss a waitlist entry
+router.post('/admin/beta-waitlist/:id/dismiss', [
+    authenticateJWT,
+    checkPermissions(['admin:manage_invitations']),
+    body('reason').optional().isString().isLength({ max: 500 }),
+    validateRequest
+], async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { reason } = req.body;
+        const entry = await invitationService.dismissBetaWaitlistEntry(id, req.user.id, reason);
+        res.json({ success: true, entry });
+    } catch (error) {
+        console.error('Error dismissing beta waitlist entry:', error);
+        res.status(400).json({ success: false, error: error.message });
     }
 });
 

@@ -3,6 +3,8 @@ const db = require('../config/db');
 const { logger } = require('../utils/logger');
 const emailService = require('./emailService');
 
+const VALID_BETA_WAITLIST_STATUSES = ['pending', 'invited', 'dismissed'];
+
 class InvitationService {
     constructor() {
         this.INVITATION_EXPIRY_DAYS = 7;
@@ -182,6 +184,165 @@ class InvitationService {
             logger.error('Error adding beta waitlist entry:', error);
             throw error;
         }
+    }
+
+    /**
+     * Fetch beta waitlist entries optionally filtered by status
+     */
+    async getBetaWaitlist({ status, limit = 50, offset = 0 } = {}) {
+        const params = [];
+        const filters = [];
+
+        if (status && status !== 'all') {
+            if (!VALID_BETA_WAITLIST_STATUSES.includes(status)) {
+                throw new Error('Invalid beta waitlist status');
+            }
+            params.push(status);
+            filters.push(`status = $${params.length}`);
+        }
+
+        params.push(limit);
+        params.push(offset);
+
+        const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+
+        const result = await db.query(
+            `SELECT *, COUNT(*) OVER() AS total_count
+             FROM beta_waitlist
+             ${whereClause}
+             ORDER BY created_at DESC
+             LIMIT $${params.length - 1}
+             OFFSET $${params.length}`,
+            params
+        );
+
+        const total = result.rows.length > 0 ? Number(result.rows[0].total_count) : 0;
+
+        const entries = result.rows.map((row) => ({
+            ...row,
+            metadata: this.parseMetadata(row.metadata),
+        }));
+
+        return { entries, total };
+    }
+
+    /**
+     * Approve a waitlist entry and generate an invitation
+     */
+    async approveBetaWaitlistEntry(entryId, adminUserId) {
+        const entryResult = await db.query(
+            'SELECT * FROM beta_waitlist WHERE id = $1',
+            [entryId]
+        );
+
+        if (entryResult.rows.length === 0) {
+            throw new Error('Beta waitlist entry not found');
+        }
+
+        const entry = entryResult.rows[0];
+
+        if (entry.status === 'invited') {
+            throw new Error('Waitlist entry already invited');
+        }
+
+        const metadata = this.parseMetadata(entry.metadata);
+
+        const invitation = await this.createInvitation(adminUserId, entry.email, {
+            ...metadata,
+            source: 'beta_program',
+            waitlist_id: entryId,
+            approved_by: adminUserId,
+        });
+
+        const invitedAt = new Date().toISOString();
+        const updatedMetadata = {
+            ...metadata,
+            source: metadata?.source || 'beta_program_waitlist',
+            invitation_id: invitation.id,
+            invitation_code: invitation.invitation_code,
+            invitation_token: invitation.invitation_token,
+            invited_at: invitedAt,
+            invited_by: adminUserId,
+            status_history: [
+                ...(Array.isArray(metadata?.status_history) ? metadata.status_history : []),
+                { status: 'invited', at: invitedAt, by: adminUserId },
+            ],
+        };
+
+        const updateResult = await db.query(
+            `UPDATE beta_waitlist
+             SET status = 'invited',
+                 metadata = $2::jsonb,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1
+             RETURNING *`,
+            [entryId, JSON.stringify(updatedMetadata)]
+        );
+
+        const updatedEntry = updateResult.rows[0];
+
+        return {
+            entry: {
+                ...updatedEntry,
+                metadata: this.parseMetadata(updatedEntry.metadata),
+            },
+            invitation,
+        };
+    }
+
+    /**
+     * Dismiss a waitlist entry without generating an invitation
+     */
+    async dismissBetaWaitlistEntry(entryId, adminUserId, reason = null) {
+        const entryResult = await db.query(
+            'SELECT * FROM beta_waitlist WHERE id = $1',
+            [entryId]
+        );
+
+        if (entryResult.rows.length === 0) {
+            throw new Error('Beta waitlist entry not found');
+        }
+
+        const entry = entryResult.rows[0];
+
+        if (entry.status === 'invited') {
+            throw new Error('Cannot dismiss an entry that has already been invited');
+        }
+
+        const metadata = this.parseMetadata(entry.metadata);
+
+        const dismissedAt = new Date().toISOString();
+        const updatedMetadata = {
+            ...metadata,
+            dismissed_at: dismissedAt,
+            dismissed_by: adminUserId,
+            dismissed_reason: reason || null,
+            status_history: [
+                ...(Array.isArray(metadata?.status_history) ? metadata.status_history : []),
+                { status: 'dismissed', at: dismissedAt, by: adminUserId, reason: reason || null },
+            ],
+        };
+
+        const updateResult = await db.query(
+            `UPDATE beta_waitlist
+             SET status = 'dismissed',
+                 metadata = $2::jsonb,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1
+             RETURNING *`,
+            [entryId, JSON.stringify(updatedMetadata)]
+        );
+
+        if (updateResult.rows.length === 0) {
+            throw new Error('Failed to update waitlist entry');
+        }
+
+        const updatedEntry = updateResult.rows[0];
+
+        return {
+            ...updatedEntry,
+            metadata: this.parseMetadata(updatedEntry.metadata),
+        };
     }
 
     /**
