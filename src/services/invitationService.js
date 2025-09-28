@@ -438,9 +438,11 @@ class InvitationService {
     /**
      * Accept invitation
      */
-    async acceptInvitation(invitationId, acceptedByUserId) {
+    async acceptInvitation(invitationId, acceptedByUserId, client = null) {
         try {
-            const result = await db.query(`
+            const executor = client && typeof client.query === 'function' ? client : db;
+
+            const result = await executor.query(`
                 UPDATE invitations 
                 SET status = 'accepted', 
                     accepted_at = CURRENT_TIMESTAMP,
@@ -457,7 +459,7 @@ class InvitationService {
             const invitation = result.rows[0];
 
             // Update user with invitation info
-            await db.query(`
+            await executor.query(`
                 UPDATE users 
                 SET invited_by_user_id = $1, 
                     invitation_accepted_at = CURRENT_TIMESTAMP
@@ -465,13 +467,102 @@ class InvitationService {
             `, [invitation.inviter_id, acceptedByUserId]);
 
             // Log sync tracking
-            await this.logSyncTracking(invitation.id, acceptedByUserId, 'accepted');
+            await this.logSyncTracking(invitation.id, acceptedByUserId, 'accepted', executor);
 
             logger.info(`Invitation accepted: ${invitationId} by user ${acceptedByUserId}`);
             return invitation;
 
         } catch (error) {
             logger.error('Error accepting invitation:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Reset an invitation back to pending status
+     */
+    async resetInvitation(invitationId, adminUserId) {
+        try {
+            const invitationResult = await db.query(
+                `SELECT * FROM invitations WHERE id = $1 AND deleted_at IS NULL`,
+                [invitationId]
+            );
+
+            if (invitationResult.rows.length === 0) {
+                throw new Error('Invitation not found');
+            }
+
+            const invitation = invitationResult.rows[0];
+
+            const newExpiry = new Date();
+            newExpiry.setDate(newExpiry.getDate() + this.INVITATION_EXPIRY_DAYS);
+
+            const updateResult = await db.query(`
+                UPDATE invitations
+                SET status = 'pending',
+                    accepted_at = NULL,
+                    accepted_by_user_id = NULL,
+                    expires_at = $2,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = $1
+                RETURNING *
+            `, [invitationId, newExpiry]);
+
+            const updatedInvitation = updateResult.rows[0];
+
+            let waitlistEntry = null;
+            const metadata = this.parseMetadata(invitation.metadata);
+            const waitlistId = metadata.waitlist_id;
+
+            if (waitlistId) {
+                const statusHistory = Array.isArray(metadata.status_history) ? metadata.status_history : [];
+                const resetTimestamp = new Date().toISOString();
+                const updatedMetadata = {
+                    ...metadata,
+                    invitation_id: invitationId,
+                    invitation_code: invitation.invitation_code,
+                    invited_at: null,
+                    invited_by: null,
+                    dismissed_at: null,
+                    status_history: [
+                        ...statusHistory,
+                        {
+                            status: 'reset',
+                            at: resetTimestamp,
+                            by: adminUserId,
+                        },
+                    ],
+                };
+
+                const waitlistResult = await db.query(`
+                    UPDATE beta_waitlist
+                    SET status = 'pending',
+                        metadata = $2::jsonb,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                    RETURNING *
+                `, [waitlistId, JSON.stringify(updatedMetadata)]);
+
+                if (waitlistResult.rows.length > 0) {
+                    const row = waitlistResult.rows[0];
+                    waitlistEntry = {
+                        ...row,
+                        metadata: this.parseMetadata(row.metadata),
+                    };
+                }
+            }
+
+            logger.info('Invitation reset to pending', {
+                invitationId,
+                adminUserId,
+            });
+
+            return {
+                invitation: updatedInvitation,
+                waitlistEntry,
+            };
+        } catch (error) {
+            logger.error('Error resetting invitation:', error);
             throw error;
         }
     }
@@ -592,9 +683,9 @@ class InvitationService {
     /**
      * Log sync tracking
      */
-    async logSyncTracking(invitationId, userId, action) {
+    async logSyncTracking(invitationId, userId, action, executor = db) {
         try {
-            await db.query(`
+            await executor.query(`
                 INSERT INTO invitation_sync_tracking (invitation_id, user_id, action)
                 VALUES ($1, $2, $3)
             `, [invitationId, userId, action]);

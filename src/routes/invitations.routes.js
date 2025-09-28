@@ -332,6 +332,22 @@ router.post('/admin/beta-waitlist/:id/dismiss', [
     }
 });
 
+// Admin endpoint to reset an invitation to pending status
+router.post('/admin/invitations/:id/reset', [
+    authenticateJWT,
+    checkPermissions(['admin:manage_invitations']),
+    validateRequest
+], async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await invitationService.resetInvitation(id, req.user.id);
+        res.json({ success: true, invitation: result.invitation, waitlistEntry: result.waitlistEntry });
+    } catch (error) {
+        console.error('Error resetting invitation:', error);
+        res.status(400).json({ success: false, error: error.message });
+    }
+});
+
 // Admin endpoint to generate beta invitation codes
 router.post('/admin/beta-generate', [
     authenticateJWT,

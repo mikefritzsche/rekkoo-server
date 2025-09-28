@@ -127,7 +127,7 @@ const sendInvitationEmail = async (toEmail, invitationToken, invitationCode, inv
 
   // Construct the invitation link using the environment-aware base URL
   const appBaseUrl = getAppBaseUrl();
-  const invitationLink = `${appBaseUrl}/invitation/accept/${invitationToken}`;
+  const invitationLink = `${appBaseUrl}/register?code=${encodeURIComponent(invitationCode)}`;
   const customMessage = metadata.message || '';
 
   console.log(`Sending invitation email to: ${toEmail}`); // Log recipient

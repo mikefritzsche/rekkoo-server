@@ -130,7 +130,7 @@ const register = async (req, res) => {
       );
 
       // Accept the invitation
-      await invitationService.acceptInvitation(validation.invitation.id, userId);
+      await invitationService.acceptInvitation(validation.invitation.id, userId, client);
 
       return { userId, verificationToken, username, email, invitationId: validation.invitation.id };
     });
