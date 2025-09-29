@@ -198,6 +198,101 @@ function syncControllerFactory(socketService) {
     }
   }
 
+  const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  async function fetchShareMetadataForLists(listIds = []) {
+    const normalizedIds = Array.from(new Set(
+      listIds
+        .map((id) => (typeof id === 'string' ? id : String(id ?? '')))
+        .filter((id) => UUID_REGEX.test(id))
+    ));
+
+    if (normalizedIds.length === 0) {
+      return new Map();
+    }
+
+    const placeholders = normalizedIds;
+
+    const [groupRoleResult, legacyShareResult, individualShareResult] = await Promise.all([
+      db.query(
+        `SELECT lgr.list_id::text AS list_id,
+                lgr.group_id::text AS group_id,
+                cg.name AS group_name
+         FROM public.list_group_roles lgr
+         LEFT JOIN public.collaboration_groups cg ON cg.id = lgr.group_id
+         WHERE lgr.list_id = ANY($1::uuid[])
+           AND lgr.deleted_at IS NULL
+           AND (cg.deleted_at IS NULL OR cg.deleted_at IS NULL)`,
+        [placeholders]
+      ),
+      db.query(
+        `SELECT ls.list_id::text AS list_id,
+                ls.shared_with_group_id::text AS group_id,
+                cg.name AS group_name
+         FROM public.list_sharing ls
+         LEFT JOIN public.collaboration_groups cg ON cg.id = ls.shared_with_group_id
+         WHERE ls.list_id = ANY($1::uuid[])
+           AND ls.deleted_at IS NULL
+           AND ls.shared_with_group_id IS NOT NULL`,
+        [placeholders]
+      ),
+      db.query(
+        `SELECT luo.list_id::text AS list_id,
+                luo.user_id::text AS user_id
+         FROM public.list_user_overrides luo
+         WHERE luo.list_id = ANY($1::uuid[])
+           AND luo.deleted_at IS NULL
+           AND luo.role NOT IN ('blocked','inherit')`,
+        [placeholders]
+      ),
+    ]);
+
+    const metadataMap = new Map();
+
+    const ensureEntry = (listId) => {
+      if (!metadataMap.has(listId)) {
+        metadataMap.set(listId, {
+          groupIds: new Set(),
+          groupDetails: new Map(),
+          connectionIds: new Set(),
+        });
+      }
+      return metadataMap.get(listId);
+    };
+
+    const processGroupRow = (row) => {
+      if (!row || !row.list_id || !row.group_id) return;
+      const entry = ensureEntry(row.list_id);
+      entry.groupIds.add(row.group_id);
+      if (!entry.groupDetails.has(row.group_id)) {
+        entry.groupDetails.set(row.group_id, {
+          id: row.group_id,
+          name: row.group_name || null,
+        });
+      }
+    };
+
+    groupRoleResult.rows.forEach(processGroupRow);
+    legacyShareResult.rows.forEach(processGroupRow);
+
+    individualShareResult.rows.forEach((row) => {
+      if (!row || !row.list_id || !row.user_id) return;
+      const entry = ensureEntry(row.list_id);
+      entry.connectionIds.add(row.user_id);
+    });
+
+    const result = new Map();
+    metadataMap.forEach((value, key) => {
+      result.set(key, {
+        groupIds: Array.from(value.groupIds),
+        groupDetails: Array.from(value.groupDetails.values()),
+        connectionIds: Array.from(value.connectionIds),
+      });
+    });
+
+    return result;
+  }
+
   // Helper to determine the correct user identifier column for a given table
   const getUserIdentifierColumn = (tableName) => {
     if (tableName === 'list_items' || tableName === 'lists') {
@@ -1520,12 +1615,65 @@ function syncControllerFactory(socketService) {
       `;
 
       const { rows } = await db.query(query, [userId, lastPulledAt]);
-      
+
+      const listIdsToAugment = rows
+        .filter((r) => r.table_name === 'lists' && r.current_data && r.current_data.id)
+        .map((r) => String(r.current_data.id));
+
+      const shareMetadataMap = await fetchShareMetadataForLists(listIdsToAugment);
+
+      for (const row of rows) {
+        if (row.table_name !== 'lists' || !row.current_data || !row.current_data.id) continue;
+
+        const listId = String(row.current_data.id);
+        const ownerId = row.current_data.owner_id ? String(row.current_data.owner_id) : null;
+        const shareMeta = shareMetadataMap.get(listId) || { groupIds: [], groupDetails: [], connectionIds: [] };
+
+        if (shareMeta.groupIds.length > 0) {
+          row.current_data.access_groups = shareMeta.groupIds;
+          row.current_data.access_group_details = shareMeta.groupDetails;
+        }
+
+        if (shareMeta.connectionIds.length > 0) {
+          row.current_data.shared_with_connections = shareMeta.connectionIds;
+        }
+
+        const hasGroupShares = shareMeta.groupIds.length > 0;
+        const hasIndividualShares = shareMeta.connectionIds.length > 0;
+
+        let shareType = row.current_data.share_type || null;
+        if (!shareType) {
+          if (hasGroupShares) {
+            shareType = 'group_shared';
+          } else if (hasIndividualShares) {
+            shareType = 'individual_shared';
+          }
+        }
+
+        if (ownerId === String(userId)) {
+          if (shareType) {
+            row.current_data.share_type = shareType;
+          }
+          if (typeof row.current_data.shared_by_owner !== 'boolean') {
+            row.current_data.shared_by_owner = Boolean(shareType);
+          }
+        } else {
+          row.current_data.shared_with_me = true;
+          if (shareType) {
+            row.current_data.share_type = shareType;
+          }
+          if (!row.current_data.access_via_group && shareMeta.groupDetails.length > 0) {
+            const primaryGroup = shareMeta.groupDetails[0];
+            row.current_data.access_via_group = primaryGroup?.name || primaryGroup?.id || row.current_data.access_via_group;
+          }
+        }
+      }
+
       // Debug: Log shared lists being pulled
-      const sharedLists = rows.filter(r => r.table_name === 'lists' && r.current_data && r.current_data.owner_id !== userId);
+      const sharedLists = rows.filter((r) => r.table_name === 'lists' && r.current_data && r.current_data.owner_id !== userId);
       if (sharedLists.length > 0) {
         logger.info(`[SyncController] Pull found ${sharedLists.length} shared lists for user ${userId}:`);
-        sharedLists.forEach(list => {
+        sharedLists.forEach((list) => {
           logger.info(`  - Shared list: "${list.current_data.title}" (${list.current_data.id}), owner: ${list.current_data.owner_id}`);
         });
       }
@@ -1587,7 +1735,17 @@ function syncControllerFactory(socketService) {
 
     logger.info(`[SyncController] User ${userId} requesting record: ${table}/${id}`);
     // Renamed 'items' to 'list_items' in allowedTables
-    const allowedTables = ['list_items', 'lists', ...Object.values(DETAIL_TABLES_MAP), 'user_settings'];
+    const allowedTables = [
+      'list_items',
+      'lists',
+      ...Object.values(DETAIL_TABLES_MAP),
+      'user_settings',
+      'list_sharing',
+      'list_user_overrides',
+      'list_group_roles',
+      'collaboration_group_members',
+      'collaboration_groups',
+    ];
     if (!allowedTables.includes(table)) {
       return res.status(400).json({ error: 'Invalid or disallowed table specified' });
     }
