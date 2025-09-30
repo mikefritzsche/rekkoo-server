@@ -4,6 +4,178 @@ const saltRounds = 12;
 const { logger } = require('../utils/logger');
 const embeddingService = require('../services/embeddingService');
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function ensureShareEntry(map, listId) {
+  if (!map.has(listId)) {
+    map.set(listId, {
+      groupIds: new Set(),
+      groupDetails: new Map(),
+      userIds: new Set(),
+    });
+  }
+  return map.get(listId);
+}
+
+async function fetchShareSummary(listIds = []) {
+  if (!Array.isArray(listIds) || listIds.length === 0) {
+    return new Map();
+  }
+
+  const normalizedIds = Array.from(
+    new Set(
+      listIds
+        .map((id) => (typeof id === 'string' ? id : String(id ?? '')))
+        .filter((id) => UUID_REGEX.test(id))
+    ),
+  );
+
+  if (normalizedIds.length === 0) {
+    return new Map();
+  }
+
+  const [groupRolesResult, legacyShareResult, individualShareResult] = await Promise.all([
+    db.query(
+      `SELECT lgr.list_id::text AS list_id,
+              lgr.group_id::text AS group_id,
+              cg.name AS group_name
+       FROM public.list_group_roles lgr
+       LEFT JOIN public.collaboration_groups cg ON cg.id = lgr.group_id
+       WHERE lgr.list_id = ANY($1::uuid[])
+         AND lgr.deleted_at IS NULL`,
+      [normalizedIds],
+    ),
+    db.query(
+      `SELECT ls.list_id::text AS list_id,
+              ls.shared_with_group_id::text AS group_id,
+              cg.name AS group_name
+       FROM public.list_sharing ls
+       LEFT JOIN public.collaboration_groups cg ON cg.id = ls.shared_with_group_id
+       WHERE ls.list_id = ANY($1::uuid[])
+         AND ls.deleted_at IS NULL
+         AND ls.shared_with_group_id IS NOT NULL`,
+      [normalizedIds],
+    ),
+    db.query(
+      `SELECT luo.list_id::text AS list_id,
+              luo.user_id::text AS user_id
+       FROM public.list_user_overrides luo
+       WHERE luo.list_id = ANY($1::uuid[])
+         AND luo.deleted_at IS NULL
+         AND luo.role NOT IN ('blocked','inherit')`,
+      [normalizedIds],
+    ),
+  ]);
+
+  const summaryMap = new Map();
+
+  const processGroupRow = (row) => {
+    if (!row || !row.list_id || !row.group_id) return;
+    const entry = ensureShareEntry(summaryMap, row.list_id);
+    entry.groupIds.add(row.group_id);
+    if (!entry.groupDetails.has(row.group_id)) {
+      entry.groupDetails.set(row.group_id, {
+        id: row.group_id,
+        name: row.group_name || null,
+      });
+    }
+  };
+
+  groupRolesResult.rows.forEach(processGroupRow);
+  legacyShareResult.rows.forEach(processGroupRow);
+
+  individualShareResult.rows.forEach((row) => {
+    if (!row || !row.list_id || !row.user_id) return;
+    const entry = ensureShareEntry(summaryMap, row.list_id);
+    entry.userIds.add(row.user_id);
+  });
+
+  return summaryMap;
+}
+
+async function fetchViewerGroupIds(userId) {
+  if (!userId) return new Set();
+
+  const { rows } = await db.query(
+    `SELECT DISTINCT group_id
+     FROM public.collaboration_group_members
+     WHERE user_id = $1 AND deleted_at IS NULL
+     UNION
+     SELECT id AS group_id
+     FROM public.collaboration_groups
+     WHERE owner_id = $1 AND deleted_at IS NULL`,
+    [userId],
+  );
+
+  return new Set(rows.map((row) => String(row.group_id)));
+}
+
+function mergeArrayValues(existing, additions) {
+  const set = new Set((existing || []).map((val) => (val == null ? null : String(val))));
+  additions.forEach((val) => {
+    if (val != null) {
+      set.add(String(val));
+    }
+  });
+  return Array.from(set);
+}
+
+function applyOwnerShareMetadata(row, summaryEntry) {
+  const groupIds = summaryEntry ? Array.from(summaryEntry.groupIds) : [];
+  const groupDetails = summaryEntry ? Array.from(summaryEntry.groupDetails.values()) : [];
+  const userIds = summaryEntry ? Array.from(summaryEntry.userIds) : [];
+
+  row.access_groups = mergeArrayValues(row.access_groups, groupIds);
+  row.access_group_details = row.access_group_details || groupDetails;
+  row.shared_with_connections = mergeArrayValues(row.shared_with_connections, userIds);
+
+  if (!row.share_type) {
+    if (groupIds.length > 0) {
+      row.share_type = 'group_shared';
+    } else if (userIds.length > 0) {
+      row.share_type = 'individual_shared';
+    }
+  }
+
+  if (typeof row.shared_by_owner !== 'boolean') {
+    row.shared_by_owner = groupIds.length > 0 || userIds.length > 0;
+  }
+}
+
+function applyViewerShareMetadata(row, summaryEntry, viewerId, viewerGroupIds) {
+  const groupIds = summaryEntry ? Array.from(summaryEntry.groupIds) : [];
+  const groupDetails = summaryEntry ? Array.from(summaryEntry.groupDetails.values()) : [];
+  const userIds = summaryEntry ? Array.from(summaryEntry.userIds) : [];
+
+  row.access_groups = mergeArrayValues(row.access_groups, groupIds);
+  row.access_group_details = row.access_group_details || groupDetails;
+  row.shared_with_connections = mergeArrayValues(row.shared_with_connections, userIds);
+
+  const viewerHasIndividualShare = viewerId ? userIds.includes(String(viewerId)) : false;
+  const viewerHasGroupShare = viewerId
+    ? groupIds.some((groupId) => viewerGroupIds.has(String(groupId)))
+    : false;
+
+  if (typeof row.shared_with_me !== 'boolean') {
+    row.shared_with_me = viewerHasGroupShare || viewerHasIndividualShare;
+  }
+
+  if (!row.share_type) {
+    if (viewerHasGroupShare) {
+      row.share_type = 'group_shared';
+    } else if (viewerHasIndividualShare) {
+      row.share_type = 'individual_shared';
+    }
+  }
+
+  if (!row.access_via_group && viewerHasGroupShare && groupDetails.length > 0) {
+    const matchingGroup = groupDetails.find((detail) => viewerGroupIds.has(String(detail.id)));
+    if (matchingGroup) {
+      row.access_via_group = matchingGroup.name || matchingGroup.id;
+    }
+  }
+}
+
 /**
  * Factory function that creates a UserController
  * @param {Object} socketService - Optional socket service for real-time updates
@@ -778,13 +950,19 @@ function userControllerFactory(socketService = null) {
             l.updated_at DESC;
         `;
         
-        const { rows } = await db.query(query, [actualTargetUserId]);
-        
-        // Log the breakdown
-        const ownedLists = rows.filter(r => !r.shared_with_me);
-        const sharedLists = rows.filter(r => r.shared_with_me);
-        const groupShared = sharedLists.filter(r => r.share_type === 'group_shared');
-        const individualShared = sharedLists.filter(r => r.share_type === 'individual_shared');
+      const { rows } = await db.query(query, [actualTargetUserId]);
+
+      const shareSummary = await fetchShareSummary(rows.map((row) => row.id));
+      rows.forEach((row) => {
+        const summaryEntry = shareSummary.get(String(row.id));
+        applyOwnerShareMetadata(row, summaryEntry);
+      });
+
+      // Log the breakdown
+      const ownedLists = rows.filter(r => !r.shared_with_me);
+      const sharedLists = rows.filter(r => r.shared_with_me);
+      const groupShared = sharedLists.filter(r => r.share_type === 'group_shared');
+      const individualShared = sharedLists.filter(r => r.share_type === 'individual_shared');
         
         logger.info(`[UserController] Returning ${rows.length} total lists for user ${actualTargetUserId}:`);
         logger.info(`  - ${ownedLists.length} owned lists`);
@@ -1028,9 +1206,21 @@ function userControllerFactory(socketService = null) {
         : [actualTargetUserId];
       
       const { rows } = await db.query(query, queryParams);
-      
+
+      const shareSummary = await fetchShareSummary(rows.map((row) => row.id));
+      const viewerGroupIds = actualViewingUserId ? await fetchViewerGroupIds(actualViewingUserId) : new Set();
+
+      rows.forEach((row) => {
+        const summaryEntry = shareSummary.get(String(row.id));
+        if (actualViewingUserId && String(row.owner_id) === String(actualViewingUserId)) {
+          applyOwnerShareMetadata(row, summaryEntry);
+        } else {
+          applyViewerShareMetadata(row, summaryEntry, actualViewingUserId, viewerGroupIds);
+        }
+      });
+
       logger.info(`[UserController] Main query returned ${rows.length} accessible lists for viewer ${actualViewingUserId || 'anonymous'}`);
-      
+
       // Check if individually shared lists made it to the results
       if (actualViewingUserId && actualViewingUserId !== actualTargetUserId) {
         const directShareCheck = `
