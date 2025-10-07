@@ -569,7 +569,7 @@ router.get('/users/:userId/lists', authenticateJWT, async (req, res) => {
     const { userId } = req.params;
     const includeDeleted = req.query.includeDeleted === 'true';
     const { rows } = await db.query(
-      `SELECT l.id, l.title, l.created_at, l.deleted_at IS NOT NULL AS is_deleted,
+      `SELECT l.id, l.title, l.is_public, l.created_at, l.deleted_at IS NOT NULL AS is_deleted,
               (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) AS item_count
        FROM lists l
        WHERE owner_id = $1 AND ($2::boolean OR l.deleted_at IS NULL)
@@ -577,9 +577,48 @@ router.get('/users/:userId/lists', authenticateJWT, async (req, res) => {
       [userId, includeDeleted],
     );
 
-    res.json({ lists: rows });
+    // Ensure is_public is properly boolean for each list
+    const processedRows = rows.map(list => ({
+      ...list,
+      is_public: Boolean(list.is_public)
+    }));
+
+    res.json({ lists: processedRows });
   } catch (err) {
     console.error('Admin users list error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// GET /v1.0/admin/lists/:id – list details
+router.get('/lists/:id', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+
+    const { id } = req.params;
+    const { rows } = await db.query(
+      `SELECT l.id, l.title, l.description, l.is_public, l.is_collaborative, l.created_at, l.updated_at,
+              u.username as owner_username, u.email as owner_email,
+              (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id AND li.deleted_at IS NULL) as item_count
+       FROM lists l
+       JOIN users u ON l.owner_id = u.id
+       WHERE l.id = $1 AND l.deleted_at IS NULL`,
+      [id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ message: 'List not found' });
+    }
+
+    const listData = rows[0];
+    // Ensure is_public is properly boolean
+    listData.is_public = Boolean(listData.is_public);
+    listData.is_collaborative = Boolean(listData.is_collaborative);
+
+    console.log('List data sent:', listData); // Debug log
+    res.json(listData);
+  } catch (err) {
+    console.error('Admin list details fetch error', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -592,15 +631,173 @@ router.get('/lists/:id/items', authenticateJWT, async (req, res) => {
     const { id } = req.params;
     const includeDeleted = req.query.includeDeleted === 'true';
     const { rows } = await db.query(
-      `SELECT id, title, description, deleted_at IS NOT NULL AS is_deleted
-       FROM list_items
-       WHERE list_id = $1 AND ($2::boolean OR deleted_at IS NULL)
-       ORDER BY created_at DESC`,
+      `SELECT
+          li.id,
+          li.title,
+          li.description,
+          li.created_at,
+          li.updated_at,
+          li.deleted_at IS NOT NULL AS is_deleted,
+          -- Gift details
+          gd.quantity,
+          gd.where_to_buy,
+          gd.amazon_url,
+          gd.web_link,
+          gd.rating as gift_rating,
+          -- Movie details
+          md.tmdb_id,
+          md.tagline as movie_tagline,
+          md.release_date,
+          md.genres as movie_genres,
+          md.rating as movie_rating,
+          md.runtime_minutes,
+          -- Book details
+          bd.google_book_id,
+          bd.authors,
+          bd.publisher,
+          bd.page_count,
+          bd.categories as book_categories,
+          -- Place details
+          pd.google_place_id,
+          pd.address_formatted,
+          pd.website as place_website,
+          pd.rating_google,
+          -- Recipe details
+          rd.image_url as recipe_image_url,
+          rd.source_url as recipe_source_url,
+          rd.servings,
+          rd.cook_time,
+          -- Spotify details
+          sd.spotify_id,
+          sd.spotify_item_type,
+          sd.name as spotify_name,
+          sd.external_urls_spotify,
+          sd.images as spotify_images,
+          -- TV details
+          td.tmdb_id as tv_tmdb_id,
+          td.name as tv_name,
+          td.first_air_date,
+          td.rating as tv_rating
+       FROM list_items li
+       LEFT JOIN gift_details gd ON li.id = gd.list_item_id
+       LEFT JOIN movie_details md ON li.id = md.list_item_id
+       LEFT JOIN book_details bd ON li.id = bd.list_item_id
+       LEFT JOIN place_details pd ON li.id = pd.list_item_id
+       LEFT JOIN recipe_details rd ON li.id = rd.list_item_id
+       LEFT JOIN spotify_item_details sd ON li.id = sd.list_item_id
+       LEFT JOIN tv_details td ON li.id = td.list_item_id
+       WHERE li.list_id = $1 AND ($2::boolean OR li.deleted_at IS NULL)
+       ORDER BY li.created_at DESC`,
       [id, includeDeleted],
     );
     res.json({ items: rows });
   } catch (err) {
     console.error('Admin list-items fetch error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// GET /v1.0/admin/users/:userId/metrics – user-specific metrics
+router.get('/users/:userId/metrics', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+
+    const { userId } = req.params;
+
+    const listResults = await Promise.allSettled([
+      db.query('SELECT COUNT(*) FROM lists WHERE owner_id = $1 AND deleted_at IS NULL', [userId]),
+      db.query(`
+        SELECT COUNT(*)
+        FROM list_items li
+        JOIN lists l ON li.list_id = l.id
+        WHERE l.owner_id = $1 AND li.deleted_at IS NULL AND l.deleted_at IS NULL
+      `, [userId]),
+      db.query('SELECT COUNT(*) FROM user_groups WHERE created_by = $1 AND deleted_at IS NULL', [userId]),
+      db.query(`
+        SELECT COUNT(*)
+        FROM group_members gm
+        JOIN user_groups g ON gm.group_id = g.id
+        WHERE gm.user_id = $1 AND gm.deleted_at IS NULL AND g.deleted_at IS NULL
+      `, [userId])
+    ]);
+
+    // Extract results with fallbacks for failed queries
+    const listsCnt = listResults[0].status === 'fulfilled' ? listResults[0].value.rows : [{ count: 0 }];
+    const itemsCnt = listResults[1].status === 'fulfilled' ? listResults[1].value.rows : [{ count: 0 }];
+    const groupsOwnedCnt = listResults[2].status === 'fulfilled' ? listResults[2].value.rows : [{ count: 0 }];
+    const groupsMemberCnt = listResults[3].status === 'fulfilled' ? listResults[3].value.rows : [{ count: 0 }];
+
+    const lastActivityResults = await Promise.allSettled([
+      db.query(`
+        SELECT GREATEST(
+          (SELECT MAX(created_at) FROM lists WHERE owner_id = $1 AND deleted_at IS NULL),
+          (SELECT MAX(li.created_at)
+           FROM list_items li
+           JOIN lists l ON li.list_id = l.id
+           WHERE l.owner_id = $1 AND li.deleted_at IS NULL AND l.deleted_at IS NULL)
+        ) as last_activity
+      `, [userId])
+    ]);
+
+    const lastActivity = lastActivityResults[0].status === 'fulfilled'
+      ? lastActivityResults[0].value.rows
+      : [{ last_activity: null }];
+
+    res.json({
+      totalLists: Number(listsCnt[0].count),
+      totalItems: Number(itemsCnt[0].count),
+      totalGroupsOwned: Number(groupsOwnedCnt[0].count),
+      totalGroupsMemberOf: Number(groupsMemberCnt[0].count),
+      lastActivity: lastActivity[0].last_activity
+    });
+  } catch (err) {
+    console.error('Admin user metrics error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// GET /v1.0/admin/users/:userId/groups – user's group memberships
+router.get('/users/:userId/groups', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+
+    const { userId } = req.params;
+
+    const groupResults = await Promise.allSettled([
+      db.query(`
+        SELECT g.id, g.name, g.description, g.created_at,
+               COUNT(gm.id) as member_count
+        FROM user_groups g
+        LEFT JOIN group_members gm ON g.id = gm.group_id AND gm.deleted_at IS NULL
+        WHERE g.created_by = $1 AND g.deleted_at IS NULL
+        GROUP BY g.id, g.name, g.description, g.created_at
+        ORDER BY g.created_at DESC
+      `, [userId]),
+      db.query(`
+        SELECT g.id, g.name, g.description, g.created_at,
+               u.username as owner_username,
+               COUNT(gm2.id) as member_count
+        FROM group_members gm
+        JOIN user_groups g ON gm.group_id = g.id
+        JOIN users u ON g.created_by = u.id
+        LEFT JOIN group_members gm2 ON g.id = gm2.group_id AND gm2.deleted_at IS NULL
+        WHERE gm.user_id = $1 AND gm.deleted_at IS NULL AND g.deleted_at IS NULL
+        GROUP BY g.id, g.name, g.description, g.created_at, u.username
+        ORDER BY g.created_at DESC
+      `, [userId])
+    ]);
+
+    const ownedGroups = groupResults[0].status === 'fulfilled' ? groupResults[0].value.rows : [];
+    const memberGroups = groupResults[1].status === 'fulfilled' ? groupResults[1].value.rows : [];
+
+    res.json({
+      owned: ownedGroups,
+      memberOf: memberGroups,
+      totalOwned: ownedGroups.length,
+      totalMemberOf: memberGroups.length
+    });
+  } catch (err) {
+    console.error('Admin user groups error', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
