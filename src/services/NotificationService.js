@@ -4,6 +4,7 @@ const nodemailer = require('nodemailer');
 
 class NotificationService {
   constructor() {
+    this.socketService = null;
     // Initialize email transporter if email config is available
     if (process.env.SMTP_HOST && process.env.SMTP_USER) {
       this.emailTransporter = nodemailer.createTransport({
@@ -15,6 +16,19 @@ class NotificationService {
           pass: process.env.SMTP_PASS
         }
       });
+    }
+  }
+
+  setSocketService(socketService) {
+    this.socketService = socketService;
+  }
+
+  emitSocketEvent(userId, event, payload = {}) {
+    if (!this.socketService || !event) return;
+    try {
+      this.socketService.notifyUser(userId, event, payload);
+    } catch (err) {
+      console.error('[NotificationService] Failed to emit socket event:', event, 'user:', userId, err);
     }
   }
 
@@ -64,31 +78,94 @@ class NotificationService {
   // Notify all group members about an action
   async notifyGroupMembers({ listId, excludeUserId, type, data }) {
     try {
-      // Get all group members who have access to this list
-      const { rows: members } = await db.query(
-        `SELECT DISTINCT u.id, u.email, u.username, u.full_name, u.notification_preferences
+      // Gather all collaborators who should be notified (legacy group_members, new collab groups, direct overrides)
+      const { rows: accessRecipients } = await db.query(
+        `WITH legacy_group_members AS (
+           SELECT DISTINCT gm.user_id
+           FROM group_members gm
+           JOIN list_sharing ls ON gm.group_id = ls.shared_with_group_id
+           WHERE ls.list_id = $1
+             AND gm.user_id != $2
+             AND gm.deleted_at IS NULL
+             AND ls.deleted_at IS NULL
+         ),
+         collab_group_members AS (
+           SELECT DISTINCT cgm.user_id
+           FROM list_group_roles lgr
+           JOIN collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+           WHERE lgr.list_id = $1
+             AND cgm.user_id != $2
+             AND lgr.deleted_at IS NULL
+             AND cgm.deleted_at IS NULL
+           UNION
+           SELECT DISTINCT cgm.user_id
+           FROM list_sharing ls
+           JOIN collaboration_group_members cgm ON ls.shared_with_group_id = cgm.group_id
+           WHERE ls.list_id = $1
+             AND cgm.user_id != $2
+             AND ls.deleted_at IS NULL
+             AND cgm.deleted_at IS NULL
+         ),
+         direct_users AS (
+           SELECT DISTINCT luo.user_id
+           FROM list_user_overrides luo
+           WHERE luo.list_id = $1
+             AND luo.user_id != $2
+             AND luo.role != 'blocked'
+             AND luo.deleted_at IS NULL
+         ),
+         combined AS (
+           SELECT user_id FROM legacy_group_members
+           UNION
+           SELECT user_id FROM collab_group_members
+           UNION
+           SELECT user_id FROM direct_users
+         )
+         SELECT DISTINCT
+           u.id,
+           u.email,
+           u.username,
+           u.full_name,
+           COALESCE(us.notification_preferences, '{}'::jsonb) AS notification_preferences
          FROM users u
-         JOIN group_members gm ON u.id = gm.user_id
-         JOIN list_sharing ls ON gm.group_id = ls.shared_with_group_id
-         WHERE ls.list_id = $1 
-           AND u.id != $2
-           AND u.deleted_at IS NULL
-           AND gm.deleted_at IS NULL
-           AND ls.deleted_at IS NULL`,
+         LEFT JOIN user_settings us ON us.user_id = u.id
+         WHERE u.deleted_at IS NULL
+           AND u.id IN (SELECT user_id FROM combined)`,
         [listId, excludeUserId]
       );
 
       // Get list owner as well (if not excluded)
       const { rows: listOwner } = await db.query(
-        `SELECT u.id, u.email, u.username, u.full_name, u.notification_preferences
+        `SELECT 
+           u.id,
+           u.email,
+           u.username,
+           u.full_name,
+           COALESCE(us.notification_preferences, '{}'::jsonb) AS notification_preferences
          FROM users u
+         LEFT JOIN user_settings us ON us.user_id = u.id
          JOIN lists l ON u.id = l.owner_id
          WHERE l.id = $1 AND u.id != $2 AND u.deleted_at IS NULL`,
         [listId, excludeUserId]
       );
 
-      const allRecipients = [...members, ...listOwner[0] ? listOwner : []];
+      const listOwnerRecipients = listOwner.length ? listOwner : [];
+      const allRecipients = [...accessRecipients, ...listOwnerRecipients];
       const uniqueRecipients = Array.from(new Map(allRecipients.map(r => [r.id, r])).values());
+
+      const socketEventMap = {
+        item_reserved: 'gift:item:reserved',
+        item_purchased: 'gift:item:purchased',
+        reservation_released: 'gift:item:released',
+        purchase_released: 'gift:item:released',
+      };
+      const socketEvent = socketEventMap[type] || null;
+      const socketPayloadBase = {
+        listId,
+        type,
+        data,
+        timestamp: new Date().toISOString(),
+      };
 
       // Prepare notification content based on type
       let title, message, emailSubject, emailHtml;
@@ -177,6 +254,13 @@ class NotificationService {
             to: recipient.email,
             subject: emailSubject,
             html: emailHtml
+          });
+        }
+
+        if (socketEvent) {
+          this.emitSocketEvent(recipient.id, socketEvent, {
+            ...socketPayloadBase,
+            recipientId: recipient.id,
           });
         }
       });

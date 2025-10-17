@@ -100,7 +100,7 @@ const GiftController = {
          JOIN lists l ON li.list_id = l.id
          LEFT JOIN gift_details gd ON li.gift_detail_id = gd.id
          WHERE li.id = $1 AND li.deleted_at IS NULL
-         FOR UPDATE`,
+         FOR UPDATE OF li`,
         [itemId]
       );
       
@@ -188,12 +188,17 @@ const GiftController = {
         excludeUserId: item.list_owner_id,
         type: 'item_reserved',
         data: {
+          item_id: itemId,
           item_title: item.title,
           list_title: item.list_title,
           reserved_by: req.user.username,
+          reserved_by_id: userId,
           reservation_id: reservationRecord.id,
           quantity: normalizeReservationQuantity(reservationRecord.quantity),
           available_quantity: updatedStatus.available_quantity,
+          reserved_quantity: updatedStatus.reserved_quantity,
+          purchased_quantity: updatedStatus.purchased_quantity,
+          total_quantity: updatedStatus.total_quantity,
         }
       });
       
@@ -239,7 +244,7 @@ const GiftController = {
          JOIN lists l ON li.list_id = l.id
          LEFT JOIN gift_details gd ON li.gift_detail_id = gd.id
          WHERE li.id = $1 AND li.deleted_at IS NULL
-         FOR UPDATE`,
+         FOR UPDATE OF li`,
         [itemId]
       );
       
@@ -338,10 +343,16 @@ const GiftController = {
         excludeUserId: item.list_owner_id,
         type: 'item_purchased',
         data: {
+          item_id: itemId,
           item_title: item.title,
           list_title: item.list_title,
           purchased_by: req.user.username,
+          purchased_by_id: userId,
           quantity: normalizeReservationQuantity(reservationRecord.quantity),
+          available_quantity: updatedStatus.available_quantity,
+          reserved_quantity: updatedStatus.reserved_quantity,
+          purchased_quantity: updatedStatus.purchased_quantity,
+          total_quantity: updatedStatus.total_quantity,
         }
       });
         
@@ -417,18 +428,6 @@ const GiftController = {
       
       await db.query('COMMIT');
       
-      const notificationType = reservation.is_purchased ? 'purchase_released' : 'reservation_released';
-      await NotificationService.notifyGroupMembers({
-        listId: reservation.list_id,
-        excludeUserId: reservation.reserved_for,
-        type: notificationType,
-        data: {
-          item_title: reservation.item_title,
-          list_title: reservation.list_title,
-          released_by: req.user.username
-        }
-      });
-
       const lightweightItem = {
         id: itemId,
         list_id: reservation.list_id,
@@ -440,6 +439,24 @@ const GiftController = {
         reservations: updatedReservations,
         userId,
         isListOwner: false,
+      });
+      
+      const notificationType = reservation.is_purchased ? 'purchase_released' : 'reservation_released';
+      await NotificationService.notifyGroupMembers({
+        listId: reservation.list_id,
+        excludeUserId: reservation.reserved_for,
+        type: notificationType,
+        data: {
+          item_id: itemId,
+          item_title: reservation.item_title,
+          list_title: reservation.list_title,
+          released_by: req.user.username,
+          released_by_id: userId,
+          available_quantity: updatedStatus.available_quantity,
+          reserved_quantity: updatedStatus.reserved_quantity,
+          purchased_quantity: updatedStatus.purchased_quantity,
+          total_quantity: updatedStatus.total_quantity,
+        }
       });
       
       return res.json({

@@ -370,6 +370,20 @@ class SocketService {
         }
       });
     });
+
+    this.io.on('connection', (socket) => {
+      socket.on('join:gift-list', ({ listId }) => {
+        if (!listId) return;
+        const room = `gift_list_${listId}`;
+        socket.join(room);
+      });
+
+      socket.on('leave:gift-list', ({ listId }) => {
+        if (!listId) return;
+        const room = `gift_list_${listId}`;
+        socket.leave(room);
+      });
+    });
   }
 
   // Emit to specific user room
@@ -382,6 +396,12 @@ class SocketService {
     console.log(`SocketService: Attempting to emit (notifyUser) '${event}' to room '${userRoom}' (${clientCount} client(s) expected). Data:`, data, `Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
     
     this.io.to(userRoom).emit(event, data);
+
+    const listId = data?.listId || data?.data?.listId || data?.data?.list_id;
+    if (listId) {
+      const listRoom = `gift_list_${listId}`;
+      this.io.to(listRoom).emit(event, data);
+    }
     console.log(`SocketService: Emission for '${event}' to room '${userRoom}' completed. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
   }
 

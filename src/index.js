@@ -27,6 +27,7 @@ console.log('🔧 Environment loaded from:', {
 
 // --- 1. Import Services and Route Initializers ---
 const SocketService = require('./services/socket-service');
+const NotificationService = require('./services/NotificationService');
 
 // Import route *initializer functions* where needed
 const initializeChatRoutes = require('./routes/chat.routes');
@@ -91,6 +92,7 @@ const PORT = process.env.PORT || 3100;
 
 // --- 3. Initialize Socket.IO Service ---
 const socketService = new SocketService(server);
+NotificationService.setSocketService(socketService);
 
 // --- 4. Initialize Controllers that need dependencies ---
 const favoritesController = favoritesControllerFactory(socketService);
