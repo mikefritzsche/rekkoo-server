@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { normalizeReservationQuantity, buildReservationResponse } = require('../utils/giftReservationUtils');
 
 function publicListsControllerFactory() {
   /**
@@ -95,53 +96,68 @@ function publicListsControllerFactory() {
       let items;
       
       if (list.list_type === 'gifts') {
-        // For gift lists, always include reservation status (will be null for non-reserved items)
+        const isOwner = requestor_id && String(requestor_id) === String(list.owner_id);
         itemsQuery = `
           SELECT 
             i.*,
-            gr.reserved_by,
-            gr.is_purchased,
-            u.username as reserved_by_username,
-            u.full_name as reserved_by_full_name
+            COALESCE(gd.quantity, 1) AS gift_quantity
           FROM public.list_items i
-          LEFT JOIN public.gift_reservations gr ON i.id = gr.item_id
-          LEFT JOIN public.users u ON gr.reserved_by = u.id
+          LEFT JOIN public.gift_details gd ON i.gift_detail_id = gd.id
           WHERE i.list_id = $1 AND i.deleted_at IS NULL 
           ORDER BY i.sort_order ASC, i.created_at ASC
         `;
         
         const itemsResult = await db.query(itemsQuery, [id]);
-        
-        // Transform the data to have consistent structure with nested giftStatus
-        items = itemsResult.rows.map(item => {
-          const { reserved_by, is_purchased, reserved_by_username, reserved_by_full_name, ...itemData } = item;
-          
-          // Build the transformed item with gift status as a nested object
-          const transformedItem = {
-            ...itemData
+        const itemRows = itemsResult.rows;
+        const itemIds = itemRows.map(row => row.id);
+
+        let reservationRows = [];
+        if (itemIds.length > 0) {
+          const reservationsQuery = `
+            SELECT 
+              gr.*,
+              u.username,
+              u.full_name
+            FROM public.gift_reservations gr
+            LEFT JOIN public.users u ON gr.reserved_by = u.id
+            WHERE gr.deleted_at IS NULL
+              AND gr.item_id = ANY($1::uuid[])
+            ORDER BY gr.created_at ASC
+          `;
+          const reservationsResult = await db.query(reservationsQuery, [itemIds]);
+          reservationRows = reservationsResult.rows;
+        }
+
+        const reservationsByItem = new Map();
+        for (const row of reservationRows) {
+          const normalizedRow = {
+            ...row,
+            quantity: normalizeReservationQuantity(row.quantity),
           };
-          
-          // Add gift status for non-owners or when there's reservation data
-          if (!isOwner || reserved_by) {
-            transformedItem.giftStatus = {
-              is_reserved: !!reserved_by,
-              is_purchased: !!is_purchased,
-              reserved_by: reserved_by ? {
-                id: reserved_by,
-                username: reserved_by_username,
-                full_name: reserved_by_full_name,
-                is_me: reserved_by === requestor_id
-              } : null
-            };
-          }
-          
-          // For owners, don't show reservation details unless it's their own reservation
-          if (isOwner && reserved_by && reserved_by !== requestor_id) {
-            // Hide other people's reservations from the owner
-            delete transformedItem.giftStatus;
-          }
-          
-          return transformedItem;
+          const existing = reservationsByItem.get(row.item_id) || [];
+          existing.push(normalizedRow);
+          reservationsByItem.set(row.item_id, existing);
+        }
+
+        items = itemRows.map(item => {
+          const reservations = reservationsByItem.get(item.id) || [];
+          const status = buildReservationResponse({
+            item,
+            reservations,
+            userId: requestor_id,
+            isListOwner: Boolean(isOwner),
+          });
+
+          return {
+            ...item,
+            giftStatus: status,
+            gift_status: status,
+            is_reserved: status.is_reserved,
+            is_purchased: status.is_purchased,
+            available_quantity: status.available_quantity,
+            reserved_quantity: status.reserved_quantity,
+            purchased_quantity: status.purchased_quantity,
+          };
         });
       } else {
         // For non-gift lists, use simple query

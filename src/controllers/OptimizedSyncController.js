@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const { logger } = require('../utils/logger');
 const syncOptimization = require('../config/sync-optimization');
+const { normalizeReservationQuantity, buildReservationResponse } = require('../utils/giftReservationUtils');
 
 function optimizedSyncControllerFactory(socketService) {
 
@@ -333,40 +334,50 @@ function optimizedSyncControllerFactory(socketService) {
         const giftListIds = Array.from(allListIds);
         const reservationsQuery = `
           SELECT
-            gr.item_id,
-            gr.reserved_by,
-            gr.is_purchased,
+            gr.*,
             u.username as reserved_by_username,
             u.full_name as reserved_by_full_name
           FROM gift_reservations gr
           LEFT JOIN users u ON gr.reserved_by = u.id
-          WHERE gr.item_id IN (
-            SELECT id FROM list_items
-            WHERE list_id = ANY($1::uuid[])
-          )
+          WHERE gr.deleted_at IS NULL
+            AND gr.item_id IN (
+              SELECT id FROM list_items
+              WHERE list_id = ANY($1::uuid[])
+            )
         `;
         const reservationsResult = await db.query(reservationsQuery, [giftListIds]);
 
-        // Create gift status map
-        const giftStatusMap = {};
+        const reservationsByItem = new Map();
         for (const row of reservationsResult.rows) {
-          giftStatusMap[row.item_id] = {
-            is_reserved: !!row.reserved_by,
-            is_purchased: !!row.is_purchased,
-            reserved_by: row.reserved_by ? {
-              id: row.reserved_by,
-              username: row.reserved_by_username,
-              full_name: row.reserved_by_full_name,
-              is_me: row.reserved_by === userId
-            } : null
+          const normalizedRow = {
+            ...row,
+            quantity: normalizeReservationQuantity(row.quantity),
           };
+          const existing = reservationsByItem.get(row.item_id) || [];
+          existing.push(normalizedRow);
+          reservationsByItem.set(row.item_id, existing);
         }
 
-        // Apply gift status to items
         [...changes.list_items.created, ...changes.list_items.updated].forEach(item => {
-          if (item && giftListIds.includes(item.list_id) && giftStatusMap[item.id]) {
-            item.giftStatus = giftStatusMap[item.id];
+          if (!item || !giftListIds.includes(item.list_id)) return;
+          const reservations = reservationsByItem.get(item.id);
+          if (!reservations || reservations.length === 0) {
+            return;
           }
+
+          const itemForStatus = {
+            ...item,
+            gift_quantity: item.gift_quantity ?? item.quantity ?? 1,
+          };
+
+          const status = buildReservationResponse({
+            item: itemForStatus,
+            reservations,
+            userId,
+            isListOwner: false,
+          });
+
+          item.giftStatus = status;
         });
       }
 
@@ -452,38 +463,50 @@ function optimizedSyncControllerFactory(socketService) {
             const giftListIds = giftListsNotOwned.map(l => l.id);
             const reservationsQuery = `
               SELECT
-                gr.item_id,
-                gr.reserved_by,
-                gr.is_purchased,
+                gr.*,
                 u.username as reserved_by_username,
                 u.full_name as reserved_by_full_name
               FROM gift_reservations gr
               LEFT JOIN users u ON gr.reserved_by = u.id
-              WHERE gr.item_id IN (
+              WHERE gr.deleted_at IS NULL
+                AND gr.item_id IN (
                 SELECT id FROM list_items
                 WHERE list_id = ANY($1::uuid[])
               )
             `;
             const reservationsResult = await db.query(reservationsQuery, [giftListIds]);
 
-            const giftStatusMap = {};
+            const reservationsByItem = new Map();
             for (const row of reservationsResult.rows) {
-              giftStatusMap[row.item_id] = {
-                is_reserved: !!row.reserved_by,
-                is_purchased: !!row.is_purchased,
-                reserved_by: row.reserved_by ? {
-                  id: row.reserved_by,
-                  username: row.reserved_by_username,
-                  full_name: row.reserved_by_full_name,
-                  is_me: row.reserved_by === userId
-                } : null
+              const normalizedRow = {
+                ...row,
+                quantity: normalizeReservationQuantity(row.quantity),
               };
+              const existing = reservationsByItem.get(row.item_id) || [];
+              existing.push(normalizedRow);
+              reservationsByItem.set(row.item_id, existing);
             }
 
             changes.list_items.created.forEach(item => {
-              if (giftListIds.includes(item.list_id) && giftStatusMap[item.id]) {
-                item.giftStatus = giftStatusMap[item.id];
+              if (!giftListIds.includes(item.list_id)) return;
+              const reservations = reservationsByItem.get(item.id);
+              if (!reservations || reservations.length === 0) {
+                return;
               }
+
+              const itemForStatus = {
+                ...item,
+                gift_quantity: item.gift_quantity ?? item.quantity ?? 1,
+              };
+
+              const status = buildReservationResponse({
+                item: itemForStatus,
+                reservations,
+                userId,
+                isListOwner: false,
+              });
+
+              item.giftStatus = status;
             });
           }
 

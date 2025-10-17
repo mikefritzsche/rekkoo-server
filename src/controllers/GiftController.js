@@ -1,6 +1,35 @@
 const db = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
 const NotificationService = require('../services/NotificationService');
+const {
+  DEFAULT_RESERVATION_QUANTITY,
+  normalizeReservationQuantity,
+  buildReservationResponse,
+  fetchActiveReservationsForItem,
+} = require('../utils/giftReservationUtils');
+
+const parseOptionalQuantity = (value) => {
+  if (value === undefined || value === null || value === '') {
+    return null;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error('Quantity must be a number');
+  }
+
+  const intValue = Math.floor(parsed);
+  if (intValue < 1) {
+    throw new Error('Quantity must be at least 1');
+  }
+
+  return intValue;
+};
+
+const parseQuantityOrDefault = (value, defaultValue = DEFAULT_RESERVATION_QUANTITY) => {
+  const parsed = parseOptionalQuantity(value);
+  return parsed === null ? defaultValue : parsed;
+};
 
 const GiftController = {
   // Get gift reservation status for an item
@@ -9,11 +38,15 @@ const GiftController = {
     const userId = req.user.id;
     
     try {
-      // Get item details to check list ownership
       const { rows: itemRows } = await db.query(
-        `SELECT li.*, l.owner_id as list_owner_id, l.title as list_title
+        `SELECT 
+           li.*,
+           COALESCE(gd.quantity, 1) AS gift_quantity,
+           l.owner_id as list_owner_id,
+           l.title as list_title
          FROM list_items li
          JOIN lists l ON li.list_id = l.id
+         LEFT JOIN gift_details gd ON li.gift_detail_id = gd.id
          WHERE li.id = $1 AND li.deleted_at IS NULL`,
         [itemId]
       );
@@ -24,50 +57,15 @@ const GiftController = {
       
       const item = itemRows[0];
       const isListOwner = String(item.list_owner_id) === String(userId);
-      
-      // Get reservation details
-      const { rows: reservations } = await db.query(
-        `SELECT gr.*, u.username, u.full_name
-         FROM gift_reservations gr
-         JOIN users u ON gr.reserved_by = u.id
-         WHERE gr.item_id = $1 AND gr.deleted_at IS NULL
-         ORDER BY gr.created_at DESC
-         LIMIT 1`,
-        [itemId]
-      );
-      
-      const reservation = reservations[0] || null;
-      
-      // Prepare response based on user's relationship to the list
-      let response = {
-        item_id: itemId,
-        is_reserved: !!reservation,
-        is_purchased: reservation?.is_purchased || false,
-        is_list_owner: isListOwner
-      };
-      
-      if (reservation) {
-        if (isListOwner) {
-          // List owner sees that item is reserved/purchased but not by whom
-          response.status = reservation.is_purchased ? 'purchased' : 'reserved';
-        } else {
-          // Other users see full details including who reserved/purchased
-          response = {
-            ...response,
-            status: reservation.is_purchased ? 'purchased' : 'reserved',
-            reserved_by: {
-              id: reservation.reserved_by,
-              username: reservation.username,
-              full_name: reservation.full_name,
-              is_me: String(reservation.reserved_by) === String(userId)
-            },
-            reservation_message: reservation.reservation_message,
-            reserved_at: reservation.created_at,
-            updated_at: reservation.updated_at
-          };
-        }
-      }
-      
+
+      const reservations = await fetchActiveReservationsForItem(itemId);
+      const response = buildReservationResponse({
+        item,
+        reservations,
+        userId,
+        isListOwner,
+      });
+
       return res.json(response);
     } catch (error) {
       console.error('Error fetching reservation status:', error);
@@ -80,16 +78,29 @@ const GiftController = {
     const { itemId } = req.params;
     const { reservation_message } = req.body;
     const userId = req.user.id;
+
+    let requestedQuantity;
+    try {
+      requestedQuantity = parseQuantityOrDefault(req.body.quantity);
+    } catch (err) {
+      return res.status(400).json({ error: err.message || 'Invalid quantity' });
+    }
     
     try {
       await db.query('BEGIN');
       
-      // Get item and list details
       const { rows: itemRows } = await db.query(
-        `SELECT li.*, l.owner_id as list_owner_id, l.title as list_title, l.id as list_id
+        `SELECT 
+           li.*,
+           COALESCE(gd.quantity, 1) AS gift_quantity,
+           l.owner_id as list_owner_id,
+           l.title as list_title,
+           l.id as list_id
          FROM list_items li
          JOIN lists l ON li.list_id = l.id
-         WHERE li.id = $1 AND li.deleted_at IS NULL`,
+         LEFT JOIN gift_details gd ON li.gift_detail_id = gd.id
+         WHERE li.id = $1 AND li.deleted_at IS NULL
+         FOR UPDATE`,
         [itemId]
       );
       
@@ -99,37 +110,79 @@ const GiftController = {
       }
       
       const item = itemRows[0];
+      const isListOwner = String(item.list_owner_id) === String(userId);
       
-      // Check if user is the list owner
-      if (String(item.list_owner_id) === String(userId)) {
+      if (isListOwner) {
         await db.query('ROLLBACK');
         return res.status(403).json({ error: 'Cannot reserve items from your own list' });
       }
-      
-      // Check if item is already reserved
-      const { rows: existingReservations } = await db.query(
-        `SELECT * FROM gift_reservations 
-         WHERE item_id = $1 AND deleted_at IS NULL`,
-        [itemId]
-      );
-      
-      if (existingReservations.length > 0) {
+
+      const reservations = await fetchActiveReservationsForItem(itemId, { forUpdate: true });
+      const currentStatus = buildReservationResponse({
+        item,
+        reservations,
+        userId,
+        isListOwner,
+      });
+
+      if (currentStatus.available_quantity <= 0) {
         await db.query('ROLLBACK');
-        return res.status(409).json({ error: 'Item is already reserved' });
+        return res.status(409).json({ error: 'All available quantities have already been claimed' });
       }
-      
-      // Create reservation
-      const reservationId = uuidv4();
-      const { rows: newReservation } = await db.query(
-        `INSERT INTO gift_reservations (id, item_id, reserved_by, reserved_for, reservation_message, is_purchased)
-         VALUES ($1, $2, $3, $4, $5, false)
-         RETURNING *`,
-        [reservationId, itemId, userId, item.list_owner_id, reservation_message]
+
+      if (requestedQuantity > currentStatus.available_quantity) {
+        await db.query('ROLLBACK');
+        return res.status(409).json({
+          error: `Only ${currentStatus.available_quantity} item(s) remain available`,
+        });
+      }
+
+      const existingReservation = reservations.find(
+        (reservation) => !reservation.is_purchased && String(reservation.reserved_by) === String(userId)
       );
-      
+
+      let reservationRecord;
+      if (existingReservation) {
+        const updatedQuantity = normalizeReservationQuantity(existingReservation.quantity) + requestedQuantity;
+        const { rows: updatedReservation } = await db.query(
+          `UPDATE gift_reservations
+             SET quantity = $1,
+                 reservation_message = COALESCE($3, reservation_message),
+                 updated_at = CURRENT_TIMESTAMP
+           WHERE id = $2
+           RETURNING *`,
+          [updatedQuantity, existingReservation.id, reservation_message || null]
+        );
+        reservationRecord = updatedReservation[0];
+      } else {
+        const reservationId = uuidv4();
+        const { rows: newReservation } = await db.query(
+          `INSERT INTO gift_reservations (
+             id,
+             item_id,
+             reserved_by,
+             reserved_for,
+             reservation_message,
+             is_purchased,
+             quantity
+           )
+           VALUES ($1, $2, $3, $4, $5, false, $6)
+           RETURNING *`,
+          [reservationId, itemId, userId, item.list_owner_id, reservation_message || null, requestedQuantity]
+        );
+        reservationRecord = newReservation[0];
+      }
+
       await db.query('COMMIT');
+
+      const updatedReservations = await fetchActiveReservationsForItem(itemId);
+      const updatedStatus = buildReservationResponse({
+        item,
+        reservations: updatedReservations,
+        userId,
+        isListOwner,
+      });
       
-      // Send notifications to group members (except list owner)
       await NotificationService.notifyGroupMembers({
         listId: item.list_id,
         excludeUserId: item.list_owner_id,
@@ -138,14 +191,17 @@ const GiftController = {
           item_title: item.title,
           list_title: item.list_title,
           reserved_by: req.user.username,
-          reservation_id: reservationId
+          reservation_id: reservationRecord.id,
+          quantity: normalizeReservationQuantity(reservationRecord.quantity),
+          available_quantity: updatedStatus.available_quantity,
         }
       });
       
-      return res.status(201).json({
+      return res.status(existingReservation ? 200 : 201).json({
         success: true,
-        reservation: newReservation[0],
-        message: 'Item successfully reserved'
+        reservation: reservationRecord,
+        status: updatedStatus,
+        message: existingReservation ? 'Reservation updated' : 'Item successfully reserved'
       });
       
     } catch (error) {
@@ -161,15 +217,29 @@ const GiftController = {
     const { purchase_message } = req.body;
     const userId = req.user.id;
     
+    let requestedQuantity = null;
+    try {
+      requestedQuantity = parseOptionalQuantity(req.body.quantity);
+    } catch (err) {
+      return res.status(400).json({ error: err.message || 'Invalid quantity' });
+    }
+
     try {
       await db.query('BEGIN');
       
       // Get item and list details
       const { rows: itemRows } = await db.query(
-        `SELECT li.*, l.owner_id as list_owner_id, l.title as list_title, l.id as list_id
+        `SELECT 
+           li.*,
+           COALESCE(gd.quantity, 1) AS gift_quantity,
+           l.owner_id as list_owner_id, 
+           l.title as list_title, 
+           l.id as list_id
          FROM list_items li
          JOIN lists l ON li.list_id = l.id
-         WHERE li.id = $1 AND li.deleted_at IS NULL`,
+         LEFT JOIN gift_details gd ON li.gift_detail_id = gd.id
+         WHERE li.id = $1 AND li.deleted_at IS NULL
+         FOR UPDATE`,
         [itemId]
       );
       
@@ -186,89 +256,101 @@ const GiftController = {
         return res.status(403).json({ error: 'Cannot purchase items from your own list' });
       }
       
-      // Check existing reservation
-      const { rows: existingReservations } = await db.query(
-        `SELECT * FROM gift_reservations 
-         WHERE item_id = $1 AND deleted_at IS NULL`,
-        [itemId]
+      const reservations = await fetchActiveReservationsForItem(itemId, { forUpdate: true });
+      const isListOwner = false; // purchaser can never be list owner due to earlier check
+      const currentStatus = buildReservationResponse({
+        item,
+        reservations,
+        userId,
+        isListOwner,
+      });
+
+      if (currentStatus.available_quantity <= 0 && !reservations.some(r => !r.is_purchased && String(r.reserved_by) === String(userId))) {
+        await db.query('ROLLBACK');
+        return res.status(409).json({ error: 'All available quantities have already been purchased' });
+      }
+
+      const pendingReservation = reservations.find(
+        (reservation) => !reservation.is_purchased && String(reservation.reserved_by) === String(userId)
       );
-      
-      if (existingReservations.length > 0) {
-        const reservation = existingReservations[0];
-        
-        // If already purchased, return error
-        if (reservation.is_purchased) {
-          await db.query('ROLLBACK');
-          return res.status(409).json({ error: 'Item has already been purchased' });
-        }
-        
-        // If reserved by someone else, return error
-        // Convert both to strings for comparison to handle UUID type differences
-        if (String(reservation.reserved_by) !== String(userId)) {
-          await db.query('ROLLBACK');
-          return res.status(403).json({ error: 'Item is reserved by another user' });
-        }
-        
-        // Update existing reservation to purchased
-        const { rows: updatedReservation } = await db.query(
-          `UPDATE gift_reservations 
-           SET is_purchased = true, 
-               reservation_message = COALESCE($2, reservation_message),
-               updated_at = CURRENT_TIMESTAMP
-           WHERE id = $1
-           RETURNING *`,
-          [reservation.id, purchase_message || reservation.reservation_message]
-        );
-        
-        await db.query('COMMIT');
-        
-        // Send notifications
-        await NotificationService.notifyGroupMembers({
-          listId: item.list_id,
-          excludeUserId: item.list_owner_id,
-          type: 'item_purchased',
-          data: {
-            item_title: item.title,
-            list_title: item.list_title,
-            purchased_by: req.user.username
-          }
-        });
-        
-        return res.json({
-          success: true,
-          reservation: updatedReservation[0],
-          message: 'Item marked as purchased'
-        });
-      } else {
-        // Create new reservation marked as purchased
-        const reservationId = uuidv4();
-        const { rows: newReservation } = await db.query(
-          `INSERT INTO gift_reservations (id, item_id, reserved_by, reserved_for, reservation_message, is_purchased)
-           VALUES ($1, $2, $3, $4, $5, true)
-           RETURNING *`,
-          [reservationId, itemId, userId, item.list_owner_id, purchase_message || 'Purchased']
-        );
-        
-        await db.query('COMMIT');
-        
-        // Send notifications
-        await NotificationService.notifyGroupMembers({
-          listId: item.list_id,
-          excludeUserId: item.list_owner_id,
-          type: 'item_purchased',
-          data: {
-            item_title: item.title,
-            list_title: item.list_title,
-            purchased_by: req.user.username
-          }
-        });
-        
-        return res.status(201).json({
-          success: true,
-          reservation: newReservation[0],
-          message: 'Item successfully marked as purchased'
+
+      const purchaseQuantity = pendingReservation
+        ? (requestedQuantity === null ? normalizeReservationQuantity(pendingReservation.quantity) : requestedQuantity)
+        : (requestedQuantity === null ? 1 : requestedQuantity);
+
+      if (pendingReservation && purchaseQuantity !== normalizeReservationQuantity(pendingReservation.quantity)) {
+        await db.query('ROLLBACK');
+        return res.status(400).json({
+          error: `You have reserved ${pendingReservation.quantity} item(s). Purchase quantity must match the reserved quantity.`,
         });
       }
+
+      if (!pendingReservation && purchaseQuantity > currentStatus.available_quantity) {
+        await db.query('ROLLBACK');
+        return res.status(409).json({
+          error: `Only ${currentStatus.available_quantity} item(s) remain available`,
+        });
+      }
+
+      let reservationRecord;
+      if (pendingReservation) {
+        const { rows: updatedReservation } = await db.query(
+          `UPDATE gift_reservations 
+             SET is_purchased = true, 
+                 reservation_message = COALESCE($2, reservation_message),
+                 updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1
+           RETURNING *`,
+          [pendingReservation.id, purchase_message || pendingReservation.reservation_message]
+        );
+        reservationRecord = updatedReservation[0];
+      } else {
+        const reservationId = uuidv4();
+        const { rows: newReservation } = await db.query(
+          `INSERT INTO gift_reservations (
+             id,
+             item_id,
+             reserved_by,
+             reserved_for,
+             reservation_message,
+             is_purchased,
+             quantity
+           )
+           VALUES ($1, $2, $3, $4, $5, true, $6)
+           RETURNING *`,
+          [reservationId, itemId, userId, item.list_owner_id, purchase_message || 'Purchased', purchaseQuantity]
+        );
+        reservationRecord = newReservation[0];
+      }
+        
+      await db.query('COMMIT');
+
+      const updatedReservations = await fetchActiveReservationsForItem(itemId);
+      const updatedStatus = buildReservationResponse({
+        item,
+        reservations: updatedReservations,
+        userId,
+        isListOwner: false,
+      });
+        
+      await NotificationService.notifyGroupMembers({
+        listId: item.list_id,
+        excludeUserId: item.list_owner_id,
+        type: 'item_purchased',
+        data: {
+          item_title: item.title,
+          list_title: item.list_title,
+          purchased_by: req.user.username,
+          quantity: normalizeReservationQuantity(reservationRecord.quantity),
+        }
+      });
+        
+      return res.status(pendingReservation ? 200 : 201).json({
+        success: true,
+        reservation: reservationRecord,
+        status: updatedStatus,
+        message: pendingReservation ? 'Reservation marked as purchased' : 'Item successfully marked as purchased'
+      });
       
     } catch (error) {
       await db.query('ROLLBACK');
@@ -277,47 +359,55 @@ const GiftController = {
     }
   },
 
-  // Release a reservation or purchase
   releaseItem: async (req, res) => {
     const { itemId } = req.params;
+    const { reservation_id: reservationIdFromBody } = req.body || {};
     const userId = req.user.id;
     
     try {
       await db.query('BEGIN');
       
-      // Get reservation
-      const { rows: reservations } = await db.query(
-        `SELECT gr.*, li.list_id, l.title as list_title, li.title as item_title
+      const { rows: reservationRows } = await db.query(
+        `SELECT 
+           gr.*,
+           li.list_id,
+           li.title as item_title,
+           COALESCE(gd.quantity, 1) AS gift_quantity,
+           l.title as list_title,
+           l.owner_id as list_owner_id
          FROM gift_reservations gr
          JOIN list_items li ON gr.item_id = li.id
          JOIN lists l ON li.list_id = l.id
-         WHERE gr.item_id = $1 AND gr.deleted_at IS NULL`,
+         LEFT JOIN gift_details gd ON li.gift_detail_id = gd.id
+         WHERE gr.item_id = $1 AND gr.deleted_at IS NULL
+         FOR UPDATE OF gr`,
         [itemId]
       );
       
-      if (reservations.length === 0) {
+      if (reservationRows.length === 0) {
         await db.query('ROLLBACK');
         return res.status(404).json({ error: 'No reservation found for this item' });
       }
       
-      const reservation = reservations[0];
-      
-      // Check if user can release (must be the one who reserved)
-      // Convert both to strings for comparison to handle UUID type differences
-      if (String(reservation.reserved_by) !== String(userId)) {
-        console.log('[GiftController] Release denied:', {
-          reserved_by: reservation.reserved_by,
-          reserved_by_type: typeof reservation.reserved_by,
-          userId: userId,
-          userId_type: typeof userId,
-          comparison: reservation.reserved_by === userId,
-          stringComparison: String(reservation.reserved_by) === String(userId)
-        });
-        await db.query('ROLLBACK');
-        return res.status(403).json({ error: 'You can only release your own reservations' });
+      let reservation = null;
+      if (reservationIdFromBody) {
+        reservation = reservationRows.find((row) => String(row.id) === String(reservationIdFromBody));
+        if (!reservation) {
+          await db.query('ROLLBACK');
+          return res.status(404).json({ error: 'Reservation not found' });
+        }
+        if (String(reservation.reserved_by) !== String(userId)) {
+          await db.query('ROLLBACK');
+          return res.status(403).json({ error: 'You can only release your own reservations' });
+        }
+      } else {
+        reservation = reservationRows.find((row) => String(row.reserved_by) === String(userId));
+        if (!reservation) {
+          await db.query('ROLLBACK');
+          return res.status(403).json({ error: 'You can only release your own reservations' });
+        }
       }
       
-      // Soft delete the reservation
       await db.query(
         `UPDATE gift_reservations 
          SET deleted_at = CURRENT_TIMESTAMP
@@ -327,7 +417,6 @@ const GiftController = {
       
       await db.query('COMMIT');
       
-      // Send notifications
       const notificationType = reservation.is_purchased ? 'purchase_released' : 'reservation_released';
       await NotificationService.notifyGroupMembers({
         listId: reservation.list_id,
@@ -339,9 +428,23 @@ const GiftController = {
           released_by: req.user.username
         }
       });
+
+      const lightweightItem = {
+        id: itemId,
+        list_id: reservation.list_id,
+        quantity: reservation.gift_quantity,
+      };
+      const updatedReservations = await fetchActiveReservationsForItem(itemId);
+      const updatedStatus = buildReservationResponse({
+        item: lightweightItem,
+        reservations: updatedReservations,
+        userId,
+        isListOwner: false,
+      });
       
       return res.json({
         success: true,
+        status: updatedStatus,
         message: reservation.is_purchased ? 'Purchase released successfully' : 'Reservation released successfully'
       });
       
@@ -458,43 +561,66 @@ const GiftController = {
         return res.status(403).json({ error: 'Access denied' });
       }
       
-      // Get all items with reservation status
-      let query;
-      let params = [listId];
-      
-      if (isOwner) {
-        // Owner sees limited info
-        query = `
-          SELECT li.id, li.title, li.description, li.image_url, li.price,
-                 EXISTS(
-                   SELECT 1 FROM gift_reservations gr 
-                   WHERE gr.item_id = li.id AND gr.deleted_at IS NULL
-                 ) as is_reserved,
-                 EXISTS(
-                   SELECT 1 FROM gift_reservations gr 
-                   WHERE gr.item_id = li.id AND gr.is_purchased = true AND gr.deleted_at IS NULL
-                 ) as is_purchased
-          FROM list_items li
-          WHERE li.list_id = $1 AND li.deleted_at IS NULL
-          ORDER BY li.priority ASC, li.created_at DESC`;
-      } else {
-        // Group members see full details
-        query = `
-          SELECT li.id, li.title, li.description, li.image_url, li.price,
-                 gr.id as reservation_id, gr.is_purchased, gr.reservation_message,
-                 gr.reserved_by, gr.created_at as reserved_at,
-                 u.username as reserved_by_username, u.full_name as reserved_by_name,
-                 CASE WHEN gr.reserved_by = $2 THEN true ELSE false END as is_mine
-          FROM list_items li
-          LEFT JOIN gift_reservations gr ON li.id = gr.item_id AND gr.deleted_at IS NULL
+      const { rows: itemRows } = await db.query(
+        `SELECT 
+           li.*,
+           COALESCE(gd.quantity, 1) AS gift_quantity
+         FROM list_items li
+         LEFT JOIN gift_details gd ON li.gift_detail_id = gd.id
+         WHERE li.list_id = $1 AND li.deleted_at IS NULL
+         ORDER BY li.priority ASC, li.created_at DESC`,
+        [listId]
+      );
+
+      const itemIds = itemRows.map((row) => row.id);
+
+      let reservationRows = [];
+      if (itemIds.length > 0) {
+        const reservationQuery = `
+          SELECT 
+            gr.*,
+            u.username,
+            u.full_name
+          FROM gift_reservations gr
           LEFT JOIN users u ON gr.reserved_by = u.id
-          WHERE li.list_id = $1 AND li.deleted_at IS NULL
-          ORDER BY li.priority ASC, li.created_at DESC`;
-        params.push(userId);
+          WHERE gr.item_id = ANY($1::uuid[])
+            AND gr.deleted_at IS NULL
+          ORDER BY gr.created_at ASC`;
+        const reservationResult = await db.query(reservationQuery, [itemIds]);
+        reservationRows = reservationResult.rows;
       }
-      
-      const { rows: items } = await db.query(query, params);
-      
+
+      const reservationsByItem = new Map();
+      for (const row of reservationRows) {
+        const existing = reservationsByItem.get(row.item_id) || [];
+        existing.push({
+          ...row,
+          quantity: normalizeReservationQuantity(row.quantity),
+        });
+        reservationsByItem.set(row.item_id, existing);
+      }
+
+      const items = itemRows.map((item) => {
+        const reservations = reservationsByItem.get(item.id) || [];
+        const status = buildReservationResponse({
+          item,
+          reservations,
+          userId,
+          isListOwner: isOwner,
+        });
+
+        return {
+          ...item,
+          giftStatus: status,
+          gift_status: status,
+          is_reserved: status.is_reserved,
+          is_purchased: status.is_purchased,
+          reserved_quantity: status.reserved_quantity,
+          purchased_quantity: status.purchased_quantity,
+          available_quantity: status.available_quantity,
+        };
+      });
+
       return res.json({
         list_id: listId,
         list_title: list.title,

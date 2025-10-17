@@ -406,6 +406,7 @@ function favoritesControllerFactory(socketService = null) {
    * Get users who liked/favorited a target (owner-only)
    */
   const getLikersForTarget = async (req, res) => {
+    console.log('getLikersForTarget', req.query);
     const userId = req.user?.id;
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
@@ -447,8 +448,11 @@ function favoritesControllerFactory(socketService = null) {
                  f.user_id,
                  f.created_at,
                  u.username,
-                 u.display_name,
-                 u.avatar_url
+                 CASE
+                   WHEN u.full_name IS NOT NULL AND trim(u.full_name) <> '' THEN u.full_name::text
+                   ELSE u.username::text
+                 END AS display_name,
+                 NULLIF(u.profile_image_url::text, '') AS avatar_url
           FROM public.favorites f
           JOIN public.users u ON u.id = f.user_id
           WHERE ${list_id ? 'f.list_id = $1' : 'f.list_item_id = $1'}
@@ -464,8 +468,11 @@ function favoritesControllerFactory(socketService = null) {
                  f.user_id,
                  f.created_at,
                  u.username,
-                 u.display_name,
-                 u.avatar_url
+                 CASE
+                   WHEN u.full_name IS NOT NULL AND trim(u.full_name) <> '' THEN u.full_name::text
+                   ELSE u.username::text
+                 END AS display_name,
+                 NULLIF(u.profile_image_url::text, '') AS avatar_url
           FROM public.favorites f
           JOIN public.users u ON u.id = f.user_id
           WHERE f.target_type = $1 AND f.target_id = $2 AND f.deleted_at IS NULL
@@ -477,7 +484,7 @@ function favoritesControllerFactory(socketService = null) {
       
       return res.status(200).json({ data: result.rows });
     } catch (error) {
-      console.error('[FavoritesController] Error getting likers:', error);
+      console.log('[FavoritesController] Error getting likers:', error);
       return res.status(500).json({ error: 'Failed to get likers' });
     }
   };
