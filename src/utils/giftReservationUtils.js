@@ -56,6 +56,7 @@ const buildReservationResponse = ({ item, reservations, userId, isListOwner }) =
       reservation_message: row.reservation_message || null,
       reserved_at: row.created_at,
       updated_at: row.updated_at,
+      active_purchase_group_id: row.active_purchase_group_id || null,
       reserved_by: reservedBy,
       is_mine: isMine,
     };

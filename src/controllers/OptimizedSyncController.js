@@ -107,7 +107,10 @@ function optimizedSyncControllerFactory(socketService) {
         followers: new Set(),
         notifications: new Set(),
         list_categories: new Set(),
-        item_tags: new Set()
+        item_tags: new Set(),
+        gift_reservations: new Set(),
+        gift_purchase_groups: new Set(),
+        gift_contributions: new Set()
       };
 
       // Collect all record IDs that need fetching
@@ -264,6 +267,72 @@ function optimizedSyncControllerFactory(socketService) {
         }
       }
 
+      // Fetch gift reservations
+      if (recordIdsByTable.gift_reservations.size > 0) {
+        const reservationIds = Array.from(recordIdsByTable.gift_reservations);
+        const reservationsQuery = `
+          SELECT gr.*
+          FROM public.gift_reservations gr
+          JOIN public.list_items li ON gr.item_id = li.id
+          WHERE gr.id = ANY($1::uuid[])
+            AND gr.deleted_at IS NULL
+            AND (
+              li.owner_id = $2
+              OR gr.reserved_by = $2
+              OR gr.reserved_for = $2
+              OR li.list_id = ANY($3::uuid[])
+            )
+        `;
+        const reservationsResult = await db.query(reservationsQuery, [reservationIds, userId, listIdsArray]);
+        fetchedData.gift_reservations = {};
+        for (const row of reservationsResult.rows) {
+          fetchedData.gift_reservations[row.id] = row;
+        }
+      }
+
+      // Fetch gift purchase groups
+      if (recordIdsByTable.gift_purchase_groups.size > 0) {
+        const groupIds = Array.from(recordIdsByTable.gift_purchase_groups);
+        const groupsQuery = `
+          SELECT *
+          FROM public.gift_purchase_groups
+          WHERE id = ANY($1::uuid[])
+            AND deleted_at IS NULL
+            AND (
+              created_by = $2
+              OR list_id = ANY($3::uuid[])
+            )
+        `;
+        const groupsResult = await db.query(groupsQuery, [groupIds, userId, listIdsArray]);
+        fetchedData.gift_purchase_groups = {};
+        for (const row of groupsResult.rows) {
+          fetchedData.gift_purchase_groups[row.id] = row;
+        }
+      }
+
+      // Fetch gift contributions
+      if (recordIdsByTable.gift_contributions.size > 0) {
+        const contributionIds = Array.from(recordIdsByTable.gift_contributions);
+        const contributionsQuery = `
+          SELECT gc.*
+          FROM public.gift_contributions gc
+          JOIN public.gift_purchase_groups gpg ON gc.group_id = gpg.id
+          WHERE gc.id = ANY($1::uuid[])
+            AND gc.deleted_at IS NULL
+            AND gpg.deleted_at IS NULL
+            AND (
+              gc.contributor_id = $2
+              OR gpg.created_by = $2
+              OR gpg.list_id = ANY($3::uuid[])
+            )
+        `;
+        const contributionsResult = await db.query(contributionsQuery, [contributionIds, userId, listIdsArray]);
+        fetchedData.gift_contributions = {};
+        for (const row of contributionsResult.rows) {
+          fetchedData.gift_contributions[row.id] = row;
+        }
+      }
+
       // Step 5: Process changes with fetched data
       const changes = {
         list_items: { created: [], updated: [], deleted: [] },
@@ -274,7 +343,10 @@ function optimizedSyncControllerFactory(socketService) {
         followers: { created: [], updated: [], deleted: [] },
         notifications: { created: [], updated: [], deleted: [] },
         list_categories: { created: [], updated: [], deleted: [] },
-        item_tags: { created: [], updated: [], deleted: [] }
+        item_tags: { created: [], updated: [], deleted: [] },
+        gift_reservations: { created: [], updated: [], deleted: [] },
+        gift_purchase_groups: { created: [], updated: [], deleted: [] },
+        gift_contributions: { created: [], updated: [], deleted: [] }
       };
 
       // Map change log entries to actual data
@@ -311,6 +383,18 @@ function optimizedSyncControllerFactory(socketService) {
             }
             if (current_data.updated_at) {
               current_data.updated_at = new Date(current_data.updated_at).getTime();
+            }
+            if (table_name === 'gift_purchase_groups') {
+              for (const field of ['locked_at', 'completed_at', 'abandoned_at', 'reminder_scheduled_at']) {
+                if (current_data[field]) {
+                  current_data[field] = new Date(current_data[field]).getTime();
+                }
+              }
+            }
+            if (table_name === 'gift_contributions') {
+              if (current_data.fulfilled_at) {
+                current_data.fulfilled_at = new Date(current_data.fulfilled_at).getTime();
+              }
             }
 
             if (operation === 'create') {
@@ -457,27 +541,87 @@ function optimizedSyncControllerFactory(socketService) {
             changes.list_items.created.push(row);
           }
 
+          // Include gift reservations for accessible items
+          const reservationsBaselineQuery = `
+            SELECT
+              gr.*,
+              u.username as reserved_by_username,
+              u.full_name as reserved_by_full_name,
+              li.list_id
+            FROM gift_reservations gr
+            JOIN list_items li ON gr.item_id = li.id
+            LEFT JOIN users u ON gr.reserved_by = u.id
+            WHERE gr.deleted_at IS NULL
+              AND (
+                li.owner_id = $1
+                OR li.list_id = ANY($2::uuid[])
+                OR gr.reserved_by = $1
+                OR gr.reserved_for = $1
+              )
+          `;
+          const reservationsBaselineResult = await db.query(reservationsBaselineQuery, [userId, listIdsArray]);
+          const reservationsRows = reservationsBaselineResult.rows || [];
+          for (const row of reservationsRows) {
+            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
+            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            changes.gift_reservations.created.push(row);
+          }
+
+          // Include shared purchase groups for accessible lists
+          const groupsBaselineQuery = `
+            SELECT *
+            FROM public.gift_purchase_groups
+            WHERE deleted_at IS NULL
+              AND (
+                created_by = $1
+                OR list_id = ANY($2::uuid[])
+              )
+          `;
+          const groupsBaselineResult = await db.query(groupsBaselineQuery, [userId, listIdsArray]);
+          const groupTimestampFields = ['created_at', 'updated_at', 'locked_at', 'completed_at', 'abandoned_at', 'reminder_scheduled_at'];
+          for (const row of groupsBaselineResult.rows) {
+            for (const field of groupTimestampFields) {
+              if (row[field]) {
+                row[field] = new Date(row[field]).getTime();
+              }
+            }
+            changes.gift_purchase_groups.created.push(row);
+          }
+
+          // Include gift contributions related to accessible groups or made by the user
+          const contributionsBaselineQuery = `
+            SELECT gc.*
+            FROM public.gift_contributions gc
+            JOIN public.gift_purchase_groups gpg ON gc.group_id = gpg.id
+            WHERE gc.deleted_at IS NULL
+              AND gpg.deleted_at IS NULL
+              AND (
+                gc.contributor_id = $1
+                OR gpg.created_by = $1
+                OR gpg.list_id = ANY($2::uuid[])
+              )
+          `;
+          const contributionsBaselineResult = await db.query(contributionsBaselineQuery, [userId, listIdsArray]);
+          const contributionTimestampFields = ['created_at', 'updated_at', 'fulfilled_at'];
+          for (const row of contributionsBaselineResult.rows) {
+            for (const field of contributionTimestampFields) {
+              if (row[field]) {
+                row[field] = new Date(row[field]).getTime();
+              }
+            }
+            changes.gift_contributions.created.push(row);
+          }
+
           // Add gift status for initial sync
           const giftListsNotOwned = listsRes.rows.filter(l => l.list_type === 'gifts' && l.owner_id !== userId);
           if (giftListsNotOwned.length > 0) {
             const giftListIds = giftListsNotOwned.map(l => l.id);
-            const reservationsQuery = `
-              SELECT
-                gr.*,
-                u.username as reserved_by_username,
-                u.full_name as reserved_by_full_name
-              FROM gift_reservations gr
-              LEFT JOIN users u ON gr.reserved_by = u.id
-              WHERE gr.deleted_at IS NULL
-                AND gr.item_id IN (
-                SELECT id FROM list_items
-                WHERE list_id = ANY($1::uuid[])
-              )
-            `;
-            const reservationsResult = await db.query(reservationsQuery, [giftListIds]);
-
             const reservationsByItem = new Map();
-            for (const row of reservationsResult.rows) {
+            const giftListIdSet = new Set(giftListIds.map(String));
+            for (const row of reservationsRows) {
+              if (!row.list_id || !giftListIdSet.has(String(row.list_id))) {
+                continue;
+              }
               const normalizedRow = {
                 ...row,
                 quantity: normalizeReservationQuantity(row.quantity),

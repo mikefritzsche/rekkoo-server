@@ -158,6 +158,7 @@ class NotificationService {
         item_purchased: 'gift:item:purchased',
         reservation_released: 'gift:item:released',
         purchase_released: 'gift:item:released',
+        shared_purchase_update: 'gift:sharedPurchase:changed',
       };
       const socketEvent = socketEventMap[type] || null;
       const socketPayloadBase = {
@@ -166,6 +167,7 @@ class NotificationService {
         data,
         timestamp: new Date().toISOString(),
       };
+      const silentNotificationTypes = new Set(['shared_purchase_update']);
 
       // Prepare notification content based on type
       let title, message, emailSubject, emailHtml;
@@ -229,6 +231,13 @@ class NotificationService {
           `;
           break;
           
+        case 'shared_purchase_update':
+          title = 'Shared purchase updated';
+          message = `Shared purchase activity on ${data.list_title || 'a list'}`;
+          emailSubject = null;
+          emailHtml = null;
+          break;
+        
         default:
           title = 'List Activity';
           message = `Activity on ${data.list_title}`;
@@ -238,23 +247,23 @@ class NotificationService {
 
       // Send notifications to each recipient
       const notificationPromises = uniqueRecipients.map(async (recipient) => {
-        // Create in-app notification
-        await this.createNotification({
-          userId: recipient.id,
-          type,
-          title,
-          message,
-          data
-        });
-
-        // Send email if user has email notifications enabled
-        const prefs = recipient.notification_preferences || {};
-        if (prefs.email_notifications !== false && recipient.email) {
-          await this.sendEmail({
-            to: recipient.email,
-            subject: emailSubject,
-            html: emailHtml
+        if (!silentNotificationTypes.has(type)) {
+          await this.createNotification({
+            userId: recipient.id,
+            type,
+            title,
+            message,
+            data
           });
+
+          const prefs = recipient.notification_preferences || {};
+          if (prefs.email_notifications !== false && recipient.email && emailSubject && emailHtml) {
+            await this.sendEmail({
+              to: recipient.email,
+              subject: emailSubject,
+              html: emailHtml
+            });
+          }
         }
 
         if (socketEvent) {

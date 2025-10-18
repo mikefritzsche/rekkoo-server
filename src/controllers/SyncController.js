@@ -327,6 +327,15 @@ function syncControllerFactory(socketService) {
     if (tableName === 'notifications') {
       return 'user_id'; // The user receiving the notification
     }
+    if (tableName === 'gift_reservations') {
+      return 'reserved_by';
+    }
+    if (tableName === 'gift_purchase_groups') {
+      return 'created_by';
+    }
+    if (tableName === 'gift_contributions') {
+      return 'contributor_id';
+    }
     // For any other table, including detail tables, we are saying there is no direct user identifier for the generic pull.
     // This means they won't be processed in the main loop of handleGetChanges for direct user-filtered updates/deletes.
     // logger.warn(`[SyncController] Table '${tableName}' will not be processed by user-identifier in handleGetChanges main loop.`);
@@ -1494,6 +1503,9 @@ function syncControllerFactory(socketService) {
             n.json_build_object,
             lc.json_build_object,
             it.json_build_object,
+            gr.json_build_object,
+            gpg.json_build_object,
+            gc.json_build_object,
             cl.change_data::json
           ) AS current_data
         FROM change_log_updates cl
@@ -1610,6 +1622,98 @@ function syncControllerFactory(socketService) {
           ELSE NULL 
         END
         LEFT JOIN (SELECT item_id, row_to_json(item_tags.*) as json_build_object FROM public.item_tags WHERE deleted_at IS NULL) it ON cl.table_name = 'item_tags' AND cl.operation != 'delete' AND it.item_id::text = cl.record_id
+        LEFT JOIN (
+          SELECT
+            gr.id,
+            row_to_json(gr.*) AS json_build_object
+          FROM public.gift_reservations gr
+          JOIN public.list_items li2 ON gr.item_id = li2.id
+          WHERE gr.deleted_at IS NULL
+            AND (
+              li2.owner_id = $1
+              OR gr.reserved_by = $1
+              OR gr.reserved_for = $1
+              OR li2.list_id IN (
+                SELECT DISTINCT lgr.list_id
+                FROM list_group_roles lgr
+                JOIN collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+                WHERE cgm.user_id = $1
+                  AND lgr.deleted_at IS NULL
+                  AND cgm.deleted_at IS NULL
+                UNION
+                SELECT DISTINCT luo.list_id
+                FROM list_user_overrides luo
+                WHERE luo.user_id = $1
+                  AND luo.deleted_at IS NULL
+                  AND luo.role != 'blocked'
+                  AND luo.role != 'inherit'
+              )
+            )
+        ) gr ON cl.table_name = 'gift_reservations' AND cl.operation != 'delete' AND gr.id = CASE
+          WHEN cl.record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          THEN cl.record_id::uuid
+          ELSE NULL
+        END
+        LEFT JOIN (
+          SELECT
+            gpg.id,
+            row_to_json(gpg.*) AS json_build_object
+          FROM public.gift_purchase_groups gpg
+          WHERE gpg.deleted_at IS NULL
+            AND (
+              gpg.created_by = $1
+              OR gpg.list_id IN (
+                SELECT DISTINCT lgr.list_id
+                FROM list_group_roles lgr
+                JOIN collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+                WHERE cgm.user_id = $1
+                  AND lgr.deleted_at IS NULL
+                  AND cgm.deleted_at IS NULL
+                UNION
+                SELECT DISTINCT luo.list_id
+                FROM list_user_overrides luo
+                WHERE luo.user_id = $1
+                  AND luo.deleted_at IS NULL
+                  AND luo.role != 'blocked'
+                  AND luo.role != 'inherit'
+              )
+            )
+        ) gpg ON cl.table_name = 'gift_purchase_groups' AND cl.operation != 'delete' AND gpg.id = CASE
+          WHEN cl.record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          THEN cl.record_id::uuid
+          ELSE NULL
+        END
+        LEFT JOIN (
+          SELECT
+            gc.id,
+            row_to_json(gc.*) AS json_build_object
+          FROM public.gift_contributions gc
+          JOIN public.gift_purchase_groups gpg2 ON gc.group_id = gpg2.id
+          WHERE gc.deleted_at IS NULL
+            AND gpg2.deleted_at IS NULL
+            AND (
+              gc.contributor_id = $1
+              OR gpg2.list_id IN (
+                SELECT DISTINCT lgr.list_id
+                FROM list_group_roles lgr
+                JOIN collaboration_group_members cgm ON lgr.group_id = cgm.group_id
+                WHERE cgm.user_id = $1
+                  AND lgr.deleted_at IS NULL
+                  AND cgm.deleted_at IS NULL
+                UNION
+                SELECT DISTINCT luo.list_id
+                FROM list_user_overrides luo
+                WHERE luo.user_id = $1
+                  AND luo.deleted_at IS NULL
+                  AND luo.role != 'blocked'
+                  AND luo.role != 'inherit'
+              )
+            )
+        ) gc ON cl.table_name = 'gift_contributions' AND cl.operation != 'delete' AND gc.id = CASE
+          WHEN cl.record_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          THEN cl.record_id::uuid
+          ELSE NULL
+        END
         ORDER BY cl.created_at ASC
         LIMIT 1000;
       `;
@@ -1690,6 +1794,8 @@ function syncControllerFactory(socketService) {
         item_tags: { created: [], updated: [], deleted: [] },
         list_sharing: { created: [], updated: [], deleted: [] },
         gift_reservations: { created: [], updated: [], deleted: [] },
+        gift_purchase_groups: { created: [], updated: [], deleted: [] },
+        gift_contributions: { created: [], updated: [], deleted: [] },
       };
 
       for (const row of rows) {
@@ -1745,6 +1851,9 @@ function syncControllerFactory(socketService) {
       'list_group_roles',
       'collaboration_group_members',
       'collaboration_groups',
+      'gift_reservations',
+      'gift_purchase_groups',
+      'gift_contributions',
     ];
     if (!allowedTables.includes(table)) {
       return res.status(400).json({ error: 'Invalid or disallowed table specified' });

@@ -617,6 +617,63 @@ const GiftController = {
         reservationsByItem.set(row.item_id, existing);
       }
 
+      const sharedGroupsMap = new Map();
+      const contributionSummaryMap = new Map();
+
+      if (itemIds.length > 0) {
+        const { rows: groupRows } = await db.query(
+          `
+            SELECT DISTINCT ON (item_id)
+              id,
+              item_id,
+              status,
+              target_cents,
+              target_quantity,
+              currency_code,
+              is_quantity_based,
+              created_at
+            FROM gift_purchase_groups
+            WHERE item_id = ANY($1::uuid[])
+              AND deleted_at IS NULL
+              AND status <> 'abandoned'
+            ORDER BY item_id, created_at DESC
+          `,
+          [itemIds]
+        );
+
+        groupRows.forEach((row) => {
+          sharedGroupsMap.set(row.item_id, row);
+        });
+
+        const activeGroupIds = groupRows.map((row) => row.id);
+        if (activeGroupIds.length > 0) {
+          const { rows: contributionRows } = await db.query(
+            `
+              SELECT
+                group_id,
+                COALESCE(SUM(CASE WHEN status IN ('pledged', 'fulfilled') THEN contribution_cents ELSE 0 END), 0) AS contributed_cents,
+                COALESCE(SUM(CASE WHEN status IN ('pledged', 'fulfilled') THEN contribution_quantity ELSE 0 END), 0) AS contribution_quantity,
+                COALESCE(SUM(CASE WHEN status = 'fulfilled' THEN contribution_cents ELSE 0 END), 0) AS fulfilled_cents,
+                COUNT(*) FILTER (WHERE status IN ('pledged', 'fulfilled')) AS contributor_count
+              FROM gift_contributions
+              WHERE group_id = ANY($1::uuid[])
+                AND deleted_at IS NULL
+              GROUP BY group_id
+            `,
+            [activeGroupIds]
+          );
+
+          contributionRows.forEach((row) => {
+            contributionSummaryMap.set(row.group_id, {
+              contributedCents: Number(row.contributed_cents) || 0,
+              contributedQuantity: Number(row.contribution_quantity) || 0,
+              fulfilledCents: Number(row.fulfilled_cents) || 0,
+              contributorCount: Number(row.contributor_count) || 0,
+            });
+          });
+        }
+      }
+
       const items = itemRows.map((item) => {
         const reservations = reservationsByItem.get(item.id) || [];
         const status = buildReservationResponse({
@@ -625,6 +682,40 @@ const GiftController = {
           userId,
           isListOwner: isOwner,
         });
+
+        let sharedPurchase = null;
+        const groupRow = sharedGroupsMap.get(item.id);
+        if (groupRow) {
+          const summary = contributionSummaryMap.get(groupRow.id) || {
+            contributedCents: 0,
+            contributedQuantity: 0,
+            fulfilledCents: 0,
+            contributorCount: 0,
+          };
+          const contributedCents = summary.contributedCents || 0;
+          const contributedQuantity = summary.contributedQuantity || 0;
+          const remainingCents =
+            groupRow.target_cents == null
+              ? null
+              : Math.max(groupRow.target_cents - contributedCents, 0);
+          const remainingQuantity = groupRow.is_quantity_based && groupRow.target_quantity != null
+            ? Math.max(groupRow.target_quantity - contributedQuantity, 0)
+            : null;
+
+          sharedPurchase = {
+            id: groupRow.id,
+            status: groupRow.status,
+            targetCents: groupRow.target_cents,
+            targetQuantity: groupRow.target_quantity,
+            isQuantityBased: groupRow.is_quantity_based,
+            currency: groupRow.currency_code,
+            contributedCents,
+            contributedQuantity,
+            remainingCents,
+            remainingQuantity,
+            contributorCount: summary.contributorCount || 0,
+          };
+        }
 
         return {
           ...item,
@@ -635,6 +726,7 @@ const GiftController = {
           reserved_quantity: status.reserved_quantity,
           purchased_quantity: status.purchased_quantity,
           available_quantity: status.available_quantity,
+          sharedPurchase,
         };
       });
 
