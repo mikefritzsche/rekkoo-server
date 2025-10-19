@@ -251,6 +251,21 @@ class ListService {
     const insertValues = Object.values(record);
     const valuePlaceholders = insertValues.map((_, i) => `$${i + 1}`).join(', ');
 
+    const hasAdditionalData = insertColumns.some(col => col !== 'list_item_id');
+    if (!hasAdditionalData) {
+      logger.info(`[ListService.createDetailRecord] No additional data provided for ${tableName} (item ${listItemId}). Skipping detail upsert.`);
+      try {
+        const { rows } = await client.query(
+          `SELECT * FROM ${tableName} WHERE list_item_id = $1 LIMIT 1`,
+          [listItemId]
+        );
+        return rows.length ? rows[0] : null;
+      } catch (lookupErr) {
+        logger.error(`[ListService.createDetailRecord] Failed to fetch existing ${tableName} row for item ${listItemId}:`, lookupErr);
+        return null;
+      }
+    }
+
     // Log the final record for gift_details
     if (tableName === 'gift_details') {
       logger.info(`[ListService.createDetailRecord] Final gift_details record to insert:`, JSON.stringify(record));
@@ -259,14 +274,14 @@ class ListService {
     }
     
     // Build the UPDATE SET clause for ON CONFLICT
-    const updateSetClause = insertColumns
-      .filter(col => col !== 'list_item_id') // Don't update the primary key
-      .map(col => `${col} = EXCLUDED.${col}`)
-      .join(', ');
+    const updatableColumns = insertColumns.filter(col => col !== 'list_item_id'); // Don't update the primary key
+    const updateAssignments = updatableColumns.map(col => `${col} = EXCLUDED.${col}`);
+    updateAssignments.push('updated_at = CURRENT_TIMESTAMP');
+    const updateSetClause = updateAssignments.join(', ');
     
     const query = `INSERT INTO ${tableName} (${insertColumns.join(', ')}) VALUES (${valuePlaceholders})
                   ON CONFLICT (list_item_id)
-                  DO UPDATE SET ${updateSetClause}, updated_at = CURRENT_TIMESTAMP
+                  DO UPDATE SET ${updateSetClause}
                   RETURNING *;`;
 
     try {
