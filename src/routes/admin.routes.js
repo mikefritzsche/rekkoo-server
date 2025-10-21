@@ -12,6 +12,7 @@ const {
   updateCacheSettings 
 } = require('../controllers/CacheController');
 const { performHardDelete } = require('../services/hardDeleteService');
+const { clearChangeLogForUser } = require('../services/changeLogService');
 const { exportUserData } = require('../services/exportService');
 const r2AdminControllerFactory = require('../controllers/R2AdminController');
 const bcrypt = require('bcrypt');
@@ -522,6 +523,22 @@ router.post('/users/:userId/hard-delete', authenticateJWT, async (req, res) => {
   } catch (err) {
     console.error('Admin hard-delete error', err);
     res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
+// DELETE /v1.0/admin/users/:userId/change-log – remove change log entries for a user
+router.delete('/users/:userId/change-log', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const { userId } = req.params;
+    const result = await clearChangeLogForUser(userId);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('Admin clear change log error', err);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
