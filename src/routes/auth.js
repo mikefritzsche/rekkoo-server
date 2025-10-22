@@ -419,6 +419,13 @@ router.post('/users/:id/roles', [
   }
 });
 
+router.post('/users/:id/force-logout', [
+  authenticateJWT,
+  checkPermissions(['admin:manage_users']),
+  param('id').isUUID().withMessage('Valid user id is required'),
+  validateRequest
+], AuthController.forceLogoutUser);
+
 // <<< NEW: Add Auth Check Endpoint >>>
 // Uses authenticateJWT middleware first, then sends 200 OK if successful
 router.get('/check', authenticateJWT, (req, res) => {
@@ -695,5 +702,4 @@ router.post('/oauth/:provider/callback', [
 ], AuthController.enhancedOAuthCallback);
 
 module.exports = router;
-
 

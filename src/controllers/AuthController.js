@@ -28,6 +28,22 @@ if (MAILJET_ENABLED) {
 
 const { jwtExpiresIn } = require('../auth/config');
 
+const toInt = (value, fallback) => {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+};
+
+const REFRESH_TOKEN_TTL_DAYS = toInt(process.env.REFRESH_TOKEN_TTL_DAYS, 0);
+const SESSION_TTL_DAYS = toInt(process.env.SESSION_TTL_DAYS, REFRESH_TOKEN_TTL_DAYS || 0);
+const PERMANENT_EXPIRY_DATE = new Date('9999-12-31T23:59:59.999Z');
+
+const computeExpiryDate = (days) => {
+  if (!Number.isFinite(days) || days <= 0) {
+    return new Date(PERMANENT_EXPIRY_DATE);
+  }
+  return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+};
+
 // Helper function to generate a refresh token
 const generateRefreshToken = () => {
   return crypto.randomBytes(40).toString('hex');
@@ -360,8 +376,8 @@ const login = async (req, res) => {
 
       // Generate refresh token
       const refreshTokenValue = generateRefreshToken(); // Renamed from refreshToken to avoid conflict
-      const refreshTokenExpiresAt = new Date();
-      refreshTokenExpiresAt.setDate(refreshTokenExpiresAt.getDate() + 30); // 30 days from now
+      const refreshTokenExpiresAt = computeExpiryDate(REFRESH_TOKEN_TTL_DAYS);
+      const sessionExpiresAt = computeExpiryDate(SESSION_TTL_DAYS);
 
       // Store refresh token in database
       await client.query(
@@ -373,8 +389,8 @@ const login = async (req, res) => {
       // Create session (keep for compatibility)
       await client.query(
         `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
-         VALUES ($1, $2, $3, $4, $5, NOW() + INTERVAL '30 days')`,
-        [user.id, accessToken, refreshTokenValue, req.ip, req.headers['user-agent']]
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [user.id, accessToken, refreshTokenValue, req.ip, req.headers['user-agent'], sessionExpiresAt]
       );
 
       // Log successful login
@@ -503,10 +519,11 @@ const refreshToken = async (req, res) => {
 
       // Generate a new refresh token
       const newRefreshToken = generateRefreshToken();
+      const newRefreshTokenExpiresAt = computeExpiryDate(REFRESH_TOKEN_TTL_DAYS);
       await client.query(
         `INSERT INTO refresh_tokens (token, user_id, expires_at)
-         VALUES ($1, $2, NOW() + INTERVAL '30 days')`,
-        [newRefreshToken, user.id]
+         VALUES ($1, $2, $3)`,
+        [newRefreshToken, user.id, newRefreshTokenExpiresAt]
       );
 
       return { accessToken, refreshToken: newRefreshToken, userId: user.id };
@@ -982,9 +999,8 @@ const oauthCallback = async (req, res) => {
       // Generate your application's JWTs
       const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: jwtExpiresIn });
       const appRefreshToken = generateRefreshToken();
-      const appRefreshTokenExpiresAt = new Date();
-      appRefreshTokenExpiresAt.setDate(appRefreshTokenExpiresAt.getDate() + 30);
-
+      const appRefreshTokenExpiresAt = computeExpiryDate(REFRESH_TOKEN_TTL_DAYS);
+      const oauthSessionExpiresAt = computeExpiryDate(SESSION_TTL_DAYS);
       await client.query(
         `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)
          ON CONFLICT (user_id, token) DO UPDATE SET expires_at = $3`,
@@ -993,9 +1009,9 @@ const oauthCallback = async (req, res) => {
 
       await client.query(
         `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
-         VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '30 days')
+         VALUES ($1,$2,$3,$4,$5, $6)
          ON CONFLICT DO NOTHING`,
-        [user.id, appAccessToken, appRefreshToken, req.ip, req.headers['user-agent']]
+        [user.id, appAccessToken, appRefreshToken, req.ip, req.headers['user-agent'], oauthSessionExpiresAt]
       );
 
       return { appAccessToken, appRefreshToken, user };
@@ -1034,8 +1050,8 @@ const passportCallback = async (req, res) => {
       const accessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: jwtExpiresIn });
 
       const refreshTokenValue = generateRefreshToken();
-      const rtExpires = new Date();
-      rtExpires.setDate(rtExpires.getDate() + 30);
+      const rtExpires = computeExpiryDate(REFRESH_TOKEN_TTL_DAYS);
+      const passportSessionExpiresAt = computeExpiryDate(SESSION_TTL_DAYS);
 
       await client.query(
         `INSERT INTO refresh_tokens (user_id, token, expires_at)
@@ -1046,9 +1062,9 @@ const passportCallback = async (req, res) => {
 
       await client.query(
         `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
-         VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '30 days')
+         VALUES ($1,$2,$3,$4,$5, $6)
          ON CONFLICT DO NOTHING`,
-        [user.id, accessToken, refreshTokenValue, req.ip, req.headers['user-agent']]
+        [user.id, accessToken, refreshTokenValue, req.ip, req.headers['user-agent'], passportSessionExpiresAt]
       );
 
       // Log successful OAuth login
@@ -1364,8 +1380,8 @@ const mobileOauth = async (req, res) => {
 
       const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: jwtExpiresIn });
       const appRefreshToken = generateRefreshToken();
-      const rtExpires = new Date();
-      rtExpires.setDate(rtExpires.getDate() + 30);
+      const rtExpires = computeExpiryDate(REFRESH_TOKEN_TTL_DAYS);
+      const mobileSessionExpiresAt = computeExpiryDate(SESSION_TTL_DAYS);
 
       await client.query(
         `INSERT INTO refresh_tokens (user_id, token, expires_at)
@@ -1376,9 +1392,9 @@ const mobileOauth = async (req, res) => {
 
       await client.query(
         `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
-         VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '30 days')
+         VALUES ($1,$2,$3,$4,$5, $6)
          ON CONFLICT DO NOTHING`,
-        [user.id, appAccessToken, appRefreshToken, req.ip, req.headers['user-agent']]
+        [user.id, appAccessToken, appRefreshToken, req.ip, req.headers['user-agent'], mobileSessionExpiresAt]
       );
 
       return { accessToken: appAccessToken, refreshToken: appRefreshToken, userId: user.id };
@@ -1792,8 +1808,8 @@ const enhancedOAuthCallback = async (req, res) => {
       // Generate JWT tokens
       const appAccessToken = jwt.sign({ userId: user.id }, process.env.JWT_SECRET, { expiresIn: jwtExpiresIn });
       const appRefreshToken = generateRefreshToken();
-      const appRefreshTokenExpiresAt = new Date();
-      appRefreshTokenExpiresAt.setDate(appRefreshTokenExpiresAt.getDate() + 30);
+      const appRefreshTokenExpiresAt = computeExpiryDate(REFRESH_TOKEN_TTL_DAYS);
+      const linkSessionExpiresAt = computeExpiryDate(SESSION_TTL_DAYS);
 
       await client.query(
         `INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)
@@ -1803,9 +1819,9 @@ const enhancedOAuthCallback = async (req, res) => {
 
       await client.query(
         `INSERT INTO user_sessions (user_id, token, refresh_token, ip_address, user_agent, expires_at)
-         VALUES ($1,$2,$3,$4,$5, NOW() + INTERVAL '30 days')
+         VALUES ($1,$2,$3,$4,$5, $6)
          ON CONFLICT DO NOTHING`,
-        [user.id, appAccessToken, appRefreshToken, req.ip, req.headers['user-agent']]
+        [user.id, appAccessToken, appRefreshToken, req.ip, req.headers['user-agent'], linkSessionExpiresAt]
       );
 
       return { 
@@ -1822,6 +1838,57 @@ const enhancedOAuthCallback = async (req, res) => {
       return res.status(error.status).json({ message: error.message });
     }
     res.status(500).json({ message: 'OAuth authentication failed' });
+  }
+};
+
+const forceLogoutUser = async (req, res) => {
+  const { id: targetUserId } = req.params;
+
+  if (!targetUserId) {
+    return res.status(400).json({ message: 'Target user id is required' });
+  }
+
+  try {
+    const result = await db.transaction(async (client) => {
+      const refreshResult = await client.query(
+        `UPDATE refresh_tokens
+         SET revoked = true,
+             revoked_at = NOW()
+         WHERE user_id = $1 AND revoked = false`,
+        [targetUserId]
+      );
+
+      const sessionResult = await client.query(
+        `UPDATE user_sessions
+         SET deleted_at = NOW()
+         WHERE user_id = $1 AND deleted_at IS NULL`,
+        [targetUserId]
+      );
+
+      await client.query(
+        `INSERT INTO auth_logs (user_id, event_type, ip_address, user_agent, details)
+         VALUES ($1, 'forced_logout', $2, $3, $4)`,
+        [
+          targetUserId,
+          req.ip,
+          req.headers['user-agent'],
+          JSON.stringify({ initiated_by: req.user?.id || null })
+        ]
+      );
+
+      return {
+        refreshTokensRevoked: refreshResult.rowCount,
+        sessionsMarkedDeleted: sessionResult.rowCount,
+      };
+    });
+
+    return res.status(200).json({
+      message: 'User sessions revoked successfully',
+      ...result,
+    });
+  } catch (error) {
+    console.error('[AuthController] forceLogoutUser error:', error);
+    return res.status(500).json({ message: 'Failed to revoke user sessions' });
   }
 };
 
@@ -1842,6 +1909,7 @@ module.exports = {
   getAllUsers,
   linkOAuthAccount,
   unlinkOAuthAccount,
+  forceLogoutUser,
   getLinkedAccounts,
   enhancedOAuthCallback
 }; 

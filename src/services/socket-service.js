@@ -91,12 +91,13 @@ class SocketService {
         if (!userId) {
           console.log('[SocketService] Trying session token lookup...');
           const sessionResult = await db.query(
-            `SELECT u.id, u.username, u.email, u.email_verified
-             FROM user_sessions s
-             JOIN users u ON s.user_id = u.id
-             WHERE s.token = $1
-               AND s.expires_at > NOW()
-               AND u.account_locked = false`,
+             `SELECT u.id, u.username, u.email, u.email_verified
+              FROM user_sessions s
+              JOIN users u ON s.user_id = u.id
+              WHERE s.token = $1
+                AND s.expires_at > NOW()
+                AND s.deleted_at IS NULL
+                AND u.account_locked = false`,
             [token]
           );
 

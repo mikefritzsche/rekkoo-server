@@ -60,7 +60,9 @@ const authenticateJWT = async (req, res, next) => {
       // Check if session exists (optional)
       const sessionResult = await db.query(
         `SELECT expires_at FROM user_sessions 
-         WHERE token = $1 AND expires_at > NOW()`,
+         WHERE token = $1
+           AND expires_at > NOW()
+           AND deleted_at IS NULL`,
         [token]
       );
 
