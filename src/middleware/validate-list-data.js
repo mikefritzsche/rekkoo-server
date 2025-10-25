@@ -35,6 +35,20 @@ const validateListData = (req, res, next) => {
             return res.status(400).json({ error: 'Event date is required when is_event is true' });
           }
 
+          if (data.travel_start_date && Number.isNaN(new Date(data.travel_start_date).getTime())) {
+            return res.status(400).json({ error: 'Invalid travel_start_date value' });
+          }
+
+          if (data.travel_end_date && Number.isNaN(new Date(data.travel_end_date).getTime())) {
+            return res.status(400).json({ error: 'Invalid travel_end_date value' });
+          }
+
+          if (data.travel_start_date && data.travel_end_date) {
+            if (new Date(data.travel_start_date).getTime() > new Date(data.travel_end_date).getTime()) {
+              return res.status(400).json({ error: 'travel_start_date must be before travel_end_date' });
+            }
+          }
+
           if (data.sort_order !== undefined && data.sort_order < 0) {
             return res.status(400).json({ error: 'Sort order must be non-negative' });
           }
@@ -119,6 +133,20 @@ const validateListData = (req, res, next) => {
       }
       if (!data.owner_id) {
         return res.status(400).json({ error: 'Owner ID is required' });
+      }
+
+      if (data.travel_start_date && Number.isNaN(new Date(data.travel_start_date).getTime())) {
+        return res.status(400).json({ error: 'Invalid travel_start_date value' });
+      }
+
+      if (data.travel_end_date && Number.isNaN(new Date(data.travel_end_date).getTime())) {
+        return res.status(400).json({ error: 'Invalid travel_end_date value' });
+      }
+
+      if (data.travel_start_date && data.travel_end_date) {
+        if (new Date(data.travel_start_date).getTime() > new Date(data.travel_end_date).getTime()) {
+          return res.status(400).json({ error: 'travel_start_date must be before travel_end_date' });
+        }
       }
 
       // ... rest of the validation logic ...
