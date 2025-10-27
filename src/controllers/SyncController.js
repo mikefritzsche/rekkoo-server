@@ -909,7 +909,6 @@ function syncControllerFactory(socketService) {
               }, {});
 
             const fields = Object.keys(filteredData);
-            const values = Object.values(filteredData);
             const placeholders = fields.map((field, i) => {
               const base = `$${i + 1}`;
               if (
@@ -926,7 +925,9 @@ function syncControllerFactory(socketService) {
               filteredData.background = JSON.stringify(filteredData.background);
             }
 
+            const values = fields.map(field => filteredData[field]);
             let insertResult;
+            let creationStatus = 'created';
             if (tableName === 'item_tags') {
               // Expecting composite pk (item_id, tag_id) plus optional source column
               const idxItem   = fields.indexOf('item_id');
@@ -990,6 +991,27 @@ function syncControllerFactory(socketService) {
                   updated_at = CURRENT_TIMESTAMP
                 RETURNING id`;
               insertResult = await client.query(upsertSql, ordered);
+            } else if (tableName === 'lists') {
+              const { rows: existingRows } = await client.query(
+                'SELECT 1 FROM public.lists WHERE id = $1 LIMIT 1',
+                [filteredData.id]
+              );
+              const listAlreadyExists = existingRows.length > 0;
+              const updateAssignments = fields
+                .filter(field => field !== 'id' && field !== 'created_at')
+                .map(field => `"${field}" = EXCLUDED."${field}"`);
+
+              if (!fields.includes('updated_at')) {
+                updateAssignments.push('updated_at = CURRENT_TIMESTAMP');
+              }
+
+              const upsertQuery = `INSERT INTO "lists" (${fields.map(f => `"${f}"`).join(', ')})
+                VALUES (${placeholders})
+                ON CONFLICT (id) DO UPDATE SET ${updateAssignments.join(', ')}
+                RETURNING id`;
+
+              insertResult = await client.query(upsertQuery, values);
+              creationStatus = listAlreadyExists ? 'updated' : 'created';
             } else {
               const insertQuery = `INSERT INTO "${tableName}" (${fields.map(f => `"${f}"`).join(', ')}) VALUES (${placeholders}) RETURNING id`;
               insertResult = await client.query(insertQuery, values);
@@ -1173,7 +1195,7 @@ function syncControllerFactory(socketService) {
               tableName,
               operation,
               clientRecordId,
-              status: 'created',
+              status: creationStatus,
               serverId: insertedId,
               listId: tableName === 'list_items' ? (createData.list_id || createData.list_server_id) : undefined
             });
