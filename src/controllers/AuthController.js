@@ -36,6 +36,7 @@ const toInt = (value, fallback) => {
 const REFRESH_TOKEN_TTL_DAYS = toInt(process.env.REFRESH_TOKEN_TTL_DAYS, 0);
 const SESSION_TTL_DAYS = toInt(process.env.SESSION_TTL_DAYS, REFRESH_TOKEN_TTL_DAYS || 0);
 const PERMANENT_EXPIRY_DATE = new Date('9999-12-31T23:59:59.999Z');
+const REFRESH_TOKEN_REUSE_GRACE_PERIOD_MS = toInt(process.env.REFRESH_TOKEN_REUSE_GRACE_PERIOD_MS, 15000);
 
 const computeExpiryDate = (days) => {
   if (!Number.isFinite(days) || days <= 0) {
@@ -445,7 +446,7 @@ const refreshToken = async (req, res) => {
     const result = await db.transaction(async (client) => {
       // Find the refresh token in the database
       const tokenResult = await client.query(
-        `SELECT user_id, expires_at, revoked, created_at
+        `SELECT user_id, expires_at, revoked, created_at, revoked_at
          FROM refresh_tokens
          WHERE token = $1`,
         [refreshToken]
@@ -461,25 +462,22 @@ const refreshToken = async (req, res) => {
 
       // Check if the token is revoked or expired
       if (tokenData.revoked) {
-        // IMPLEMENTATION OF GRACE PERIOD:
-        // If a revoked token is used, it could be a sign of token theft or a race condition.
-        // A simple grace period can help with race conditions where a client makes multiple
-        // requests with the same token before receiving the new one.
-        const gracePeriod = 10000; // 10 seconds
-        const tokenAge = Date.now() - new Date(tokenData.created_at).getTime();
+        // Allow a short grace window so near-simultaneous refresh attempts don't force logout.
+        const revocationReference = tokenData.revoked_at
+          ? new Date(tokenData.revoked_at).getTime()
+          : new Date(tokenData.created_at).getTime();
+        const timeSinceRevocation = Date.now() - revocationReference;
 
-        if (tokenAge > gracePeriod) {
-            // If the token is old, it's more likely a security issue. Invalidate all user's tokens.
-            await client.query(`UPDATE refresh_tokens SET revoked = true WHERE user_id = $1`, [tokenData.user_id]);
-             console.error(`[Auth] Attempted reuse of revoked refresh token for user ${tokenData.user_id}. All tokens revoked.`);
-            throw { status: 401, message: 'Refresh token has been revoked. Please log in again.' };
+        if (timeSinceRevocation > REFRESH_TOKEN_REUSE_GRACE_PERIOD_MS) {
+          console.error(
+            `[Auth] Reuse of revoked refresh token outside grace window for user ${tokenData.user_id}.`
+          );
+          throw { status: 401, message: 'Refresh token has been revoked. Please log in again.' };
         }
-        
-        // If within grace period, it might be a race condition.
-        // We can choose to re-send the latest active token if one exists.
-        // For now, we will still treat it as an error but with a less severe message.
-        console.warn(`[Auth] Revoked refresh token used within grace period for user ${tokenData.user_id}. Potential race condition.`);
-        throw { status: 401, message: 'Refresh token has been revoked' };
+
+        console.warn(
+          `[Auth] Revoked refresh token reused within grace window for user ${tokenData.user_id}; treating as race condition.`
+        );
       }
 
       if (new Date(tokenData.expires_at) < new Date()) {
@@ -488,7 +486,10 @@ const refreshToken = async (req, res) => {
 
       // Invalidate the old refresh token by revoking it
       await client.query(
-        `UPDATE refresh_tokens SET revoked = true WHERE token = $1`,
+        `UPDATE refresh_tokens 
+         SET revoked = true,
+             revoked_at = COALESCE(revoked_at, NOW())
+         WHERE token = $1`,
         [refreshToken]
       );
 
