@@ -33,14 +33,19 @@ const toInt = (value, fallback) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const REFRESH_TOKEN_TTL_DAYS = toInt(process.env.REFRESH_TOKEN_TTL_DAYS, 0);
-const SESSION_TTL_DAYS = toInt(process.env.SESSION_TTL_DAYS, REFRESH_TOKEN_TTL_DAYS || 0);
-const PERMANENT_EXPIRY_DATE = new Date('9999-12-31T23:59:59.999Z');
+const EXPIRING_SESSIONS_ENABLED = process.env.ALLOW_SESSION_EXPIRY === 'true';
+const PERMANENT_TTL_DAYS = 36500; // ≈100 years, matches access token lifetime
+const REFRESH_TOKEN_TTL_DAYS = EXPIRING_SESSIONS_ENABLED
+  ? toInt(process.env.REFRESH_TOKEN_TTL_DAYS, 30)
+  : 0;
+const SESSION_TTL_DAYS = EXPIRING_SESSIONS_ENABLED
+  ? toInt(process.env.SESSION_TTL_DAYS, REFRESH_TOKEN_TTL_DAYS || 30)
+  : 0;
 const REFRESH_TOKEN_REUSE_GRACE_PERIOD_MS = toInt(process.env.REFRESH_TOKEN_REUSE_GRACE_PERIOD_MS, 15000);
 
 const computeExpiryDate = (days) => {
-  if (!Number.isFinite(days) || days <= 0) {
-    return new Date(PERMANENT_EXPIRY_DATE);
+  if (!EXPIRING_SESSIONS_ENABLED || !Number.isFinite(days) || days <= 0) {
+    return new Date(Date.now() + PERMANENT_TTL_DAYS * 24 * 60 * 60 * 1000);
   }
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000);
 };

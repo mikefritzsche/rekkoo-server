@@ -1012,6 +1012,33 @@ function syncControllerFactory(socketService) {
 
               insertResult = await client.query(upsertQuery, values);
               creationStatus = listAlreadyExists ? 'updated' : 'created';
+            } else if (tableName === 'list_items') {
+              const { rows: existingRows } = await client.query(
+                'SELECT 1 FROM public.list_items WHERE id = $1 LIMIT 1',
+                [filteredData.id]
+              );
+              const itemAlreadyExists = existingRows.length > 0;
+
+              const updateAssignments = fields
+                .filter(field => field !== 'id' && field !== 'created_at')
+                .map(field => {
+                  if (field === 'custom_fields' || field === 'api_metadata') {
+                    return `"${field}" = EXCLUDED."${field}"::jsonb`;
+                  }
+                  return `"${field}" = EXCLUDED."${field}"`;
+                });
+
+              if (!fields.includes('updated_at')) {
+                updateAssignments.push('updated_at = CURRENT_TIMESTAMP');
+              }
+
+              const upsertQuery = `INSERT INTO "list_items" (${fields.map(f => `"${f}"`).join(', ')})
+                VALUES (${placeholders})
+                ON CONFLICT (id) DO UPDATE SET ${updateAssignments.join(', ')}
+                RETURNING id`;
+
+              insertResult = await client.query(upsertQuery, values);
+              creationStatus = itemAlreadyExists ? 'updated' : 'created';
             } else {
               const insertQuery = `INSERT INTO "${tableName}" (${fields.map(f => `"${f}"`).join(', ')}) VALUES (${placeholders}) RETURNING id`;
               insertResult = await client.query(insertQuery, values);

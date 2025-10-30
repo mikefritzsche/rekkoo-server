@@ -1,8 +1,14 @@
 // auth/config.js
+const allowSessionExpiry = process.env.ALLOW_SESSION_EXPIRY === 'true';
+
+const envJwtExpiresIn = process.env.JWT_EXPIRES_IN;
+
 const config = {
   jwtSecret: process.env.JWT_SECRET || 'your-secret-key', // Use environment variable in production
-  // Shorten access token lifetime for testing refresh flow
-  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '24h',
+  // Use extremely long-lived tokens when session expiry is disabled
+  jwtExpiresIn: allowSessionExpiry
+    ? (envJwtExpiresIn || '24h')
+    : '36500d',
   bcryptSaltRounds: 10
 };
 

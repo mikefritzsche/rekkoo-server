@@ -11,7 +11,7 @@ const pool = new Pool({
   ssl: false, //process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
   max: parseInt(process.env.DB_POOL_MAX || '20', 10),     // Maximum clients in pool
   idleTimeoutMillis: 30000,                               // Close idle clients after 30 seconds
-  connectionTimeoutMillis: 2000,                          // Return error after 2 seconds if connection not established
+  connectionTimeoutMillis: parseInt(process.env.DB_CONNECTION_TIMEOUT || '7000', 10), // Allow slower connections
 });
 
 // Connection error handling
@@ -33,7 +33,13 @@ pool.on('error', (err) => {
 })();
 
 // Improved query function with error handling
-const query = async (text, params) => {
+const isConnectionTimeoutError = (error) =>
+  error?.message?.includes('timeout exceeded') ||
+  error?.message?.includes('ETIMEDOUT');
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const query = async (text, params, attempt = 0) => {
   const start = Date.now();
   try {
     const result = await pool.query(text, params);
@@ -44,13 +50,34 @@ const query = async (text, params) => {
     return result;
   } catch (error) {
     console.error('Query error:', error.message, { text, params });
+    if (attempt < 2 && isConnectionTimeoutError(error)) {
+      const backoff = 500 * (attempt + 1);
+      console.warn(`Retrying query after ${backoff}ms due to connection timeout (attempt ${attempt + 1})`);
+      await wait(backoff);
+      return query(text, params, attempt + 1);
+    }
     throw error;
+  }
+};
+
+const connectWithRetry = async (retries = 3) => {
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await pool.connect();
+    } catch (error) {
+      if (attempt >= retries || !isConnectionTimeoutError(error)) {
+        throw error;
+      }
+      const delay = 500 * (attempt + 1);
+      console.warn(`Database connection timeout (attempt ${attempt + 1}). Retrying in ${delay}ms...`);
+      await wait(delay);
+    }
   }
 };
 
 // Transaction helper
 const transaction = async (callback) => {
-  const client = await pool.connect();
+  const client = await connectWithRetry();
   try {
     await client.query('BEGIN');
     const result = await callback(client);
