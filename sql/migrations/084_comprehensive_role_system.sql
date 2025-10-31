@@ -271,10 +271,20 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER update_list_custom_permissions_updated_at
-    BEFORE UPDATE ON list_custom_permissions
-    FOR EACH ROW
-    EXECUTE FUNCTION update_list_custom_permissions_updated_at();
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_trigger
+        WHERE tgname = 'update_list_custom_permissions_updated_at'
+          AND tgrelid = 'list_custom_permissions'::regclass
+    ) THEN
+        CREATE TRIGGER update_list_custom_permissions_updated_at
+            BEFORE UPDATE ON list_custom_permissions
+            FOR EACH ROW
+            EXECUTE FUNCTION update_list_custom_permissions_updated_at();
+    END IF;
+END $$;
 
 -- Add comment explaining the new system
 COMMENT ON TABLE list_type_roles IS 'Defines available roles and their permissions for each list type';

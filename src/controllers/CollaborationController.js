@@ -12,6 +12,208 @@ function collaborationControllerFactory(socketService = null) {
     notifyUser: () => {} // No-op function
   };
 
+  const ROLE_TO_PERMISSION = {
+    'co-owner': 'admin',
+    host: 'admin',
+    admin: 'admin',
+    curator: 'edit',
+    editor: 'edit',
+    contributor: 'edit',
+    commenter: 'view',
+    viewer: 'view',
+    reserver: 'view',
+    shopper: 'edit',
+    planner: 'edit',
+    assignee: 'edit',
+    reviewer: 'edit',
+    project_lead: 'admin',
+    team_member: 'edit',
+    stakeholder: 'view'
+  };
+
+  const PERMISSION_TO_ROLE = {
+    view: 'viewer',
+    edit: 'editor',
+    admin: 'admin',
+    write: 'editor',
+    owner: 'admin'
+  };
+
+  const MANAGE_MEMBER_ROLES = new Set(['owner', 'co-owner', 'host', 'admin', 'project_lead']);
+
+  const ROLE_PRIORITY = {
+    owner: 0,
+    'co-owner': 1,
+    host: 2,
+    admin: 3,
+    project_lead: 4,
+    curator: 5,
+    editor: 6,
+    contributor: 7,
+    commenter: 8,
+    reserver: 9,
+    viewer: 10,
+    inherit: 11,
+    blocked: 12
+  };
+
+  const normalizeRole = (role, permissions) => {
+    if (role && typeof role === 'string') {
+      return role;
+    }
+    if (permissions && typeof permissions === 'string') {
+      if (ROLE_TO_PERMISSION[permissions]) {
+        return permissions;
+      }
+      if (PERMISSION_TO_ROLE[permissions]) {
+        return PERMISSION_TO_ROLE[permissions];
+      }
+    }
+    return 'editor';
+  };
+
+  const resolvePermissionForRole = (role, permissions) => {
+    if (permissions && typeof permissions === 'string' && ['view', 'edit', 'admin'].includes(permissions)) {
+      return permissions;
+    }
+    return ROLE_TO_PERMISSION[role] || 'view';
+  };
+
+  const getEffectiveRoleForList = async (listId, userId, ownerId = null) => {
+    let resolvedOwnerId = ownerId;
+
+    if (!resolvedOwnerId) {
+      const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
+      if (listRows.length === 0) {
+        return { listExists: false };
+      }
+      resolvedOwnerId = listRows[0].owner_id;
+    }
+
+    if (resolvedOwnerId === userId) {
+      return { listExists: true, ownerId: resolvedOwnerId, role: 'owner' };
+    }
+
+    const { rows: overrideRows } = await db.query(
+      `SELECT role
+         FROM list_user_overrides
+        WHERE list_id = $1
+          AND user_id = $2
+          AND deleted_at IS NULL
+        ORDER BY updated_at DESC
+        LIMIT 1`,
+      [listId, userId]
+    );
+
+    if (overrideRows.length > 0) {
+      const overrideRole = overrideRows[0].role;
+      if (overrideRole && overrideRole !== 'inherit') {
+        return { listExists: true, ownerId: resolvedOwnerId, role: overrideRole };
+      }
+    }
+
+    const { rows: groupRoleRows } = await db.query(
+      `SELECT COALESCE(lgur.role, lgr.role) AS role
+         FROM collaboration_group_members cgm
+         LEFT JOIN list_group_roles lgr
+           ON lgr.list_id = $1
+          AND lgr.group_id = cgm.group_id
+          AND lgr.deleted_at IS NULL
+         LEFT JOIN list_group_user_roles lgur
+           ON lgur.list_id = $1
+          AND lgur.group_id = cgm.group_id
+          AND lgur.user_id = cgm.user_id
+          AND lgur.deleted_at IS NULL
+        WHERE cgm.user_id = $2
+          AND cgm.deleted_at IS NULL`,
+      [listId, userId]
+    );
+
+    if (groupRoleRows.length > 0) {
+      const bestRole = groupRoleRows
+        .map(row => row.role)
+        .filter(Boolean)
+        .sort((a, b) => (ROLE_PRIORITY[a] ?? 99) - (ROLE_PRIORITY[b] ?? 99))[0];
+
+      if (bestRole) {
+        return { listExists: true, ownerId: resolvedOwnerId, role: bestRole };
+      }
+    }
+
+    return { listExists: true, ownerId: resolvedOwnerId, role: null };
+  };
+
+  const ensureCanManageListMembership = async (listId, userId, ownerId = null) => {
+    const { listExists, ownerId: resolvedOwnerId, role } = await getEffectiveRoleForList(listId, userId, ownerId);
+
+    if (!listExists) {
+      return { allowed: false, status: 404, error: 'List not found' };
+    }
+
+    if (resolvedOwnerId === userId) {
+      return { allowed: true, role: 'owner' };
+    }
+
+    if (role && MANAGE_MEMBER_ROLES.has(role)) {
+      return { allowed: true, role };
+    }
+
+    return { allowed: false, status: 403, error: 'Insufficient permissions' };
+  };
+
+  const serializePermissionsPayload = (permissions) => {
+    if (!permissions) {
+      return null;
+    }
+    if (typeof permissions === 'object') {
+      try {
+        return JSON.stringify(permissions);
+      } catch (err) {
+        console.warn('[CollaborationController] Failed to serialize permissions payload:', err);
+        return null;
+      }
+    }
+    return null;
+  };
+
+  const notifyGroupMembersAboutListAccess = async (listId, groupId, requesterId, role, eventName = 'list_access_granted') => {
+    try {
+      console.log(`[CollaborationController] Notifying group members about list ${listId} access (group: ${groupId}, role: ${role})`);
+
+      const { rows: groupMembers } = await db.query(
+        `SELECT DISTINCT cgm.user_id 
+           FROM collaboration_group_members cgm 
+          WHERE cgm.group_id = $1 
+            AND cgm.deleted_at IS NULL
+            AND cgm.user_id != $2
+         UNION
+         SELECT DISTINCT cg.owner_id as user_id
+           FROM collaboration_groups cg
+          WHERE cg.id = $1 
+            AND cg.deleted_at IS NULL
+            AND cg.owner_id != $2`,
+        [groupId, requesterId]
+      );
+
+      for (const member of groupMembers) {
+        console.log(`[CollaborationController] Notifying user ${member.user_id} about list access event (${eventName})`);
+        safeSocketService.notifyUser(member.user_id, eventName, {
+          listId,
+          updatedBy: requesterId,
+          accessType: 'group',
+          groupId,
+          role,
+          timestamp: Date.now()
+        });
+      }
+
+      console.log(`[CollaborationController] Notified ${groupMembers.length} group members about list access`);
+    } catch (notifyError) {
+      console.error('[CollaborationController] Failed to notify group members:', notifyError);
+      // Do not fail the outer operation if notifications fail
+    }
+  };
+
 const CollaborationController = {
   // Bulk fetch members for multiple groups
   getBulkGroupMembers: async (req, res) => {
@@ -378,12 +580,18 @@ const CollaborationController = {
   // Attach group to list with role
   attachGroupToList: async (req, res) => {
     const { listId, groupId } = req.params;
-    const { role = 'editor', permissions = null } = req.body || {};
+    const { role, permissions = null } = req.body || {};
     const requester_id = req.user.id;
     try {
       const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
       if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
-      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+
+      const permissionCheck = await ensureCanManageListMembership(listId, requester_id, listRows[0].owner_id);
+      if (!permissionCheck.allowed) return res.status(permissionCheck.status).json({ error: permissionCheck.error });
+
+      const normalizedRole = normalizeRole(role, permissions);
+      const fallbackPermission = resolvePermissionForRole(normalizedRole, permissions);
+      const permissionsPayload = serializePermissionsPayload(permissions);
 
       // Ensure list_sharing link exists
       await db.query(
@@ -400,45 +608,19 @@ const CollaborationController = {
          ON CONFLICT (list_id, group_id)
          DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions, updated_at = CURRENT_TIMESTAMP
          RETURNING *`,
-        [uuidv4(), listId, groupId, role, permissions ? JSON.stringify(permissions) : null]
+        [uuidv4(), listId, groupId, normalizedRole, permissionsPayload]
+      );
+
+      await db.query(
+        `INSERT INTO collaboration_group_lists (group_id, list_id, added_by, permission)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (group_id, list_id)
+         DO UPDATE SET permission = EXCLUDED.permission, updated_at = CURRENT_TIMESTAMP`,
+        [groupId, listId, requester_id, fallbackPermission]
       );
 
       // Notify all group members about the new list access
-      try {
-        console.log(`[CollaborationController] Notifying group members about list ${listId} access (group: ${groupId}, role: ${role})`);
-        
-        const { rows: groupMembers } = await db.query(
-          `SELECT DISTINCT cgm.user_id 
-           FROM collaboration_group_members cgm 
-           WHERE cgm.group_id = $1 
-             AND cgm.deleted_at IS NULL
-             AND cgm.user_id != $2
-           UNION
-           SELECT DISTINCT cg.owner_id as user_id
-           FROM collaboration_groups cg
-           WHERE cg.id = $1 
-             AND cg.deleted_at IS NULL
-             AND cg.owner_id != $2`,
-          [groupId, requester_id]
-        );
-
-        for (const member of groupMembers) {
-          console.log(`[CollaborationController] Notifying user ${member.user_id} about list access granted`);
-          safeSocketService.notifyUser(member.user_id, 'list_access_granted', {
-            listId: listId,
-            updatedBy: requester_id,
-            accessType: 'group',
-            groupId: groupId,
-            role: role,
-            timestamp: Date.now()
-          });
-        }
-        
-        console.log(`[CollaborationController] Notified ${groupMembers.length} group members about list access`);
-      } catch (notifyError) {
-        console.error('[CollaborationController] Failed to notify group members:', notifyError);
-        // Don't fail the request if notifications fail
-      }
+      await notifyGroupMembersAboutListAccess(listId, groupId, requester_id, normalizedRole);
 
       return res.status(201).json(upsert.rows[0]);
     } catch (e) {
@@ -455,7 +637,8 @@ const CollaborationController = {
     try {
       const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
       if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
-      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+      const permissionCheck = await ensureCanManageListMembership(listId, requester_id, listRows[0].owner_id);
+      if (!permissionCheck.allowed) return res.status(permissionCheck.status).json({ error: permissionCheck.error });
       if (!role) return res.status(400).json({ error: 'role is required' });
 
       const { rows } = await db.query(
@@ -517,7 +700,8 @@ const CollaborationController = {
     try {
       const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
       if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
-      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+      const permissionCheck = await ensureCanManageListMembership(listId, requester_id, listRows[0].owner_id);
+      if (!permissionCheck.allowed) return res.status(permissionCheck.status).json({ error: permissionCheck.error });
 
       // Get group members before removing access
       const { rows: groupMembers } = await db.query(
@@ -537,6 +721,7 @@ const CollaborationController = {
 
       await db.query('UPDATE list_sharing SET deleted_at = CURRENT_TIMESTAMP WHERE list_id = $1 AND shared_with_group_id = $2 AND deleted_at IS NULL', [listId, groupId]);
       await db.query('UPDATE list_group_roles SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE list_id = $1 AND group_id = $2 AND deleted_at IS NULL', [listId, groupId]);
+      await db.query('DELETE FROM collaboration_group_lists WHERE list_id = $1 AND group_id = $2', [listId, groupId]);
 
       // Notify all group members about the revoked list access
       try {
@@ -574,37 +759,10 @@ const CollaborationController = {
     try {
       const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
       if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
-      
-      const isOwner = listRows[0].owner_id === requester_id;
-      
-      // Check if user has any access to this list
-      if (!isOwner) {
-        const { rows: accessRows } = await db.query(
-          `SELECT EXISTS (
-             -- Check for group access
-             SELECT 1 FROM list_sharing ls
-             JOIN collaboration_group_members cgm ON cgm.group_id = ls.shared_with_group_id
-             WHERE ls.list_id = $1 AND cgm.user_id = $2 AND ls.deleted_at IS NULL
-           ) OR EXISTS (
-             -- Check for individual user access
-             SELECT 1 FROM list_user_overrides luo
-             WHERE luo.list_id = $1 
-               AND luo.user_id = $2 
-               AND luo.deleted_at IS NULL
-               AND luo.role != 'blocked'
-               AND luo.role != 'inherit'
-           ) AS has_access`,
-          [listId, requester_id]
-        );
-        
-        console.log(`[getListUserOverrides] Access check result for user ${requester_id} on list ${listId}:`, accessRows[0]);
-        
-        if (!accessRows[0]?.has_access) {
-          console.log(`[getListUserOverrides] Access denied for user ${requester_id} on list ${listId}`);
-          return res.status(403).json({ error: 'Insufficient permissions' });
-        } else {
-          console.log(`[getListUserOverrides] Access granted for user ${requester_id} on list ${listId} (non-owner with access)`);
-        }
+      const permissionCheck = await ensureCanManageListMembership(listId, requester_id, listRows[0].owner_id);
+      if (!permissionCheck.allowed) {
+        console.log(`[getListUserOverrides] Access denied for user ${requester_id} on list ${listId}`);
+        return res.status(permissionCheck.status).json({ error: permissionCheck.error });
       }
 
       const { rows } = await db.query(
@@ -649,9 +807,10 @@ const CollaborationController = {
       }
       const list = listRows[0];
 
-      if (list.owner_id !== requester_id) {
-        console.log('[setUserRoleOverrideOnList] Permission denied. Owner:', list.owner_id, 'Requester:', requester_id);
-        return res.status(403).json({ error: 'Insufficient permissions' });
+      const permissionCheck = await ensureCanManageListMembership(listId, requester_id, list.owner_id);
+      if (!permissionCheck.allowed) {
+        console.log('[setUserRoleOverrideOnList] Permission denied. Owner:', list.owner_id, 'Requester:', requester_id, 'Role:', permissionCheck.role);
+        return res.status(permissionCheck.status).json({ error: permissionCheck.error });
       }
 
       if (!role) {
@@ -931,10 +1090,10 @@ const CollaborationController = {
     const { role, permissions = null } = req.body || {};
     const requester_id = req.user.id;
     try {
-      // Only list owner can set roles per group for now
       const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
       if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
-      if (listRows[0].owner_id !== requester_id) return res.status(403).json({ error: 'Insufficient permissions' });
+      const permissionCheck = await ensureCanManageListMembership(listId, requester_id, listRows[0].owner_id);
+      if (!permissionCheck.allowed) return res.status(permissionCheck.status).json({ error: permissionCheck.error });
 
       if (!role) return res.status(400).json({ error: 'role is required (or use "inherit" to remove)' });
 
@@ -1085,6 +1244,49 @@ const CollaborationController = {
     }
   },
 
+  // Restore a soft-deleted collaboration group
+  restoreGroup: async (req, res) => {
+    const { groupId } = req.params;
+    const user_id = req.user.id;
+
+    try {
+      const { rows } = await db.query(
+        `SELECT id, owner_id, deleted_at
+           FROM collaboration_groups
+          WHERE id = $1`,
+        [groupId]
+      );
+
+      if (rows.length === 0) {
+        return res.status(404).json({ error: 'Group not found' });
+      }
+
+      const group = rows[0];
+
+      if (group.owner_id !== user_id) {
+        return res.status(403).json({ error: 'Only the group owner can restore the group' });
+      }
+
+      if (!group.deleted_at) {
+        return res.status(400).json({ error: 'Group is not deleted' });
+      }
+
+      const { rows: updatedRows } = await db.query(
+        `UPDATE collaboration_groups
+            SET deleted_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE id = $1
+          RETURNING *`,
+        [groupId]
+      );
+
+      return res.status(200).json({ group: updatedRows[0] });
+    } catch (error) {
+      console.error('Error restoring group:', error);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  },
+
   // Get a single group's details
   getGroupById: async (req, res) => {
     const { groupId } = req.params;
@@ -1150,21 +1352,48 @@ const CollaborationController = {
       const activity = [];
 
       // Get shared lists
-      const { rows: sharedLists } = await db.query(
+      const { rows: sharedListsRaw } = await db.query(
         `SELECT
           l.id,
           l.title as name,
           l.list_type,
-          (SELECT COUNT(*) FROM list_items WHERE list_id = l.id) as item_count,
-          (SELECT COUNT(*) FROM gift_reservations WHERE list_id = l.id) as reserved_count,
-          lg.created_at as attached_at
-         FROM lists l
-         JOIN collaboration_group_lists lg ON lg.list_id = l.id
+          (SELECT COUNT(*) FROM list_items li WHERE li.list_id = l.id) as item_count,
+          (SELECT COUNT(*) 
+             FROM gift_reservations gr 
+             JOIN list_items li_res ON li_res.id = gr.item_id
+            WHERE li_res.list_id = l.id
+              AND gr.deleted_at IS NULL) as reserved_count,
+          lg.created_at as attached_at,
+          lgr_data.role as group_role,
+          lgr_data.permissions as group_permissions,
+          lg.permission as legacy_permission
+         FROM collaboration_group_lists lg
+         JOIN lists l ON l.id = lg.list_id
+         LEFT JOIN LATERAL (
+           SELECT lgr.role, lgr.permissions
+           FROM list_group_roles lgr
+           WHERE lgr.list_id = lg.list_id
+             AND lgr.group_id = lg.group_id
+             AND lgr.deleted_at IS NULL
+           ORDER BY lgr.updated_at DESC
+           LIMIT 1
+         ) lgr_data ON TRUE
          WHERE lg.group_id = $1
            AND l.deleted_at IS NULL
          ORDER BY lg.created_at DESC`,
         [groupId]
       );
+
+      const sharedLists = sharedListsRaw.map(({ legacy_permission, group_role, group_permissions, ...sharedList }) => {
+        const normalizedRole = group_role || PERMISSION_TO_ROLE[legacy_permission] || 'viewer';
+        return {
+          ...sharedList,
+          legacy_permission,
+          role: normalizedRole,
+          permissions: group_permissions,
+          permission: resolvePermissionForRole(normalizedRole, legacy_permission),
+        };
+      });
 
       res.status(200).json({
         group,
@@ -1773,7 +2002,7 @@ const CollaborationController = {
   // Share a list with a group
   shareListWithGroup: async (req, res) => {
     const { listId, groupId } = req.params;
-    const { permissions } = req.body || {};
+    const { permissions = null, role = null } = req.body || {};
     const owner_id = req.user.id;
 
     try {
@@ -1789,6 +2018,10 @@ const CollaborationController = {
         return res.status(403).json({ error: 'You can only share lists with groups you own' });
       }
 
+      const normalizedRole = normalizeRole(role, permissions);
+      const fallbackPermission = resolvePermissionForRole(normalizedRole, permissions);
+      const permissionsPayload = serializePermissionsPayload(permissions);
+
       // If a share already exists, update permissions; else insert
       const existing = await db.query(
         `SELECT id FROM list_sharing 
@@ -1797,22 +2030,45 @@ const CollaborationController = {
         [listId, groupId]
       );
 
+      let listSharingRow;
+
       if (existing.rows.length > 0) {
         const { rows } = await db.query(
           `UPDATE list_sharing 
-           SET permissions = COALESCE($3, permissions), updated_at = CURRENT_TIMESTAMP 
+           SET permissions = COALESCE($2, permissions), updated_at = CURRENT_TIMESTAMP 
            WHERE id = $1 
            RETURNING *`,
-          [existing.rows[0].id, owner_id, permissions || null]
+          [existing.rows[0].id, fallbackPermission]
         );
-        return res.status(200).json(rows[0]);
+        listSharingRow = rows[0];
+      } else {
+        const { rows } = await db.query(
+          'INSERT INTO list_sharing (id, list_id, shared_with_group_id, permissions) VALUES ($1, $2, $3, $4) RETURNING *',
+          [uuidv4(), listId, groupId, fallbackPermission]
+        );
+        listSharingRow = rows[0];
       }
 
-      const { rows } = await db.query(
-        'INSERT INTO list_sharing (id, list_id, shared_with_group_id, permissions) VALUES ($1, $2, $3, $4) RETURNING *',
-        [uuidv4(), listId, groupId, permissions || 'edit']
+      await db.query(
+        `INSERT INTO list_group_roles (id, list_id, group_id, role, permissions)
+         VALUES ($1, $2, $3, $4, $5::jsonb)
+         ON CONFLICT (list_id, group_id)
+         DO UPDATE SET role = EXCLUDED.role, permissions = EXCLUDED.permissions, updated_at = CURRENT_TIMESTAMP`,
+        [uuidv4(), listId, groupId, normalizedRole, permissionsPayload]
       );
-      res.status(201).json(rows[0]);
+
+      await db.query(
+        `INSERT INTO collaboration_group_lists (group_id, list_id, added_by, permission)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (group_id, list_id)
+         DO UPDATE SET permission = EXCLUDED.permission, updated_at = CURRENT_TIMESTAMP`,
+        [groupId, listId, owner_id, fallbackPermission]
+      );
+
+      await notifyGroupMembersAboutListAccess(listId, groupId, owner_id, normalizedRole);
+
+      const statusCode = existing.rows.length > 0 ? 200 : 201;
+      return res.status(statusCode).json(listSharingRow);
     } catch (error) {
       console.error('Error sharing list with group:', error);
       res.status(500).json({ error: 'Internal Server Error' });
@@ -1822,15 +2078,21 @@ const CollaborationController = {
   // Unshare a list from a group
     unshareListFromGroup: async (req, res) => {
         const { listId, groupId } = req.params;
-        const owner_id = req.user.id;
+        const requester_id = req.user.id;
 
         try {
-            // Verify the current user owns the list
             const listResult = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
-            if (listResult.rows.length === 0 || listResult.rows[0].owner_id !== owner_id) {
-                return res.status(403).json({ error: 'You can only unshare lists you own' });
+            if (listResult.rows.length === 0) {
+                return res.status(404).json({ error: 'List not found' });
             }
 
+            const permissionCheck = await ensureCanManageListMembership(listId, requester_id, listResult.rows[0].owner_id);
+            if (!permissionCheck.allowed) {
+                return res.status(permissionCheck.status).json({ error: permissionCheck.error });
+            }
+
+            await db.query('DELETE FROM collaboration_group_lists WHERE list_id = $1 AND group_id = $2', [listId, groupId]);
+            await db.query('DELETE FROM list_group_roles WHERE list_id = $1 AND group_id = $2', [listId, groupId]);
             await db.query('DELETE FROM list_sharing WHERE list_id = $1 AND shared_with_group_id = $2', [listId, groupId]);
             res.status(204).send();
         } catch (error) {
@@ -1842,13 +2104,17 @@ const CollaborationController = {
     // Get current shares for a list (groups and users)
     getListShares: async (req, res) => {
         const { listId } = req.params;
-        const owner_id = req.user.id;
+        const requester_id = req.user.id;
 
         try {
-            // Verify the current user owns the list
             const listResult = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
-            if (listResult.rows.length === 0 || listResult.rows[0].owner_id !== owner_id) {
-                return res.status(403).json({ error: 'You can only view shares for lists you own' });
+            if (listResult.rows.length === 0) {
+                return res.status(404).json({ error: 'List not found' });
+            }
+
+            const permissionCheck = await ensureCanManageListMembership(listId, requester_id, listResult.rows[0].owner_id);
+            if (!permissionCheck.allowed) {
+                return res.status(permissionCheck.status).json({ error: permissionCheck.error });
             }
 
             const { rows } = await db.query(
@@ -2073,12 +2339,16 @@ const CollaborationController = {
                     AND cgm.deleted_at IS NULL
                  ORDER BY
                     CASE COALESCE(lgur.role, lgr.role, 'viewer')
-                        WHEN 'admin' THEN 1
-                        WHEN 'editor' THEN 2
-                        WHEN 'commenter' THEN 3
-                        WHEN 'reserver' THEN 4
-                        WHEN 'viewer' THEN 5
-                        ELSE 6
+                        WHEN 'co-owner' THEN 1
+                        WHEN 'host' THEN 2
+                        WHEN 'admin' THEN 3
+                        WHEN 'curator' THEN 4
+                        WHEN 'editor' THEN 5
+                        WHEN 'contributor' THEN 6
+                        WHEN 'commenter' THEN 7
+                        WHEN 'reserver' THEN 8
+                        WHEN 'viewer' THEN 9
+                        ELSE 10
                     END
                  LIMIT 1`,
                 [listId, userId]

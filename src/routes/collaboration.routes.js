@@ -17,6 +17,7 @@ function createCollaborationRouter(collaborationController) {
   router.get('/groups', authenticateJWT, collaborationController.getGroupsForUser);
   router.get('/groups/:groupId', authenticateJWT, collaborationController.getGroupById);
   router.delete('/groups/:groupId', authenticateJWT, collaborationController.deleteGroup);
+  router.post('/groups/:groupId/restore', authenticateJWT, collaborationController.restoreGroup);
 
   // Group member routes
   router.post('/groups/:groupId/members', authenticateJWT, collaborationController.addMemberToGroup);

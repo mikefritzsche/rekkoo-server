@@ -23,9 +23,9 @@ class ListSharingController {
         });
       }
 
-      if (!['viewer', 'commenter', 'editor', 'admin', 'reserver'].includes(role)) {
+      if (!['viewer', 'commenter', 'contributor', 'editor', 'curator', 'admin', 'host', 'co-owner', 'reserver'].includes(role)) {
         return res.status(400).json({
-          error: 'Invalid role. Must be: viewer, commenter, editor, admin, or reserver'
+          error: 'Invalid role. Must be one of: viewer, voter, contributor, editor, curator, host, co-owner, admin, or reserver'
         });
       }
 
@@ -498,9 +498,9 @@ class ListSharingController {
 
     try {
       // Validate role
-      if (!['viewer', 'commenter', 'editor', 'admin', 'reserver'].includes(role)) {
+      if (!['viewer', 'commenter', 'contributor', 'editor', 'curator', 'admin', 'host', 'co-owner', 'reserver'].includes(role)) {
         return res.status(400).json({
-          error: 'Invalid role'
+          error: 'Invalid role. Must be one of: viewer, voter, contributor, editor, curator, host, co-owner, admin, or reserver'
         });
       }
 
@@ -577,9 +577,9 @@ class ListSharingController {
 
     try {
       // Validate role
-      if (!['viewer', 'commenter', 'editor', 'admin', 'reserver'].includes(role)) {
+      if (!['viewer', 'commenter', 'contributor', 'editor', 'curator', 'admin', 'host', 'co-owner', 'reserver', 'inherit'].includes(role)) {
         return res.status(400).json({
-          error: 'Invalid role'
+          error: 'Invalid role. Must be one of: viewer, voter, contributor, editor, curator, host, co-owner, admin, reserver, or inherit'
         });
       }
 
