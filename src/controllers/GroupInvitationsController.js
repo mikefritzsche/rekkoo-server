@@ -227,13 +227,18 @@ function createGroupInvitationsController(socketService) {
 
       try {
         // First check if user is a member or owner of the group
-        const memberCheck = await db.pool.query(
-          `SELECT role FROM collaboration_group_members
-           WHERE group_id = $1 AND user_id = $2`,
+        const accessCheck = await db.pool.query(
+          `SELECT 1
+           FROM collaboration_groups g
+           LEFT JOIN collaboration_group_members m
+             ON m.group_id = g.id
+            AND m.user_id = $2
+           WHERE g.id = $1
+             AND (g.owner_id = $2 OR m.user_id IS NOT NULL)`,
           [groupId, userId]
         );
 
-        if (memberCheck.rows.length === 0) {
+        if (accessCheck.rows.length === 0) {
           return res.status(403).json({
             error: 'You must be a member of the group to view invitations'
           });
