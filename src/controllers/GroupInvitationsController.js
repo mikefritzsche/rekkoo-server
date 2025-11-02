@@ -456,33 +456,48 @@ function createGroupInvitationsController(socketService) {
           );
 
           if (original.rows.length > 0) {
-            // Handle regular group invitation resend
+            // Handle regular group invitation resend without creating duplicates
             const orig = original.rows[0];
 
-            // Cancel the old invitation if it's still pending
-            if (orig.status === 'pending') {
-              await client.query(
-                `UPDATE group_invitations
-                 SET status = 'cancelled', responded_at = CURRENT_TIMESTAMP
-                 WHERE id = $1`,
-                [invitationId]
-              );
+            if (orig.status === 'accepted') {
+              await client.query('ROLLBACK');
+              return res.status(400).json({
+                error: 'This invitation was already accepted. The user is already a member of the group.'
+              });
             }
 
-            // Create new invitation
-            const newInvitation = await client.query(
-              `INSERT INTO group_invitations
-               (id, group_id, inviter_id, invitee_id, message, status, created_at, expires_at)
-               VALUES ($1, $2, $3, $4, $5, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP + INTERVAL '30 days')
+            // Ensure the invitee is not already a member before resending
+            const membershipCheck = await client.query(
+              `SELECT 1
+               FROM collaboration_group_members
+               WHERE group_id = $1 AND user_id = $2
+               LIMIT 1`,
+              [orig.group_id, orig.invitee_id]
+            );
+
+            if (membershipCheck.rows.length > 0) {
+              await client.query('ROLLBACK');
+              return res.status(400).json({
+                error: 'The invitee is already a member of this group.'
+              });
+            }
+
+            const updatedInvitation = await client.query(
+              `UPDATE group_invitations
+               SET status = 'pending',
+                   created_at = CURRENT_TIMESTAMP,
+                   responded_at = NULL,
+                   expires_at = CURRENT_TIMESTAMP + INTERVAL '30 days'
+               WHERE id = $1
                RETURNING *`,
-              [uuidv4(), orig.group_id, orig.inviter_id, orig.invitee_id, orig.message || 'You have been invited to join this group']
+              [invitationId]
             );
 
             await client.query('COMMIT');
 
-            res.json({
+            return res.json({
               message: 'Invitation resent successfully',
-              invitation: newInvitation.rows[0]
+              invitation: updatedInvitation.rows[0]
             });
           } else {
             // Check if it's a pending group invitation

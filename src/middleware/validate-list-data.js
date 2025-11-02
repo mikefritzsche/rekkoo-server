@@ -55,12 +55,23 @@ const validateListData = (req, res, next) => {
 
           if (data.background) {
             try {
-              // Allow 'local' type during sync push
-              if (!['color', 'image', 'local', 'pattern', 'stock', 'remote'].includes(data.background.type)) {
+              // Accept known client background types, including pending local uploads
+              const allowedBackgroundTypes = [
+                'color',
+                'image',
+                'local',
+                'local_pending_upload',
+                'pattern',
+                'stock',
+                'remote',
+              ];
+              if (!allowedBackgroundTypes.includes(data.background.type)) {
                 return res.status(400).json({ error: `Invalid background type: ${data.background.type}` });
               }
-              // Value is required for color/image, but not necessarily for local (blob uri isn't useful server-side)
-              if (data.background.type !== 'local' && data.background.type !== 'pattern' && !data.background.value) {
+
+              const typeAllowsEmptyValue = ['local', 'local_pending_upload', 'pattern'];
+              // Value is required for most types; local variants and patterns can omit it
+              if (!typeAllowsEmptyValue.includes(data.background.type) && !data.background.value) {
                 return res.status(400).json({ error: `Background value is required for type ${data.background.type}` });
               }
               // Image ID check is only relevant for type 'image' (stock images likely use different field)
