@@ -333,14 +333,102 @@ function syncControllerFactory(socketService) {
     if (tableName === 'gift_purchase_groups') {
       return 'created_by';
     }
-    if (tableName === 'gift_contributions') {
-      return 'contributor_id';
+  if (tableName === 'gift_contributions') {
+    return 'contributor_id';
+  }
+  // For any other table, including detail tables, we are saying there is no direct user identifier for the generic pull.
+  // This means they won't be processed in the main loop of handleGetChanges for direct user-filtered updates/deletes.
+  // logger.warn(`[SyncController] Table '${tableName}' will not be processed by user-identifier in handleGetChanges main loop.`);
+  return null;
+};
+
+  const normalizeFavoriteTargetType = (rawType) => {
+    const normalized = (rawType || '').toString().toLowerCase();
+    if (normalized === 'list' || normalized === 'lists') return 'list';
+    if (
+      normalized === 'item' ||
+      normalized === 'items' ||
+      normalized === 'list_item' ||
+      normalized === 'list_items'
+    ) {
+      return 'item';
     }
-    // For any other table, including detail tables, we are saying there is no direct user identifier for the generic pull.
-    // This means they won't be processed in the main loop of handleGetChanges for direct user-filtered updates/deletes.
-    // logger.warn(`[SyncController] Table '${tableName}' will not be processed by user-identifier in handleGetChanges main loop.`);
-    return null;
+    return rawType;
   };
+
+  async function enqueueFavoriteChangeForOwner(txnClient, ownerId, favoriteRecord, operation) {
+    if (!ownerId || !favoriteRecord) return;
+    if (String(ownerId) === String(favoriteRecord.user_id)) return;
+
+    try {
+      await txnClient.query(
+        `INSERT INTO public.change_log (table_name, record_id, operation, user_id, change_data, created_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, NOW())`,
+        [
+          'favorites',
+          favoriteRecord.id,
+          operation,
+          ownerId,
+          JSON.stringify({
+            id: favoriteRecord.id,
+            user_id: favoriteRecord.user_id,
+            target_id: favoriteRecord.target_id,
+            target_type: favoriteRecord.target_type,
+            category_id: favoriteRecord.category_id,
+            is_public: favoriteRecord.is_public,
+            notes: favoriteRecord.notes,
+            sort_order: favoriteRecord.sort_order,
+            created_at: favoriteRecord.created_at,
+            updated_at: favoriteRecord.updated_at,
+            deleted_at: favoriteRecord.deleted_at,
+          }),
+        ]
+      );
+    } catch (changeLogError) {
+      logger.error('[SyncController] Failed to enqueue favorite change for owner:', changeLogError);
+    }
+  }
+
+  async function getFavoriteTargetContext(txnClient, targetId, rawTargetType) {
+    const targetType = normalizeFavoriteTargetType(rawTargetType);
+    let targetOwnerId = null;
+    let targetListId = null;
+
+    try {
+      if (targetType === 'list' && targetId) {
+        const { rows } = await txnClient.query(
+          `SELECT owner_id FROM public.lists WHERE id = $1 LIMIT 1`,
+          [targetId]
+        );
+        if (rows.length > 0) {
+          targetOwnerId = rows[0].owner_id;
+          targetListId = targetId;
+        }
+      } else if (targetType === 'item' && targetId) {
+        const { rows } = await txnClient.query(
+          `SELECT li.list_id, l.owner_id
+             FROM public.list_items li
+             LEFT JOIN public.lists l ON li.list_id = l.id
+            WHERE li.id = $1
+            LIMIT 1`,
+          [targetId]
+        );
+        if (rows.length > 0) {
+          targetListId = rows[0].list_id;
+          targetOwnerId = rows[0].owner_id;
+        }
+      }
+    } catch (contextError) {
+      logger.error('[SyncController] Failed to resolve favorite target context:', contextError);
+    }
+
+    return {
+      targetOwnerId: targetOwnerId || null,
+      targetListId: targetListId || null,
+      targetType: targetType || rawTargetType,
+      targetId: targetId || null,
+    };
+  }
 
   // Helper function to process a single favorite creation or restoration
   async function processSingleFavoriteAddOrRestore(txnClient, userId, favDataFromPush) {
@@ -351,6 +439,8 @@ function syncControllerFactory(socketService) {
         logger.warn(`[SyncController] processSingleFavoriteAddOrRestore: Missing target_id or target_type for client ID ${clientProvidedId}`);
         return { status: 'error_missing_target', error: 'Favorite must include target_id and target_type' };
     }
+
+    const targetContext = await getFavoriteTargetContext(txnClient, target_id, target_type);
 
     // 1. Check for an *active* favorite for the same target
     const activeFavoriteQuery = `
@@ -366,8 +456,26 @@ function syncControllerFactory(socketService) {
             SET category_id = $1, is_public = $2, notes = $3, sort_order = $4, updated_at = CURRENT_TIMESTAMP
             WHERE id = $5 RETURNING id`;
         await txnClient.query(updateActiveQuery, [category_id || null, is_public || false, notes || null, sort_order || 0, existingActiveId]);
+        // Fetch record for change log propagation
+        try {
+          const { rows: favRows } = await txnClient.query(
+            `SELECT id, user_id, target_id, target_type, category_id, is_public, notes, sort_order, created_at, updated_at, deleted_at
+             FROM public.favorites WHERE id = $1`,
+            [existingActiveId]
+          );
+          if (favRows.length > 0) {
+            await enqueueFavoriteChangeForOwner(
+              txnClient,
+              targetContext.targetOwnerId,
+              favRows[0],
+              'update'
+            );
+          }
+        } catch (logErr) {
+          logger.error('[SyncController] Failed to enqueue favorite update for owner:', logErr);
+        }
         // Even if client sent a new ID, we updated the existing one. Respond with the existing ID.
-        return { status: 'updated_existing_active', serverId: existingActiveId, affectedRows: 1 };
+        return { status: 'updated_existing_active', serverId: existingActiveId, affectedRows: 1, ...targetContext };
     }
 
     // 2. Check for a *soft-deleted* favorite for the same target
@@ -384,7 +492,24 @@ function syncControllerFactory(socketService) {
             SET deleted_at = NULL, category_id = $1, is_public = $2, notes = $3, sort_order = $4, updated_at = CURRENT_TIMESTAMP
             WHERE id = $5 RETURNING id`;
         await txnClient.query(restoreQuery, [category_id || null, is_public || false, notes || null, sort_order || 0, existingSoftDeletedId]);
-        return { status: 'restored', serverId: existingSoftDeletedId, affectedRows: 1 };
+        try {
+          const { rows: favRows } = await txnClient.query(
+            `SELECT id, user_id, target_id, target_type, category_id, is_public, notes, sort_order, created_at, updated_at, deleted_at
+             FROM public.favorites WHERE id = $1`,
+            [existingSoftDeletedId]
+          );
+          if (favRows.length > 0) {
+            await enqueueFavoriteChangeForOwner(
+              txnClient,
+              targetContext.targetOwnerId,
+              favRows[0],
+              'update'
+            );
+          }
+        } catch (logErr) {
+          logger.error('[SyncController] Failed to enqueue favorite restore for owner:', logErr);
+        }
+        return { status: 'restored', serverId: existingSoftDeletedId, affectedRows: 1, ...targetContext };
     }
 
     // 3. No existing (active or soft-deleted) favorite for this target - insert new using client's provided ID
@@ -404,7 +529,25 @@ function syncControllerFactory(socketService) {
         VALUES (${placeholders})
         RETURNING id`;
     const insertResult = await txnClient.query(insertQuery, insertValues);
-    return { status: 'created', serverId: insertResult.rows[0].id, affectedRows: 1 };
+    const createdId = insertResult.rows[0].id;
+    try {
+      const { rows: favRows } = await txnClient.query(
+        `SELECT id, user_id, target_id, target_type, category_id, is_public, notes, sort_order, created_at, updated_at, deleted_at
+         FROM public.favorites WHERE id = $1`,
+        [createdId]
+      );
+      if (favRows.length > 0) {
+        await enqueueFavoriteChangeForOwner(
+          txnClient,
+          targetContext.targetOwnerId,
+          favRows[0],
+          'create'
+        );
+      }
+    } catch (logErr) {
+      logger.error('[SyncController] Failed to enqueue favorite create for owner:', logErr);
+    }
+    return { status: 'created', serverId: createdId, affectedRows: 1, ...targetContext };
   }
 
   // Helper function to get valid columns for a table to prevent SQL errors
@@ -428,6 +571,7 @@ function syncControllerFactory(socketService) {
     // If client sends the array directly as body, use: const clientChangesArray = req.body;
     const userId = req.user?.id;
     const results = []; // Initialize results array
+    const favoriteNotifications = new Map(); // Map<ownerId:targetKey, payload>
 
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
@@ -825,6 +969,26 @@ function syncControllerFactory(socketService) {
                     logger.warn(`[SyncController] Sync tracking not added for favorite create op for client ID ${clientRecordId} due to missing serverId in result.`);
                 } else {
                     logger.info(`[SyncController] Sync tracking not added for favorite create op for client ID ${clientRecordId} due to status: ${result.status}`);
+                }
+
+                if (result.targetOwnerId && result.targetOwnerId !== userId) {
+                    const notificationKey = `${result.targetOwnerId}:${result.targetType}:${result.targetId || 'unknown'}`;
+                    const operationForOwner =
+                        result.status === 'created'
+                            ? 'create'
+                            : result.status === 'restored'
+                                ? 'restore'
+                                : 'update';
+
+                    favoriteNotifications.set(notificationKey, {
+                        ownerId: result.targetOwnerId,
+                        listId: result.targetListId || (result.targetType === 'list' ? result.targetId : null),
+                        targetType: result.targetType,
+                        targetId: result.targetId,
+                        favoriteId: result.serverId,
+                        actorId: userId,
+                        operation: operationForOwner,
+                    });
                 }
             } catch (favError) {
                 logger.error(`[SyncController] Error in single favorite create for client ID ${clientRecordId}:`, favError);
@@ -1432,6 +1596,9 @@ function syncControllerFactory(socketService) {
             
             let deleteListId = undefined; // Store list_id for notifications
             
+            let favoriteDeleteContext = null;
+            let favoriteDeleteRecord = null;
+
             // Enforce collaboration permissions for list_items delete
             if (tableName === 'list_items') {
               const { rows: liRows } = await client.query('SELECT list_id FROM public.list_items WHERE id = $1', [deleteId]);
@@ -1444,6 +1611,20 @@ function syncControllerFactory(socketService) {
               if (!allowed) {
                 results.push({ tableName, operation, clientRecordId: deleteId, status: 'error_forbidden', error: 'Not allowed to delete items from this list' });
                 continue;
+              }
+            } else if (tableName === 'favorites') {
+              const { rows: favRows } = await client.query(
+                `SELECT id, user_id, target_id, target_type, category_id, is_public, notes, sort_order, created_at, updated_at, deleted_at
+                 FROM public.favorites WHERE id = $1`,
+                [deleteId]
+              );
+              if (favRows.length > 0) {
+                favoriteDeleteRecord = favRows[0];
+                favoriteDeleteContext = await getFavoriteTargetContext(
+                  client,
+                  favRows[0].target_id,
+                  favRows[0].target_type
+                );
               }
             }
 
@@ -1473,6 +1654,69 @@ function syncControllerFactory(socketService) {
               status: 'deleted',
               listId: deleteListId // Use the deleteListId we captured earlier
             });
+
+            if (
+              tableName === 'favorites' &&
+              favoriteDeleteContext &&
+              favoriteDeleteContext.targetOwnerId &&
+              favoriteDeleteContext.targetOwnerId !== userId
+            ) {
+              const notificationKey = `${favoriteDeleteContext.targetOwnerId}:${favoriteDeleteContext.targetType}:${favoriteDeleteContext.targetId || 'unknown'}`;
+
+              favoriteNotifications.set(notificationKey, {
+                ownerId: favoriteDeleteContext.targetOwnerId,
+                listId:
+                  favoriteDeleteContext.targetListId ||
+                  (favoriteDeleteContext.targetType === 'list'
+                    ? favoriteDeleteContext.targetId
+                    : null),
+                targetType: favoriteDeleteContext.targetType,
+                targetId: favoriteDeleteContext.targetId,
+                favoriteId: deleteId,
+                actorId: userId,
+                operation: 'delete',
+              });
+
+              if (favoriteDeleteRecord) {
+                try {
+                  const deletedRecord = {
+                    ...favoriteDeleteRecord,
+                    deleted_at: new Date().toISOString(),
+                  };
+                  await enqueueFavoriteChangeForOwner(
+                    client,
+                    favoriteDeleteContext.targetOwnerId,
+                    deletedRecord,
+                    'delete'
+                  );
+                } catch (logErr) {
+                  logger.error('[SyncController] Failed to enqueue favorite delete for owner:', logErr);
+                }
+              } else {
+                try {
+                  await enqueueFavoriteChangeForOwner(
+                    client,
+                    favoriteDeleteContext.targetOwnerId,
+                    {
+                      id: deleteId,
+                      user_id: userId,
+                      target_id: favoriteDeleteContext.targetId,
+                      target_type: favoriteDeleteContext.targetType,
+                      category_id: null,
+                      is_public: false,
+                      notes: null,
+                      sort_order: 0,
+                      created_at: new Date().toISOString(),
+                      updated_at: new Date().toISOString(),
+                      deleted_at: new Date().toISOString(),
+                    },
+                    'delete'
+                  );
+                } catch (logErr) {
+                  logger.error('[SyncController] Failed to enqueue fallback favorite delete for owner:', logErr);
+                }
+              }
+            }
           }
         }
       });
@@ -1480,6 +1724,33 @@ function syncControllerFactory(socketService) {
       // After transaction completes successfully
       // Notify group members about list_item changes
       await notifyGroupMembersOfListChanges(results, userId);
+
+      for (const notification of favoriteNotifications.values()) {
+        try {
+          socketService.notifyUser(notification.ownerId, 'favorite_count_updated', {
+            listId: notification.listId,
+            targetType: notification.targetType,
+            targetId: notification.targetId,
+            favoriteId: notification.favoriteId,
+            operation: notification.operation,
+            actorId: notification.actorId,
+            timestamp: Date.now(),
+          });
+
+          socketService.notifyUser(notification.ownerId, 'sync_update_available', {
+            tables: ['favorites'],
+            listId: notification.listId,
+            targetType: notification.targetType,
+            targetId: notification.targetId,
+            favoriteId: notification.favoriteId,
+            operation: notification.operation,
+            actorId: notification.actorId,
+            timestamp: Date.now(),
+          });
+        } catch (notifyError) {
+          logger.error('[SyncController] Failed to notify owner about favorite count update:', notifyError);
+        }
+      }
       
       socketService.notifyUser(userId, 'syncComplete', { message: 'Push processed', results });
       res.status(200).json({ success: true, message: 'Changes pushed and processed successfully.', results });
