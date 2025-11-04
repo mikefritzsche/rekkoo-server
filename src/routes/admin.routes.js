@@ -33,6 +33,26 @@ async function ensureAdmin(userId) {
   return res.rows.length > 0;
 }
 
+let favoritesSchemaCache = null;
+async function getFavoritesSchema() {
+  if (favoritesSchemaCache) {
+    return favoritesSchemaCache;
+  }
+
+  const { rows } = await db.query(
+    `SELECT column_name FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'favorites'`
+  );
+  const columns = rows.map((row) => row.column_name);
+  favoritesSchemaCache = {
+    columns,
+    hasListColumns: columns.includes('list_id') && columns.includes('list_item_id'),
+    hasTargetColumns: columns.includes('target_type') && columns.includes('target_id'),
+    hasTargetListColumn: columns.includes('target_list_id'),
+  };
+  return favoritesSchemaCache;
+}
+
 // GET /v1.0/admin/users – list users (paginated optional)
 router.get('/users', authenticateJWT, async (req, res) => {
   try {
@@ -362,6 +382,335 @@ router.put('/lists/:id', authenticateJWT, async (req, res) => {
     res.sendStatus(204);
   } catch (err) {
     console.error('Admin update list error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// GET /v1.0/admin/favorites – global favorites overview
+router.get('/favorites', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const limit = Math.max(Math.min(parseInt(req.query.limit ?? '50', 10) || 50, 200), 1);
+    const offset = Math.max(parseInt(req.query.offset ?? '0', 10) || 0, 0);
+    const includeDeletedFlag = String(
+      req.query.includeDeleted ?? req.query.include_deleted ?? 'false',
+    ).toLowerCase();
+    const includeDeleted = ['true', '1', 'yes'].includes(includeDeletedFlag);
+    const userFilter = req.query.userId || req.query.user_id || null;
+    const searchTermRaw = (req.query.search || '').toString().trim();
+    const sortParam = (req.query.sort || '').toString().trim().toLowerCase();
+
+    const schema = await getFavoritesSchema();
+
+    const params = [];
+    const filters = [];
+
+    if (!includeDeleted) {
+      filters.push('f.deleted_at IS NULL');
+    }
+
+    if (userFilter) {
+      params.push(userFilter);
+      filters.push(`f.user_id = $${params.length}`);
+    }
+
+    filters.push('(l.deleted_at IS NULL OR l.id IS NULL)');
+    filters.push('(li.deleted_at IS NULL OR li.id IS NULL)');
+
+    const joinClauses = [];
+    let selectColumns = [];
+
+    const targetTypeExpr = schema.hasListColumns
+      ? "CASE WHEN f.list_item_id IS NOT NULL THEN 'item' ELSE 'list' END"
+      : "LOWER(COALESCE(f.target_type, ''))";
+
+    const targetIdExpr = schema.hasListColumns
+      ? 'CASE WHEN f.list_item_id IS NOT NULL THEN f.list_item_id ELSE f.list_id END'
+      : 'f.target_id';
+
+    const sameTargetCondition = schema.hasListColumns
+      ? `((f.list_item_id IS NOT NULL AND fav.list_item_id = f.list_item_id) OR (f.list_item_id IS NULL AND fav.list_id = f.list_id))`
+      : `(LOWER(COALESCE(fav.target_type, '')) = ${targetTypeExpr} AND fav.target_id = ${targetIdExpr})`;
+
+    const likersJoin = `LEFT JOIN LATERAL (
+      SELECT
+        COUNT(*)::int AS total_likers,
+        json_agg(
+          json_build_object(
+            'id', fav.user_id,
+            'email', fav_u.email,
+            'username', fav_u.username,
+            'name', COALESCE(NULLIF(fav_u.full_name, ''), fav_u.username),
+            'favorited_at', fav.created_at
+          )
+          ORDER BY fav.created_at DESC
+        ) AS likers
+      FROM public.favorites fav
+      JOIN public.users fav_u ON fav_u.id = fav.user_id
+      WHERE ${sameTargetCondition}
+        ${includeDeleted ? '' : 'AND fav.deleted_at IS NULL'}
+    ) liker_details ON TRUE`;
+
+    if (schema.hasListColumns) {
+      joinClauses.push('JOIN public.users u ON u.id = f.user_id');
+      joinClauses.push('LEFT JOIN public.list_items li ON f.list_item_id = li.id');
+      joinClauses.push('LEFT JOIN public.lists l ON COALESCE(f.list_id, li.list_id) = l.id');
+      joinClauses.push('LEFT JOIN public.users entity_owner ON entity_owner.id = COALESCE(li.owner_id, l.owner_id)');
+      joinClauses.push('LEFT JOIN public.users list_owner ON l.owner_id = list_owner.id');
+      if (schema.columns.includes('category_id')) {
+        joinClauses.push('LEFT JOIN public.favorite_categories fc ON f.category_id = fc.id');
+      }
+      joinClauses.push(likersJoin);
+
+      selectColumns = [
+        'f.id',
+        'f.user_id',
+        'u.email AS user_email',
+        'u.username AS user_username',
+        "COALESCE(NULLIF(u.full_name, ''), u.username) AS user_name",
+        "CASE WHEN f.list_item_id IS NOT NULL THEN 'item' ELSE 'list' END AS target_type",
+        'CASE WHEN f.list_item_id IS NOT NULL THEN f.list_item_id ELSE f.list_id END AS target_id',
+        'COALESCE(f.list_id, li.list_id) AS target_list_id',
+        'f.list_id',
+        'f.list_item_id AS item_id',
+        'COALESCE(li.title, l.title) AS target_title',
+        'l.title AS list_title',
+        'li.title AS item_title',
+        'f.created_at',
+        'f.updated_at',
+        'f.deleted_at',
+        'entity_owner.id AS entity_owner_id',
+        'entity_owner.email AS entity_owner_email',
+        'entity_owner.username AS entity_owner_username',
+        "COALESCE(NULLIF(entity_owner.full_name, ''), entity_owner.username) AS entity_owner_name",
+        'l.owner_id AS list_owner_id',
+        'list_owner.email AS list_owner_email',
+        'list_owner.username AS list_owner_username',
+        "COALESCE(NULLIF(list_owner.full_name, ''), list_owner.username) AS list_owner_name",
+        'li.owner_id AS item_owner_id',
+        'l.list_type AS list_type',
+        'l.is_public AS list_is_public',
+        'li.status AS item_status',
+        'li.price AS item_price',
+        'li.priority AS item_priority',
+        'li.link AS item_link',
+        'li.description AS item_description'
+      ];
+
+      if (schema.columns.includes('category_id')) {
+        selectColumns.push('f.category_id', 'fc.name AS category_name', 'fc.color AS category_color', 'fc.icon AS category_icon');
+      }
+      if (schema.columns.includes('is_public')) {
+        selectColumns.push('f.is_public');
+      }
+      if (schema.columns.includes('sort_order')) {
+        selectColumns.push('f.sort_order');
+      }
+      if (schema.columns.includes('notes')) {
+        selectColumns.push('f.notes');
+      }
+      if (schema.columns.includes('custom_fields')) {
+        selectColumns.push('f.custom_fields');
+      }
+      selectColumns.push('liker_details.total_likers', 'liker_details.likers');
+    } else {
+      const targetListExpr = schema.hasTargetListColumn ? 'f.target_list_id' : 'NULL::uuid';
+      const itemJoinCondition = schema.hasTargetColumns
+        ? "(LOWER(f.target_type) = 'item' AND f.target_id = li.id)"
+        : 'FALSE';
+      const listJoinConditions = [];
+      if (schema.hasTargetColumns) {
+        listJoinConditions.push("(LOWER(f.target_type) = 'list' AND f.target_id = l.id)");
+        listJoinConditions.push("(LOWER(f.target_type) = 'item' AND li.list_id = l.id)");
+        if (schema.hasTargetListColumn) {
+          listJoinConditions.push("(LOWER(f.target_type) = 'item' AND f.target_list_id = l.id)");
+        }
+      }
+      const listJoinCondition = listJoinConditions.length ? listJoinConditions.join(' OR ') : 'FALSE';
+
+      joinClauses.push('JOIN public.users u ON u.id = f.user_id');
+      joinClauses.push(`LEFT JOIN public.list_items li ON ${itemJoinCondition}`);
+      joinClauses.push(`LEFT JOIN public.lists l ON ${listJoinCondition}`);
+      joinClauses.push('LEFT JOIN public.users entity_owner ON entity_owner.id = COALESCE(li.owner_id, l.owner_id)');
+      joinClauses.push('LEFT JOIN public.users list_owner ON l.owner_id = list_owner.id');
+      if (schema.columns.includes('category_id')) {
+        joinClauses.push('LEFT JOIN public.favorite_categories fc ON f.category_id = fc.id');
+      }
+      joinClauses.push(likersJoin);
+
+      selectColumns = [
+        'f.id',
+        'f.user_id',
+        'u.email AS user_email',
+        'u.username AS user_username',
+        "COALESCE(NULLIF(u.full_name, ''), u.username) AS user_name",
+        "LOWER(COALESCE(f.target_type, '')) AS target_type",
+        'f.target_id',
+        `${targetListExpr} AS target_list_id`,
+        `CASE WHEN LOWER(COALESCE(f.target_type, '')) = 'list' THEN f.target_id ELSE ${targetListExpr} END AS list_id`,
+        "CASE WHEN LOWER(COALESCE(f.target_type, '')) = 'item' THEN f.target_id ELSE NULL END AS item_id",
+        "CASE WHEN LOWER(COALESCE(f.target_type, '')) = 'item' THEN li.title ELSE l.title END AS target_title",
+        'l.title AS list_title',
+        'li.title AS item_title',
+        'f.created_at',
+        'f.updated_at',
+        'f.deleted_at',
+        'entity_owner.id AS entity_owner_id',
+        'entity_owner.email AS entity_owner_email',
+        'entity_owner.username AS entity_owner_username',
+        "COALESCE(NULLIF(entity_owner.full_name, ''), entity_owner.username) AS entity_owner_name",
+        'l.owner_id AS list_owner_id',
+        'list_owner.email AS list_owner_email',
+        'list_owner.username AS list_owner_username',
+        "COALESCE(NULLIF(list_owner.full_name, ''), list_owner.username) AS list_owner_name",
+        'li.owner_id AS item_owner_id',
+        'l.list_type AS list_type',
+        'l.is_public AS list_is_public',
+        'li.status AS item_status',
+        'li.price AS item_price',
+        'li.priority AS item_priority',
+        'li.link AS item_link',
+        'li.description AS item_description'
+      ];
+
+      if (schema.columns.includes('category_id')) {
+        selectColumns.push('f.category_id', 'fc.name AS category_name', 'fc.color AS category_color', 'fc.icon AS category_icon');
+      }
+      if (schema.columns.includes('is_public')) {
+        selectColumns.push('f.is_public');
+      }
+      if (schema.columns.includes('sort_order')) {
+        selectColumns.push('f.sort_order');
+      }
+      if (schema.columns.includes('notes')) {
+        selectColumns.push('f.notes');
+      }
+      if (schema.columns.includes('custom_fields')) {
+        selectColumns.push('f.custom_fields');
+      }
+      selectColumns.push('liker_details.total_likers', 'liker_details.likers');
+    }
+
+    const searchTerm = searchTermRaw.toLowerCase();
+    if (searchTerm) {
+      params.push(`%${searchTerm}%`);
+      const idx = params.length;
+      const searchableExpressions = [
+        'LOWER(u.email)',
+        'LOWER(u.username)',
+        "LOWER(COALESCE(u.full_name, ''))",
+        "LOWER(COALESCE(entity_owner.email, ''))",
+        "LOWER(COALESCE(entity_owner.username, ''))",
+        "LOWER(COALESCE(entity_owner.full_name, ''))",
+        "LOWER(COALESCE(l.title, ''))",
+        "LOWER(COALESCE(li.title, ''))",
+      ];
+      if (schema.columns.includes('notes')) {
+        searchableExpressions.push("LOWER(COALESCE(f.notes, ''))");
+      }
+      filters.push(`(${searchableExpressions.map((expr) => `${expr} LIKE $${idx}`).join(' OR ')})`);
+    }
+
+    const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const joinsSql = joinClauses.length ? joinClauses.join('\n    ') : '';
+
+    let orderClause = 'ORDER BY f.created_at DESC';
+    if (sortParam) {
+      const [field, directionRaw] = sortParam.split(':');
+      const direction = directionRaw === 'asc' ? 'ASC' : 'DESC';
+      switch (field) {
+        case 'created_at':
+          orderClause = `ORDER BY f.created_at ${direction}`;
+          break;
+        case 'target_title':
+          orderClause = `ORDER BY target_title ${direction}, f.created_at DESC`;
+          break;
+        case 'target_type':
+          orderClause = `ORDER BY target_type ${direction}, target_title ASC`;
+          break;
+        case 'user':
+          orderClause = `ORDER BY u.email ${direction}, target_title ASC`;
+          break;
+        default:
+          break;
+      }
+    }
+
+    const limitIdx = params.length + 1;
+    const offsetIdx = params.length + 2;
+
+    const dataQuery = `
+      SELECT
+        ${selectColumns.join(',\n        ')}
+      FROM public.favorites f
+        ${joinsSql ? `\n        ${joinsSql}` : ''}
+      ${whereSql ? `${whereSql}\n` : ''}
+      ${orderClause}
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+    `;
+
+    const countQuery = `
+      SELECT COUNT(*)::int AS total
+      FROM public.favorites f
+        ${joinsSql ? `\n        ${joinsSql}` : ''}
+      ${whereSql}
+    `;
+
+    const queryParams = params.concat([limit, offset]);
+    const [dataResult, countResult] = await Promise.all([
+      db.query(dataQuery, queryParams),
+      db.query(countQuery, params),
+    ]);
+
+    const total = countResult.rows[0] ? Number(countResult.rows[0].total) : 0;
+    res.json({
+      favorites: dataResult.rows,
+      total,
+      limit,
+      offset,
+      hasMore: total > offset + dataResult.rows.length,
+    });
+  } catch (err) {
+    console.error('Admin favorites list error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// DELETE /v1.0/admin/favorites/:favoriteId – soft delete a favorite
+router.delete('/favorites/:favoriteId', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const { favoriteId } = req.params;
+    if (!favoriteId) {
+      return res.status(400).json({ message: 'Favorite ID is required' });
+    }
+
+    const schema = await getFavoritesSchema();
+    const updateColumns = schema.columns.includes('updated_at')
+      ? 'deleted_at = NOW(), updated_at = NOW()'
+      : 'deleted_at = NOW()';
+
+    const result = await db.query(
+      `UPDATE public.favorites
+         SET ${updateColumns}
+       WHERE id = $1
+       RETURNING id`,
+      [favoriteId],
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: 'Favorite not found' });
+    }
+
+    res.json({ success: true, id: result.rows[0].id });
+  } catch (err) {
+    console.error('Admin delete favorite error', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
