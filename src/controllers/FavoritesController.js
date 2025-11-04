@@ -411,27 +411,95 @@ function favoritesControllerFactory(socketService = null) {
     if (!userId) {
       return res.status(401).json({ error: 'User not authenticated' });
     }
-    const { list_id, list_item_id } = req.query;
-    if ((!list_id && !list_item_id) || (list_id && list_item_id)) {
-      return res.status(400).json({ error: 'Either list_id or list_item_id must be provided, but not both' });
+    const listIdParam = req.query.list_id ? String(req.query.list_id) : null;
+    const listItemIdParam = req.query.list_item_id ? String(req.query.list_item_id) : null;
+
+    if (!listIdParam && !listItemIdParam) {
+      return res.status(400).json({ error: 'Either list_id or list_item_id must be provided' });
     }
+
     try {
-      // Verify ownership
-      if (list_id) {
-        const ownQ = `SELECT owner_id FROM public.lists WHERE id = $1 AND deleted_at IS NULL`;
-        const ownRes = await db.query(ownQ, [list_id]);
-        if (ownRes.rows.length === 0) return res.status(404).json({ error: 'List not found' });
-        if (String(ownRes.rows[0].owner_id) !== String(userId)) return res.status(403).json({ error: 'Forbidden' });
-      } else if (list_item_id) {
-        const ownQ = `
-          SELECT l.owner_id
+      let resolvedListId = listIdParam;
+      let resolvedListItemId = listItemIdParam;
+
+      if (!resolvedListId && resolvedListItemId) {
+        const itemQuery = `
+          SELECT li.list_id
           FROM public.list_items li
-          JOIN public.lists l ON l.id = li.list_id
-          WHERE li.id = $1 AND li.deleted_at IS NULL AND l.deleted_at IS NULL
+          WHERE li.id = $1 AND li.deleted_at IS NULL
         `;
-        const ownRes = await db.query(ownQ, [list_item_id]);
-        if (ownRes.rows.length === 0) return res.status(404).json({ error: 'List item not found' });
-        if (String(ownRes.rows[0].owner_id) !== String(userId)) return res.status(403).json({ error: 'Forbidden' });
+        const itemRes = await db.query(itemQuery, [resolvedListItemId]);
+        if (itemRes.rows.length === 0) {
+          return res.status(404).json({ error: 'List item not found' });
+        }
+        resolvedListId = String(itemRes.rows[0].list_id);
+      }
+
+      if (!resolvedListId) {
+        return res.status(400).json({ error: 'Unable to determine parent list for favorites lookup' });
+      }
+
+      if (listIdParam && resolvedListId && String(listIdParam) !== String(resolvedListId)) {
+        return res.status(400).json({ error: 'Provided list_id does not match the list for the specified list_item_id' });
+      }
+
+      // Verify viewer access (owner, public list, or collaborator/group member)
+      const listMetaQuery = `
+        SELECT l.owner_id, COALESCE(l.is_public, false) AS is_public
+        FROM public.lists l
+        WHERE l.id = $1 AND l.deleted_at IS NULL
+      `;
+      const listMetaRes = await db.query(listMetaQuery, [resolvedListId]);
+      if (listMetaRes.rows.length === 0) {
+        return res.status(404).json({ error: 'List not found' });
+      }
+
+      const { owner_id: ownerId, is_public: isPublic } = listMetaRes.rows[0];
+      const isOwner = String(ownerId) === String(userId);
+      let canView = isOwner || Boolean(isPublic);
+
+      if (!canView) {
+        const directAccessRes = await db.query(
+          `
+            SELECT 1
+            FROM public.list_collaborators lc
+            WHERE lc.list_id = $1
+              AND lc.user_id = $2
+            LIMIT 1
+          `,
+          [resolvedListId, userId]
+        );
+
+        if (directAccessRes.rows.length > 0) {
+          canView = true;
+        } else {
+          try {
+            const groupAccessRes = await db.query(
+              `SELECT public.user_can_access_list_through_group($2::uuid, $1::uuid) AS can_access`,
+              [resolvedListId, userId]
+            );
+            canView = Boolean(groupAccessRes.rows?.[0]?.can_access);
+          } catch (groupErr) {
+            // Function might not exist on older schemas – fallback to explicit join
+            const legacyGroupRes = await db.query(
+              `
+                SELECT 1
+                FROM public.collaboration_group_lists cgl
+                JOIN public.collaboration_group_members cgm ON cgl.group_id = cgm.group_id
+                WHERE cgl.list_id = $1
+                  AND cgm.user_id = $2
+                  AND (cgm.deleted_at IS NULL OR cgm.deleted_at > NOW())
+                LIMIT 1
+              `,
+              [resolvedListId, userId]
+            );
+            canView = legacyGroupRes.rows.length > 0;
+          }
+        }
+      }
+
+      if (!canView) {
+        return res.status(403).json({ error: 'Forbidden' });
       }
 
       // Detect schema
@@ -442,6 +510,9 @@ function favoritesControllerFactory(socketService = null) {
       const hasListColumns = columnNames.includes('list_id') && columnNames.includes('list_item_id');
 
       let result;
+      const targetValue = resolvedListItemId ?? resolvedListId;
+      const useListItem = Boolean(resolvedListItemId);
+
       if (hasListColumns) {
         const query = `
           SELECT f.id,
@@ -455,14 +526,14 @@ function favoritesControllerFactory(socketService = null) {
                  NULLIF(u.profile_image_url::text, '') AS avatar_url
           FROM public.favorites f
           JOIN public.users u ON u.id = f.user_id
-          WHERE ${list_id ? 'f.list_id = $1' : 'f.list_item_id = $1'}
+          WHERE ${useListItem ? 'f.list_item_id = $1' : 'f.list_id = $1'}
             AND f.deleted_at IS NULL
           ORDER BY f.created_at DESC
         `;
-        const params = [list_id || list_item_id];
+        const params = [targetValue];
         result = await db.query(query, params);
       } else {
-        const isList = !!list_id;
+        const isList = !useListItem;
         const query = `
           SELECT f.id,
                  f.user_id,
@@ -478,10 +549,10 @@ function favoritesControllerFactory(socketService = null) {
           WHERE f.target_type = $1 AND f.target_id = $2 AND f.deleted_at IS NULL
           ORDER BY f.created_at DESC
         `;
-        const params = [isList ? 'list' : 'item', list_id || list_item_id];
+        const params = [isList ? 'list' : 'item', targetValue];
         result = await db.query(query, params);
       }
-      
+
       return res.status(200).json({ data: result.rows });
     } catch (error) {
       console.log('[FavoritesController] Error getting likers:', error);
