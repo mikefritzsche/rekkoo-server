@@ -190,6 +190,13 @@ function syncControllerFactory(socketService) {
           const deletedInfo = notificationData.deletedItemIds ? ` with ${notificationData.deletedItemIds.length} deleted items` : (notificationData.itemId ? ` itemId: ${notificationData.itemId}` : '');
           logger.info(`[SyncController] Notifying user ${member.user_id} about list ${listId} update (operations: ${operationsArray.join(', ')})${deletedInfo}`);
           socketService.notifyUser(member.user_id, 'list_update', notificationData);
+          socketService.notifyUser(member.user_id, 'sync_update_available', {
+            forced: true,
+            listId,
+            operations: operationsArray,
+            sourceUserId: userId,
+            timestamp: Date.now(),
+          });
         }
       }
     } catch (error) {
@@ -1724,6 +1731,23 @@ function syncControllerFactory(socketService) {
       // After transaction completes successfully
       // Notify group members about list_item changes
       await notifyGroupMembersOfListChanges(results, userId);
+
+      const affectedListIds = Array.from(
+        new Set(
+          (results || [])
+            .filter((result) => result?.tableName === 'list_items' && result?.listId)
+            .map((result) => result.listId)
+        )
+      );
+
+      if (affectedListIds.length > 0) {
+        socketService.notifyUser(userId, 'sync_update_available', {
+          forced: true,
+          listIds: affectedListIds,
+          timestamp: Date.now(),
+          source: 'push_update',
+        });
+      }
 
       for (const notification of favoriteNotifications.values()) {
         try {

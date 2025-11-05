@@ -173,6 +173,30 @@ class SocketService {
         socket.leave(roomId);
       });
 
+      socket.on('force_full_sync', (data = {}) => {
+        const userId = socket.user?.id;
+        if (!userId) {
+          console.warn(`[SocketService] force_full_sync received from unauthenticated socket ${socket.id}`);
+          socket.emit('sync_error', { message: 'Not authorized for force_full_sync' });
+          return;
+        }
+
+        const payload = {
+          forced: true,
+          requestedBy: userId,
+          reason: data.reason || 'manual',
+          timestamp: new Date().toISOString(),
+        };
+
+        console.log(`[SocketService] force_full_sync requested by user ${userId}. Reason: ${payload.reason}`);
+        try {
+          this.emitToUser(userId, 'sync_update_available', payload);
+        } catch (error) {
+          console.error('[SocketService] Failed to broadcast force_full_sync notification:', error);
+          socket.emit('sync_error', { message: 'Failed to notify other sessions' });
+        }
+      });
+
       socket.on('disconnect', (reason) => {
         console.log(`Client disconnected: socket ID ${socket.id}, user ID ${socket.user?.id}. Reason: ${reason}`);
       });
@@ -388,6 +412,10 @@ class SocketService {
   }
 
   // Emit to specific user room
+  emitToUser(userId, event, data) {
+    this.notifyUser(userId, event, data);
+  }
+
   notifyUser(userId, event, data) {
     console.log(`SocketService: notifyUser called for userId: ${userId}, event: ${event}. Timestamp: ${Date.now()}`); // DEBUG TIMESTAMP
     const userRoom = `user_${userId}`;
