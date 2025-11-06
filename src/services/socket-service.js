@@ -181,11 +181,21 @@ class SocketService {
           return;
         }
 
+        console.log('[SocketService] force_full_sync payload received:', {
+          data,
+          socketId: socket.id,
+          userId,
+          timestamp: Date.now(),
+        });
+
         const payload = {
           forced: true,
           requestedBy: userId,
           reason: data.reason || 'manual',
           timestamp: new Date().toISOString(),
+          listId: data.listId || data.list_id || null,
+          itemId: data.itemId || data.item_id || null,
+          operations: Array.isArray(data.operations) ? data.operations : [],
         };
 
         console.log(`[SocketService] force_full_sync requested by user ${userId}. Reason: ${payload.reason}`);

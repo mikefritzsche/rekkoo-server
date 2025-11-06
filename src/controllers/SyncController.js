@@ -101,10 +101,11 @@ function syncControllerFactory(socketService) {
           if (!affectedLists.has(result.listId)) {
             affectedLists.set(result.listId, { 
               operations: new Set(),
-              deletedItemIds: []
+              deletedItemIds: [],
+              itemChanges: [],
             });
           }
-          
+
           const listInfo = affectedLists.get(result.listId);
           
           // Track what operations were performed
@@ -121,6 +122,28 @@ function syncControllerFactory(socketService) {
             operation = 'update';
           }
           listInfo.operations.add(operation);
+
+          const normalizedOperation =
+            result.operation === 'create'
+              ? 'create'
+              : result.operation === 'update'
+              ? 'update'
+              : result.operation === 'delete'
+              ? 'delete'
+              : operation === 'add'
+              ? 'create'
+              : operation === 'delete'
+              ? 'delete'
+              : 'update';
+
+          const itemId = result.serverId || result.clientRecordId || result.recordId;
+          if (itemId) {
+            listInfo.itemChanges.push({
+              operation: normalizedOperation,
+              itemId: itemId,
+              listId: result.listId,
+            });
+          }
         }
       }
       
@@ -164,10 +187,63 @@ function syncControllerFactory(socketService) {
             AND ls.deleted_at IS NULL
             AND cg.deleted_at IS NULL
             AND cg.owner_id != $2
+          UNION
+          SELECT DISTINCT luo.user_id
+          FROM list_user_overrides luo
+          WHERE luo.list_id = $1
+            AND luo.deleted_at IS NULL
+            AND luo.role NOT IN ('blocked','inherit')
+            AND luo.user_id != $2
+          UNION
+          SELECT DISTINCT conn_user_id
+          FROM (
+            SELECT c.connection_id AS conn_user_id
+            FROM connections c
+            WHERE c.user_id = (SELECT owner_id FROM lists WHERE id = $1)
+              AND c.status = 'accepted'
+            UNION
+            SELECT c.user_id AS conn_user_id
+            FROM connections c
+            WHERE c.connection_id = (SELECT owner_id FROM lists WHERE id = $1)
+              AND c.status = 'accepted'
+          ) owner_connections
+          WHERE conn_user_id != $2
         `;
         
         const { rows: members } = await db.query(groupMembersQuery, [listId, userId]);
-        
+
+        const listItemChanges = listInfo.itemChanges || [];
+        const itemDataMap = new Map();
+        try {
+          const idsToFetch = Array.from(
+            new Set(
+              listItemChanges
+                .filter((change) => change && change.operation !== 'delete' && change.itemId)
+                .map((change) => String(change.itemId))
+            )
+          );
+
+          if (idsToFetch.length > 0) {
+            const { rows: itemRows } = await db.query(
+              `SELECT li.id::text AS id,
+                      li.list_id::text AS list_id,
+                      to_jsonb(li.*) AS item_json
+                 FROM public.list_items li
+                WHERE li.id = ANY($1::uuid[])`,
+              [idsToFetch]
+            );
+
+            itemRows.forEach((row) => {
+              itemDataMap.set(row.id, {
+                json: row.item_json,
+                list_id: row.list_id,
+              });
+            });
+          }
+        } catch (snapshotError) {
+          logger.error('[SyncController] Failed to prefetch list item snapshots for shared viewers:', snapshotError);
+        }
+
         // Notify each group member about the list update
         const operationsArray = Array.from(operations);
         for (const member of members) {
@@ -197,6 +273,78 @@ function syncControllerFactory(socketService) {
             sourceUserId: userId,
             timestamp: Date.now(),
           });
+
+          if (listItemChanges.length > 0) {
+            for (const change of listItemChanges) {
+              if (!change || !change.itemId) continue;
+
+              const itemIdStr = String(change.itemId);
+              const normalizedOp =
+                change.operation === 'create'
+                  ? 'create'
+                  : change.operation === 'delete'
+                  ? 'delete'
+                  : 'update';
+
+              let changePayload = null;
+              if (normalizedOp === 'delete') {
+                changePayload = {
+                  id: itemIdStr,
+                  list_id: change.listId ? String(change.listId) : null,
+                  deleted_at: new Date().toISOString(),
+                };
+              } else {
+                const snapshot = itemDataMap.get(itemIdStr);
+                if (snapshot && snapshot.json) {
+                  changePayload = snapshot.json;
+                } else {
+                  try {
+                    const { rows: fallbackRows } = await db.query(
+                      `SELECT li.id::text AS id,
+                              li.list_id::text AS list_id,
+                              to_jsonb(li.*) AS item_json
+                         FROM public.list_items li
+                        WHERE li.id = $1
+                        LIMIT 1`,
+                      [itemIdStr]
+                    );
+                    if (fallbackRows.length > 0) {
+                      changePayload = fallbackRows[0].item_json;
+                      itemDataMap.set(fallbackRows[0].id, {
+                        json: fallbackRows[0].item_json,
+                        list_id: fallbackRows[0].list_id,
+                      });
+                    }
+                  } catch (fallbackErr) {
+                    logger.error('[SyncController] Failed to fetch fallback list item snapshot for change log:', fallbackErr);
+                  }
+                }
+              }
+
+              try {
+                await db.query(
+                  `INSERT INTO public.change_log (table_name, record_id, operation, user_id, change_data, created_at)
+                   VALUES ($1, $2, $3, $4, $5::jsonb, NOW())`,
+                  [
+                    'list_items',
+                    itemIdStr,
+                    normalizedOp,
+                    member.user_id,
+                    changePayload ? JSON.stringify(changePayload) : null,
+                  ]
+                );
+              } catch (changeLogError) {
+                if (changeLogError?.code !== '23505') {
+                  logger.error('[SyncController] Failed to enqueue list item change for shared user:', {
+                    userId: member.user_id,
+                    itemId: itemIdStr,
+                    operation: normalizedOp,
+                    error: changeLogError,
+                  });
+                }
+              }
+            }
+          }
         }
       }
     } catch (error) {
@@ -220,7 +368,7 @@ function syncControllerFactory(socketService) {
 
     const placeholders = normalizedIds;
 
-    const [groupRoleResult, legacyShareResult, individualShareResult] = await Promise.all([
+    const [groupRoleResult, legacyShareResult, individualShareResult, ownerConnectionsResult] = await Promise.all([
       db.query(
         `SELECT lgr.list_id::text AS list_id,
                 lgr.group_id::text AS group_id,
@@ -239,7 +387,7 @@ function syncControllerFactory(socketService) {
          FROM public.list_sharing ls
          LEFT JOIN public.collaboration_groups cg ON cg.id = ls.shared_with_group_id
          WHERE ls.list_id = ANY($1::uuid[])
-           AND ls.deleted_at IS NULL
+         AND ls.deleted_at IS NULL
            AND ls.shared_with_group_id IS NOT NULL`,
         [placeholders]
       ),
@@ -250,6 +398,23 @@ function syncControllerFactory(socketService) {
          WHERE luo.list_id = ANY($1::uuid[])
            AND luo.deleted_at IS NULL
            AND luo.role NOT IN ('blocked','inherit')`,
+        [placeholders]
+      ),
+      db.query(
+        `SELECT DISTINCT l.id::text AS list_id,
+                CASE
+                  WHEN c.user_id = l.owner_id THEN c.connection_id::text
+                  ELSE c.user_id::text
+                END AS user_id
+         FROM public.lists l
+         JOIN public.connections c
+           ON (c.user_id = l.owner_id OR c.connection_id = l.owner_id)
+         WHERE l.id = ANY($1::uuid[])
+           AND c.status = 'accepted'
+           AND CASE
+                 WHEN c.user_id = l.owner_id THEN c.connection_id
+                 ELSE c.user_id
+               END IS NOT NULL`,
         [placeholders]
       ),
     ]);
@@ -282,11 +447,14 @@ function syncControllerFactory(socketService) {
     groupRoleResult.rows.forEach(processGroupRow);
     legacyShareResult.rows.forEach(processGroupRow);
 
-    individualShareResult.rows.forEach((row) => {
+    const appendConnectionShare = (row) => {
       if (!row || !row.list_id || !row.user_id) return;
       const entry = ensureEntry(row.list_id);
       entry.connectionIds.add(row.user_id);
-    });
+    };
+
+    individualShareResult.rows.forEach(appendConnectionShare);
+    ownerConnectionsResult.rows.forEach(appendConnectionShare);
 
     const result = new Map();
     metadataMap.forEach((value, key) => {
