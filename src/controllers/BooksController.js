@@ -1,5 +1,6 @@
 const fetch = require('node-fetch');
 const { cacheFetch } = require('../utils/cache.js');
+const { query } = require('../config/db');
 
 /**
  * Factory function that creates a BooksController
@@ -73,10 +74,59 @@ function booksControllerFactory(socketService = null) {
     }
   };
 
+  const getBookDetailByRecordId = async (req, res) => {
+    try {
+      const { id } = req.params;
+      if (!id) {
+        return res.status(400).json({ error: 'book_detail_id is required' });
+      }
+
+      const detailResult = await query(
+        'SELECT * FROM book_details WHERE id = $1 OR list_item_id = $1 LIMIT 1',
+        [id],
+      );
+
+      if (!detailResult.rows.length) {
+        return res.status(404).json({ error: 'Book detail record not found' });
+      }
+
+      const bookDetail = detailResult.rows[0];
+      const googleBookId =
+        bookDetail.google_book_id ||
+        bookDetail.googleBooksId ||
+        bookDetail.source_id ||
+        bookDetail.sourceId ||
+        null;
+
+      let googleVolume = null;
+      if (googleBookId) {
+        googleVolume = await cacheFetch(
+          'book-volume-detail',
+          { googleBookId },
+          async () => {
+            const url = `https://www.googleapis.com/books/v1/volumes/${googleBookId}`;
+            const response = await fetch(url);
+            if (!response.ok) {
+              throw new Error(`Failed to fetch Google volume ${googleBookId}: ${response.status}`);
+            }
+            return response.json();
+          },
+          60 * 5,
+        );
+      }
+
+      return res.json({ bookDetail, googleVolume, googleBookId });
+    } catch (error) {
+      console.error('Book detail resolve error:', error);
+      return res.status(500).json({ error: 'Internal Server Error' });
+    }
+  };
+
   // Return all controller methods
   return {
     searchBooks,
-    getBookDetails
+    getBookDetails,
+    getBookDetailByRecordId,
   };
 }
 

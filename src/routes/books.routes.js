@@ -23,6 +23,13 @@ function createBooksRouter(booksController) {
    */
   router.get('/volume/details/:id', booksController.getBookDetails);
 
+  /**
+   * @route GET /details/by-record/:id
+   * @desc Get book details by book_detail_id (connection-safe)
+   * @access Private (requires auth)
+   */
+  router.get('/details/by-record/:id', authenticateJWT, booksController.getBookDetailByRecordId);
+
   return router;
 }
 
