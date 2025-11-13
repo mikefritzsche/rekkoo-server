@@ -3,6 +3,9 @@ const Mailjet = require('node-mailjet');
 // Load environment variables
 require('dotenv').config({ path: require('path').resolve(__dirname, '../../../.env.common') });
 
+const FROM_EMAIL = 'support@rekkoo.com';
+const FROM_NAME = 'Rekkoo Support';
+
 const MAILJET_ENABLED = !!process.env.MJ_APIKEY_PUBLIC && !!process.env.MJ_APIKEY_PRIVATE;
 
 let mailjet = null;
@@ -44,7 +47,7 @@ const sendPasswordResetEmail = async (toEmail, resetToken) => {
       "Messages": [
         {
           "From": {
-            "Email": "mike@mikefritzsche.com", // <-- IMPORTANT: Replace with your verified Mailjet sender email
+            "Email": FROM_EMAIL,
             "Name": "Rekkoo App" // <-- Optional: Sender name
           },
           "To": [
@@ -94,7 +97,7 @@ const sendVerificationEmail = async (toEmail, username, verificationToken) => {
       "Messages": [
         {
           "From": {
-            "Email": "mike@mikefritzsche.com", // Should be same as password reset
+            "Email": FROM_EMAIL, // Should be same as password reset
             "Name": "Rekkoo App"
           },
           "To": [
@@ -138,7 +141,7 @@ const sendInvitationEmail = async (toEmail, invitationToken, invitationCode, inv
       "Messages": [
         {
           "From": {
-            "Email": "mike@mikefritzsche.com",
+            "Email": FROM_EMAIL,
             "Name": "Rekkoo App"
           },
           "To": [
@@ -169,7 +172,7 @@ const sendSupportEmail = async ({ fromEmail, fromName, subject, message, metadat
     return { disabled: true };
   }
 
-  const supportEmail = process.env.SUPPORT_EMAIL || 'support@mikefritzsche.com';
+  const supportEmail = process.env.SUPPORT_EMAIL || 'support@rekkoo.com';
   const safeSubject = subject?.trim() || `Support request from ${fromEmail}`;
   const safeMessage = message?.trim() || '(no message provided)';
   const metaString = Object.keys(metadata || {}).length
@@ -182,7 +185,7 @@ const sendSupportEmail = async ({ fromEmail, fromName, subject, message, metadat
       Messages: [
         {
           From: {
-            Email: 'mike@mikefritzsche.com',
+            Email: 'support@rekkoo.com',
             Name: 'Rekkoo Support',
           },
           To: [
