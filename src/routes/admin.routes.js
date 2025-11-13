@@ -102,6 +102,139 @@ router.get('/roles', authenticateJWT, async (req, res) => {
   }
 });
 
+// POST /v1.0/admin/roles – create or restore a role
+router.post('/roles', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const { name, description } = req.body || {};
+    if (!name || typeof name !== 'string') {
+      return res.status(400).json({ message: 'Role name is required' });
+    }
+
+    const normalizedName = name.trim();
+    if (!normalizedName) {
+      return res.status(400).json({ message: 'Role name cannot be empty' });
+    }
+
+    const existing = await db.query(
+      `SELECT id, deleted_at FROM roles WHERE LOWER(name) = LOWER($1) LIMIT 1`,
+      [normalizedName],
+    );
+
+    let roleRow;
+    if (existing.rows.length) {
+      const role = existing.rows[0];
+      if (role.deleted_at) {
+        const { rows } = await db.query(
+          `UPDATE roles
+           SET deleted_at = NULL,
+               name = $2,
+               description = $3
+           WHERE id = $1
+           RETURNING id, name, description, created_at`,
+          [role.id, normalizedName, description || null],
+        );
+        roleRow = rows[0];
+      } else {
+        return res.status(409).json({ message: 'Role name already exists' });
+      }
+    } else {
+      const { rows } = await db.query(
+        `INSERT INTO roles (name, description)
+         VALUES ($1, $2)
+         RETURNING id, name, description, created_at`,
+        [normalizedName, description || null],
+      );
+      roleRow = rows[0];
+    }
+
+    return res.status(201).json({ role: roleRow });
+  } catch (err) {
+    console.error('Admin create role error', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// PUT /v1.0/admin/roles/:roleId – update name/description
+router.put('/roles/:roleId', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const { roleId } = req.params;
+    const { name, description } = req.body || {};
+
+    if (!name && description === undefined) {
+      return res.status(400).json({ message: 'Nothing to update' });
+    }
+
+    if (name && !name.trim()) {
+      return res.status(400).json({ message: 'Role name cannot be empty' });
+    }
+
+    if (name) {
+      const { rows } = await db.query(
+        `SELECT id FROM roles
+         WHERE LOWER(name) = LOWER($1) AND id <> $2 AND deleted_at IS NULL
+         LIMIT 1`,
+        [name.trim(), roleId],
+      );
+      if (rows.length) {
+        return res.status(409).json({ message: 'Role name already exists' });
+      }
+    }
+
+    const { rows } = await db.query(
+      `UPDATE roles
+       SET name = COALESCE($2, name),
+           description = $3
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id, name, description, created_at`,
+      [roleId, name ? name.trim() : null, description ?? null],
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Role not found' });
+    }
+
+    return res.json({ role: rows[0] });
+  } catch (err) {
+    console.error('Admin update role error', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// DELETE /v1.0/admin/roles/:roleId – soft delete role
+router.delete('/roles/:roleId', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const { roleId } = req.params;
+    const { rows } = await db.query(
+      `UPDATE roles
+       SET deleted_at = NOW()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id`,
+      [roleId],
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Role not found' });
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('Admin delete role error', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // PUT /v1.0/admin/users/:userId/roles – assign/remove roles for a user
 router.put('/users/:userId/roles', authenticateJWT, async (req, res) => {
   try {

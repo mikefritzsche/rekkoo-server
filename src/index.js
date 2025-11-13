@@ -84,6 +84,8 @@ const osmRoutes = require('./routes/osm.routes');
 const giftRoutes = require('./routes/gifts.routes');
 const createGroupInvitationsController = require('./controllers/GroupInvitationsController');
 const createGroupInvitationsRoutes = require('./routes/group-invitations.routes');
+const bugReportsRouter = require('./routes/bug-reports.routes');
+const supportRoutes = require('./routes/support.routes');
 
 // --- 2. Initialize Express App and HTTP Server ---
 const app = express();
@@ -271,6 +273,8 @@ app.use('/v1.0/connections', createConnectionsRouter(connectionsController));
 app.use('/v1.0/preferences', createPreferencesRouter(preferencesController));
 app.use('/v1.0/groups', createGroupInvitationsRoutes(groupInvitationsController));
 app.use('/v1.0/gifts', giftRoutes);
+app.use('/v1.0/bugs', bugReportsRouter);
+app.use('/v1.0/support', supportRoutes);
 
 // --- 7. Basic/Utility Routes ---
 app.get('/api/v1.0/health', (req, res) => {

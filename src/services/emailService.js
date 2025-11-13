@@ -163,8 +163,64 @@ const sendInvitationEmail = async (toEmail, invitationToken, invitationCode, inv
   }
 };
 
+const sendSupportEmail = async ({ fromEmail, fromName, subject, message, metadata = {} }) => {
+  if (!MAILJET_ENABLED) {
+    console.info('[emailService] sendSupportEmail skipped (mail disabled).');
+    return { disabled: true };
+  }
+
+  const supportEmail = process.env.SUPPORT_EMAIL || 'support@mikefritzsche.com';
+  const safeSubject = subject?.trim() || `Support request from ${fromEmail}`;
+  const safeMessage = message?.trim() || '(no message provided)';
+  const metaString = Object.keys(metadata || {}).length
+    ? `<pre>${JSON.stringify(metadata, null, 2)}</pre>`
+    : '';
+
+  const request = mailjet
+    .post('send', { version: 'v3.1' })
+    .request({
+      Messages: [
+        {
+          From: {
+            Email: 'mike@mikefritzsche.com',
+            Name: 'Rekkoo Support',
+          },
+          To: [
+            {
+              Email: supportEmail,
+            },
+          ],
+          Subject: safeSubject,
+          ReplyTo: {
+            Email: fromEmail,
+            Name: fromName || fromEmail,
+          },
+          TextPart: `Support request from ${fromName || fromEmail}\n\n${safeMessage}\n\nMetadata:\n${JSON.stringify(
+            metadata,
+            null,
+            2,
+          )}`,
+          HTMLPart: `<h3>Support request</h3>
+            <p><strong>From:</strong> ${fromName || fromEmail} &lt;${fromEmail}&gt;</p>
+            <p><strong>Subject:</strong> ${safeSubject}</p>
+            <p>${safeMessage.replace(/\n/g, '<br/>')}</p>
+            ${metaString}`,
+        },
+      ],
+    });
+
+  try {
+    const result = await request;
+    return result.body;
+  } catch (err) {
+    console.error('Mailjet sendSupportEmail error:', err.statusCode, err.message, err.response?.body);
+    throw new Error('Failed to send support email.');
+  }
+};
+
 module.exports = {
   sendPasswordResetEmail,
   sendVerificationEmail,
-  sendInvitationEmail
-}; 
+  sendInvitationEmail,
+  sendSupportEmail,
+};
