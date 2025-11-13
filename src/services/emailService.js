@@ -5,6 +5,8 @@ require('dotenv').config({ path: require('path').resolve(__dirname, '../../../.e
 
 const FROM_EMAIL = 'support@rekkoo.com';
 const FROM_NAME = 'Rekkoo Support';
+const SUPPORT_EMAIL = 'support@rekkoo.com';
+const SUPPORT_NAME = 'Rekkoo Support';
 
 const MAILJET_ENABLED = !!process.env.MJ_APIKEY_PUBLIC && !!process.env.MJ_APIKEY_PRIVATE;
 
@@ -21,7 +23,7 @@ if (MAILJET_ENABLED) {
 // Helper function to get appropriate base URL for the current environment
 const getAppBaseUrl = () => {
   const nodeEnv = process.env.NODE_ENV || 'development';
-  
+
   if (nodeEnv === 'production') {
     return 'https://app.rekkoo.com';
   } else {
@@ -56,6 +58,9 @@ const sendPasswordResetEmail = async (toEmail, resetToken) => {
               // "Name": "Recipient Name" // Optional
             }
           ],
+          Headers: {
+            "Reply-To": SUPPORT_EMAIL
+          },
           "Subject": "Reset Your Rekkoo Password",
           "TextPart": `Hi there,\n\nPlease reset your password by clicking the following link: ${resetLink}\n\nIf you didn't request this, please ignore this email.\n\nThanks,\nThe Rekkoo Team`,
           "HTMLPart": `<h3>Hi there,</h3><p>Please reset your password by clicking the following link:</p><p><a href="${resetLink}">${resetLink}</a></p><p>If you didn't request this, please ignore this email.</p><p>Thanks,<br/>The Rekkoo Team</p>`
@@ -105,6 +110,9 @@ const sendVerificationEmail = async (toEmail, username, verificationToken) => {
               "Email": toEmail
             }
           ],
+          Headers: {
+            "Reply-To": SUPPORT_EMAIL
+          },
           "Subject": "Verify Your Rekkoo Account",
           "TextPart": `Hi ${username},\n\nWelcome to Rekkoo! Please verify your email by clicking the following link: ${verificationLink}\n\nThis link will expire in 24 hours.\n\nThanks,\nThe Rekkoo Team`,
           "HTMLPart": `<h3>Hi ${username},</h3><p>Welcome to Rekkoo!</p><p>Please verify your email by clicking the following link:</p><p><a href="${verificationLink}">${verificationLink}</a></p><p>This link will expire in 24 hours.</p><p>Thanks,<br/>The Rekkoo Team</p>`
@@ -149,6 +157,9 @@ const sendInvitationEmail = async (toEmail, invitationToken, invitationCode, inv
               "Email": toEmail
             }
           ],
+          Headers: {
+            "Reply-To": SUPPORT_EMAIL
+          },
           "Subject": `${inviter.username} invited you to join Rekkoo!`,
           "TextPart": `Hi there,\n\n${inviter.username} has invited you to join Rekkoo!\n\n${customMessage ? `Personal message: "${customMessage}"\n\n` : ''}You can accept this invitation by:\n\n1. Clicking this link: ${invitationLink}\n2. Or using invitation code: ${invitationCode}\n\nThis invitation will expire in 7 days.\n\nThanks,\nThe Rekkoo Team`,
           "HTMLPart": `<h3>Hi there,</h3><p><strong>${inviter.username}</strong> has invited you to join Rekkoo!</p>${customMessage ? `<p><em>Personal message:</em> "${customMessage}"</p>` : ''}<p>You can accept this invitation by:</p><ol><li>Clicking this link: <a href="${invitationLink}">${invitationLink}</a></li><li>Or using invitation code: <strong>${invitationCode}</strong></li></ol><p>This invitation will expire in 7 days.</p><p>Thanks,<br/>The Rekkoo Team</p>`
@@ -193,6 +204,9 @@ const sendSupportEmail = async ({ fromEmail, fromName, subject, message, metadat
               Email: supportEmail,
             },
           ],
+          Headers: {
+            "Reply-To": SUPPORT_EMAIL
+          },
           Subject: safeSubject,
           ReplyTo: {
             Email: fromEmail,
