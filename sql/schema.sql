@@ -643,7 +643,7 @@ ALTER TABLE public.user_sessions OWNER TO admin;
 
 CREATE TABLE public.user_settings (
     theme character varying(20) DEFAULT 'light'::character varying,
-    notification_preferences jsonb DEFAULT '{"push": true, "email": true}'::jsonb,
+    notification_preferences jsonb DEFAULT '{"email_notifications": true, "emailInvitations": true, "channels": {"push": true, "email": true}, "marketing": {"newsletters": false, "productUpdates": true, "promotions": false}}'::jsonb,
     privacy_settings jsonb DEFAULT '{"show_activity": true, "public_profile": false}'::jsonb,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     user_id uuid DEFAULT public.uuid_generate_v4() NOT NULL,

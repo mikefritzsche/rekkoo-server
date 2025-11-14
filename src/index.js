@@ -28,6 +28,7 @@ console.log('🔧 Environment loaded from:', {
 // --- 1. Import Services and Route Initializers ---
 const SocketService = require('./services/socket-service');
 const NotificationService = require('./services/NotificationService');
+const hydrateNotificationPreferences = require('./utils/hydrateNotificationPreferences');
 
 // Import route *initializer functions* where needed
 const initializeChatRoutes = require('./routes/chat.routes');
@@ -114,6 +115,8 @@ const publicListsController = publicListsControllerFactory();
 const listTypesController = listTypesControllerFactory();
 const preferencesController = preferencesControllerFactory(socketService);
 const groupInvitationsController = createGroupInvitationsController(socketService);
+
+hydrateNotificationPreferences();
 
 console.log('CORS_ORIGIN', process.env.CORS_ORIGIN);
 

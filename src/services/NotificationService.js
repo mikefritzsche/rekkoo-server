@@ -1,22 +1,45 @@
 const db = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
-const nodemailer = require('nodemailer');
+const { sendNotificationEmail } = require('./emailService');
+
+const allowsEmailNotifications = (preferences = {}) => {
+  if (!preferences || typeof preferences !== 'object') {
+    return true;
+  }
+
+  const directKeys = ['email_notifications', 'emailInvitations', 'email'];
+  const explicitOptOut = directKeys.some((key) => preferences[key] === false);
+  if (explicitOptOut) {
+    return false;
+  }
+
+  const nestedChannels = [
+    ['notificationChannels', 'email'],
+    ['channels', 'email'],
+    ['invitations', 'email'],
+  ];
+
+  for (const [root, child] of nestedChannels) {
+    const branch = preferences[root];
+    if (branch && typeof branch === 'object' && branch[child] === false) {
+      return false;
+    }
+  }
+
+  const explicitAllow = directKeys
+    .map((key) => preferences[key])
+    .filter((value) => typeof value === 'boolean');
+
+  if (explicitAllow.length > 0) {
+    return explicitAllow.some((value) => value === true);
+  }
+
+  return true;
+};
 
 class NotificationService {
   constructor() {
     this.socketService = null;
-    // Initialize email transporter if email config is available
-    if (process.env.SMTP_HOST && process.env.SMTP_USER) {
-      this.emailTransporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST,
-        port: process.env.SMTP_PORT || 587,
-        secure: process.env.SMTP_SECURE === 'true',
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS
-        }
-      });
-    }
   }
 
   setSocketService(socketService) {
@@ -52,22 +75,22 @@ class NotificationService {
 
   // Send email notification
   async sendEmail({ to, subject, html, text }) {
-    if (!this.emailTransporter) {
-      console.log('Email transporter not configured, skipping email notification');
+    if (!to || !subject || !html) {
+      console.warn('[NotificationService] Missing fields for sendEmail', {
+        hasTo: !!to,
+        hasSubject: !!subject,
+        hasHtml: !!html,
+      });
       return;
     }
 
     try {
-      const mailOptions = {
-        from: process.env.SMTP_FROM || 'noreply@rekkoo.com',
-        to,
+      const result = await sendNotificationEmail({
+        toEmail: to,
         subject,
-        html,
-        text: text || html.replace(/<[^>]*>/g, '') // Strip HTML tags for text version
-      };
-
-      const result = await this.emailTransporter.sendMail(mailOptions);
-      console.log('Email sent successfully:', result.messageId);
+        htmlContent: html,
+        textContent: text,
+      });
       return result;
     } catch (error) {
       console.error('Error sending email:', error);
@@ -257,7 +280,7 @@ class NotificationService {
           });
 
           const prefs = recipient.notification_preferences || {};
-          if (prefs.email_notifications !== false && recipient.email && emailSubject && emailHtml) {
+          if (allowsEmailNotifications(prefs) && recipient.email && emailSubject && emailHtml) {
             await this.sendEmail({
               to: recipient.email,
               subject: emailSubject,

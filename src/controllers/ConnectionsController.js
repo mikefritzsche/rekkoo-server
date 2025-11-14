@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { v4: uuidv4 } = require('uuid');
+const { DEFAULT_NOTIFICATION_PREFERENCES } = require('../utils/notificationPreferences');
 
 /**
  * Factory function that creates a ConnectionsController
@@ -908,12 +909,12 @@ function connectionsControllerFactory(socketService = null) {
           };
 
           const newSettings = await db.query(
-            `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
-             VALUES ($1, $2, NOW(), NOW())
+            `INSERT INTO user_settings (user_id, privacy_settings, notification_preferences, created_at, updated_at)
+             VALUES ($1, $2, $3, NOW(), NOW())
              ON CONFLICT (user_id) DO UPDATE
              SET privacy_settings = $2, updated_at = NOW()
              RETURNING privacy_settings`,
-            [userId, JSON.stringify(defaultSettings)]
+            [userId, JSON.stringify(defaultSettings), DEFAULT_NOTIFICATION_PREFERENCES]
           );
           return res.json(newSettings.rows[0].privacy_settings);
         }
@@ -985,12 +986,12 @@ function connectionsControllerFactory(socketService = null) {
 
         // Update the database
         const result = await db.query(
-          `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
-           VALUES ($1, $2, NOW(), NOW())
+          `INSERT INTO user_settings (user_id, privacy_settings, notification_preferences, created_at, updated_at)
+           VALUES ($1, $2, $3, NOW(), NOW())
            ON CONFLICT (user_id) DO UPDATE
            SET privacy_settings = $2, updated_at = NOW()
            RETURNING privacy_settings`,
-          [userId, JSON.stringify(updatedSettings)]
+          [userId, JSON.stringify(updatedSettings), DEFAULT_NOTIFICATION_PREFERENCES]
         );
 
         res.json(result.rows[0].privacy_settings);

@@ -12,6 +12,10 @@ const Mailjet = require('node-mailjet');
 const emailService = require('../services/emailService');
 const { validationResult } = require('express-validator');
 const fetch = require('node-fetch');
+const {
+  DEFAULT_NOTIFICATION_PREFERENCES,
+  normalizeNotificationPreferences,
+} = require('../utils/notificationPreferences');
 
 // Prevent crash in dev when Mailjet keys are absent
 const MAILJET_ENABLED = !!process.env.MJ_APIKEY_PUBLIC && !!process.env.MJ_APIKEY_PRIVATE;
@@ -135,8 +139,8 @@ const register = async (req, res) => {
       );
 
       await client.query(
-        `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
-         VALUES ($1, $2, NOW(), NOW())
+        `INSERT INTO user_settings (user_id, privacy_settings, notification_preferences, created_at, updated_at)
+         VALUES ($1, $2, $3, NOW(), NOW())
          ON CONFLICT (user_id) DO NOTHING`,
         [userId, JSON.stringify({
           privacy_mode: 'standard',
@@ -148,7 +152,7 @@ const register = async (req, res) => {
           searchable_by_name: false,
           show_mutual_connections: false,
           connection_code: connectionCodeResult.rows[0].code
-        })]
+        }), DEFAULT_NOTIFICATION_PREFERENCES]
       );
 
       // Accept the invitation
@@ -635,6 +639,25 @@ const getCurrentUser = async (req, res) => {
 
     const dbUser = result.rows[0];
 
+    const {
+      value: normalizedNotificationPrefs,
+      needsHydration: shouldPersistNotificationPrefs,
+    } = normalizeNotificationPreferences(dbUser.user_notification_preferences);
+
+    if (shouldPersistNotificationPrefs) {
+      try {
+        await db.query(
+          `UPDATE user_settings
+           SET notification_preferences = $1,
+               updated_at = NOW()
+           WHERE user_id = $2`,
+          [normalizedNotificationPrefs, userId]
+        );
+      } catch (hydrateErr) {
+        console.warn('[AuthController] Failed to persist notification preference defaults:', hydrateErr.message);
+      }
+    }
+
     // Optionally, fetch other related data like active sessions, recent activity etc.
 
     return res.status(200).json({
@@ -650,7 +673,7 @@ const getCurrentUser = async (req, res) => {
         last_login_at: dbUser.last_login_at,
         settings: {
           theme: dbUser.user_theme,
-          notification_preferences: dbUser.user_notification_preferences,
+          notification_preferences: normalizedNotificationPrefs,
           privacy_settings: dbUser.user_privacy_settings,
           lists_header_image_url: dbUser.user_lists_header_image_url,
           lists_header_background_type: dbUser.user_lists_header_background_type,
@@ -960,8 +983,8 @@ const oauthCallback = async (req, res) => {
             );
 
             await client.query(
-              `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
-               VALUES ($1, $2, NOW(), NOW())
+              `INSERT INTO user_settings (user_id, privacy_settings, notification_preferences, created_at, updated_at)
+               VALUES ($1, $2, $3, NOW(), NOW())
                ON CONFLICT (user_id) DO NOTHING`,
               [user.id, JSON.stringify({
                 privacy_mode: 'standard',
@@ -973,7 +996,7 @@ const oauthCallback = async (req, res) => {
                 searchable_by_name: false,
                 show_mutual_connections: false,
                 connection_code: connectionCodeResult.rows[0].code
-              })]
+              }), DEFAULT_NOTIFICATION_PREFERENCES]
             );
           }
         } else {
@@ -1343,8 +1366,8 @@ const mobileOauth = async (req, res) => {
             );
 
             await client.query(
-              `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
-               VALUES ($1, $2, NOW(), NOW())
+              `INSERT INTO user_settings (user_id, privacy_settings, notification_preferences, created_at, updated_at)
+               VALUES ($1, $2, $3, NOW(), NOW())
                ON CONFLICT (user_id) DO NOTHING`,
               [user.id, JSON.stringify({
                 privacy_mode: 'standard',
@@ -1356,7 +1379,7 @@ const mobileOauth = async (req, res) => {
                 searchable_by_name: false,
                 show_mutual_connections: false,
                 connection_code: connectionCodeResult.rows[0].code
-              })]
+              }), DEFAULT_NOTIFICATION_PREFERENCES]
             );
 
             // Accept the invitation
@@ -1769,8 +1792,8 @@ const enhancedOAuthCallback = async (req, res) => {
           );
 
           await client.query(
-            `INSERT INTO user_settings (user_id, privacy_settings, created_at, updated_at)
-             VALUES ($1, $2, NOW(), NOW())
+            `INSERT INTO user_settings (user_id, privacy_settings, notification_preferences, created_at, updated_at)
+             VALUES ($1, $2, $3, NOW(), NOW())
              ON CONFLICT (user_id) DO NOTHING`,
             [user.id, JSON.stringify({
               privacy_mode: 'standard',
@@ -1782,7 +1805,7 @@ const enhancedOAuthCallback = async (req, res) => {
               searchable_by_name: false,
               show_mutual_connections: false,
               connection_code: connectionCodeResult.rows[0].code
-            })]
+            }), DEFAULT_NOTIFICATION_PREFERENCES]
           );
         } else {
           // No email provided and no existing user found

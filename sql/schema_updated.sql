@@ -15,8 +15,17 @@ CREATE TABLE user_settings
     user_id                  UUID PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
     theme                    VARCHAR(20)              DEFAULT 'light',
     notification_preferences JSONB                    DEFAULT '{
-      "email": true,
-      "push": true
+      "email_notifications": true,
+      "emailInvitations": true,
+      "channels": {
+        "push": true,
+        "email": true
+      },
+      "marketing": {
+        "newsletters": false,
+        "productUpdates": true,
+        "promotions": false
+      }
     }',
     privacy_settings         JSONB                    DEFAULT '{
       "public_profile": false,

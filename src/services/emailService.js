@@ -235,9 +235,65 @@ const sendSupportEmail = async ({ fromEmail, fromName, subject, message, metadat
   }
 };
 
+const sendNotificationEmail = async ({ toEmail, subject, htmlContent, textContent }) => {
+  if (!MAILJET_ENABLED) {
+    console.info('[emailService] sendNotificationEmail skipped (mail disabled).');
+    return { disabled: true };
+  }
+
+  if (!toEmail || !subject || !htmlContent) {
+    console.warn('[emailService] Missing fields for sendNotificationEmail', {
+      hasToEmail: !!toEmail,
+      hasSubject: !!subject,
+      hasHtml: !!htmlContent,
+    });
+    return { skipped: true };
+  }
+
+  const fallbackText =
+    htmlContent
+      ?.replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, ' ')
+      ?.replace(/<[^>]+>/g, ' ')
+      ?.replace(/\s+/g, ' ')
+      ?.trim() || '';
+
+  const request = mailjet
+    .post('send', { version: 'v3.1' })
+    .request({
+      Messages: [
+        {
+          From: {
+            Email: FROM_EMAIL,
+            Name: FROM_NAME,
+          },
+          To: [
+            {
+              Email: toEmail,
+            },
+          ],
+          Headers: {
+            'Reply-To': SUPPORT_EMAIL,
+          },
+          Subject: subject,
+          TextPart: textContent || fallbackText,
+          HTMLPart: htmlContent,
+        },
+      ],
+    });
+
+  try {
+    const result = await request;
+    return result.body;
+  } catch (err) {
+    console.error('Mailjet sendNotificationEmail error:', err.statusCode, err.message, err.response?.body);
+    throw new Error('Failed to send notification email.');
+  }
+};
+
 module.exports = {
   sendPasswordResetEmail,
   sendVerificationEmail,
   sendInvitationEmail,
   sendSupportEmail,
+  sendNotificationEmail,
 };
