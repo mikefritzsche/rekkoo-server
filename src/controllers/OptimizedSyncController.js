@@ -110,7 +110,11 @@ function optimizedSyncControllerFactory(socketService) {
         item_tags: new Set(),
         gift_reservations: new Set(),
         gift_purchase_groups: new Set(),
-        gift_contributions: new Set()
+        gift_contributions: new Set(),
+        secret_santa_rounds: new Set(),
+        secret_santa_round_participants: new Set(),
+        secret_santa_pairings: new Set(),
+        secret_santa_guest_invites: new Set()
       };
 
       // Collect all record IDs that need fetching
@@ -333,6 +337,85 @@ function optimizedSyncControllerFactory(socketService) {
         }
       }
 
+      if (recordIdsByTable.secret_santa_rounds.size > 0) {
+        const roundIds = Array.from(recordIdsByTable.secret_santa_rounds);
+        const roundsQuery = `
+          SELECT sr.*
+          FROM public.secret_santa_rounds sr
+          JOIN public.lists l ON sr.list_id = l.id
+          WHERE sr.id = ANY($1::uuid[])
+            AND sr.deleted_at IS NULL
+            AND (l.owner_id = $2 OR sr.list_id = ANY($3::uuid[]) OR sr.created_by = $2)
+        `;
+        const roundsResult = await db.query(roundsQuery, [roundIds, userId, listIdsArray]);
+        fetchedData.secret_santa_rounds = {};
+        for (const row of roundsResult.rows) {
+          fetchedData.secret_santa_rounds[row.id] = row;
+        }
+      }
+
+      if (recordIdsByTable.secret_santa_round_participants.size > 0) {
+        const participantIds = Array.from(recordIdsByTable.secret_santa_round_participants);
+        const participantsQuery = `
+          SELECT sp.*
+          FROM public.secret_santa_round_participants sp
+          JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
+          JOIN public.lists l ON sr.list_id = l.id
+          WHERE sp.id = ANY($1::uuid[])
+            AND sp.deleted_at IS NULL
+            AND (
+              sp.user_id = $2
+              OR l.owner_id = $2
+              OR sr.list_id = ANY($3::uuid[])
+            )
+        `;
+        const participantsResult = await db.query(participantsQuery, [participantIds, userId, listIdsArray]);
+        fetchedData.secret_santa_round_participants = {};
+        for (const row of participantsResult.rows) {
+          fetchedData.secret_santa_round_participants[row.id] = row;
+        }
+      }
+
+      if (recordIdsByTable.secret_santa_pairings.size > 0) {
+        const pairingIds = Array.from(recordIdsByTable.secret_santa_pairings);
+        const pairingsQuery = `
+          SELECT sp.*
+          FROM public.secret_santa_pairings sp
+          JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
+          JOIN public.lists l ON sr.list_id = l.id
+          WHERE sp.id = ANY($1::uuid[])
+            AND sp.deleted_at IS NULL
+            AND (
+              sp.giver_user_id = $2
+              OR l.owner_id = $2
+            )
+            AND (sr.list_id = ANY($3::uuid[]) OR l.owner_id = $2 OR sr.created_by = $2)
+        `;
+        const pairingsResult = await db.query(pairingsQuery, [pairingIds, userId, listIdsArray]);
+        fetchedData.secret_santa_pairings = {};
+        for (const row of pairingsResult.rows) {
+          fetchedData.secret_santa_pairings[row.id] = row;
+        }
+      }
+
+      if (recordIdsByTable.secret_santa_guest_invites.size > 0) {
+        const inviteIds = Array.from(recordIdsByTable.secret_santa_guest_invites);
+        const invitesQuery = `
+          SELECT gi.*
+          FROM public.secret_santa_guest_invites gi
+          JOIN public.secret_santa_rounds sr ON gi.round_id = sr.id
+          JOIN public.lists l ON sr.list_id = l.id
+          WHERE gi.id = ANY($1::uuid[])
+            AND gi.deleted_at IS NULL
+            AND (l.owner_id = $2 OR sr.list_id = ANY($3::uuid[]) OR sr.created_by = $2)
+        `;
+        const invitesResult = await db.query(invitesQuery, [inviteIds, userId, listIdsArray]);
+        fetchedData.secret_santa_guest_invites = {};
+        for (const row of invitesResult.rows) {
+          fetchedData.secret_santa_guest_invites[row.id] = row;
+        }
+      }
+
       // Step 5: Process changes with fetched data
       const changes = {
         list_items: { created: [], updated: [], deleted: [] },
@@ -346,7 +429,11 @@ function optimizedSyncControllerFactory(socketService) {
         item_tags: { created: [], updated: [], deleted: [] },
         gift_reservations: { created: [], updated: [], deleted: [] },
         gift_purchase_groups: { created: [], updated: [], deleted: [] },
-        gift_contributions: { created: [], updated: [], deleted: [] }
+        gift_contributions: { created: [], updated: [], deleted: [] },
+        secret_santa_rounds: { created: [], updated: [], deleted: [] },
+        secret_santa_round_participants: { created: [], updated: [], deleted: [] },
+        secret_santa_pairings: { created: [], updated: [], deleted: [] },
+        secret_santa_guest_invites: { created: [], updated: [], deleted: [] }
       };
 
       // Map change log entries to actual data
@@ -394,6 +481,11 @@ function optimizedSyncControllerFactory(socketService) {
             if (table_name === 'gift_contributions') {
               if (current_data.fulfilled_at) {
                 current_data.fulfilled_at = new Date(current_data.fulfilled_at).getTime();
+              }
+            }
+            if (table_name === 'secret_santa_rounds') {
+              if (current_data.exchange_date) {
+                current_data.exchange_date = new Date(current_data.exchange_date).getTime();
               }
             }
 
@@ -610,6 +702,75 @@ function optimizedSyncControllerFactory(socketService) {
               }
             }
             changes.gift_contributions.created.push(row);
+          }
+
+          const secretSantaRoundsBaselineQuery = `
+            SELECT sr.*
+            FROM public.secret_santa_rounds sr
+            JOIN public.lists l ON sr.list_id = l.id
+            WHERE sr.deleted_at IS NULL
+              AND (sr.list_id = ANY($1::uuid[]) OR l.owner_id = $2 OR sr.created_by = $2)
+          `;
+          const secretSantaRoundsBaselineResult = await db.query(secretSantaRoundsBaselineQuery, [listIdsArray, userId]);
+          for (const row of secretSantaRoundsBaselineResult.rows) {
+            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
+            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            if (row.exchange_date) row.exchange_date = new Date(row.exchange_date).getTime();
+            changes.secret_santa_rounds.created.push(row);
+          }
+
+          const secretSantaParticipantsBaselineQuery = `
+            SELECT sp.*
+            FROM public.secret_santa_round_participants sp
+            JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
+            JOIN public.lists l ON sr.list_id = l.id
+            WHERE sp.deleted_at IS NULL
+              AND (
+                sp.user_id = $2
+                OR l.owner_id = $2
+                OR sr.list_id = ANY($1::uuid[])
+              )
+          `;
+          const secretSantaParticipantsBaselineResult = await db.query(secretSantaParticipantsBaselineQuery, [listIdsArray, userId]);
+          for (const row of secretSantaParticipantsBaselineResult.rows) {
+            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
+            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            changes.secret_santa_round_participants.created.push(row);
+          }
+
+          const secretSantaPairingsBaselineQuery = `
+            SELECT sp.*
+            FROM public.secret_santa_pairings sp
+            JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
+            JOIN public.lists l ON sr.list_id = l.id
+            WHERE sp.deleted_at IS NULL
+              AND (
+                sp.giver_user_id = $2
+                OR l.owner_id = $2
+              )
+              AND (sr.list_id = ANY($1::uuid[]) OR l.owner_id = $2 OR sr.created_by = $2)
+          `;
+          const secretSantaPairingsBaselineResult = await db.query(secretSantaPairingsBaselineQuery, [listIdsArray, userId]);
+          for (const row of secretSantaPairingsBaselineResult.rows) {
+            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
+            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            if (row.revealed_at) row.revealed_at = new Date(row.revealed_at).getTime();
+            changes.secret_santa_pairings.created.push(row);
+          }
+
+          const secretSantaInvitesBaselineQuery = `
+            SELECT gi.*
+            FROM public.secret_santa_guest_invites gi
+            JOIN public.secret_santa_rounds sr ON gi.round_id = sr.id
+            JOIN public.lists l ON sr.list_id = l.id
+            WHERE gi.deleted_at IS NULL
+              AND (l.owner_id = $2 OR sr.list_id = ANY($1::uuid[]) OR sr.created_by = $2)
+          `;
+          const secretSantaInvitesBaselineResult = await db.query(secretSantaInvitesBaselineQuery, [listIdsArray, userId]);
+          for (const row of secretSantaInvitesBaselineResult.rows) {
+            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
+            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            changes.secret_santa_guest_invites.created.push(row);
           }
 
           // Add gift status for initial sync

@@ -87,6 +87,7 @@ const createGroupInvitationsController = require('./controllers/GroupInvitations
 const createGroupInvitationsRoutes = require('./routes/group-invitations.routes');
 const bugReportsRouter = require('./routes/bug-reports.routes');
 const supportRoutes = require('./routes/support.routes');
+const secretSantaRoutes = require('./routes/secret-santa.routes');
 
 // --- 2. Initialize Express App and HTTP Server ---
 const app = express();
@@ -278,6 +279,7 @@ app.use('/v1.0/groups', createGroupInvitationsRoutes(groupInvitationsController)
 app.use('/v1.0/gifts', giftRoutes);
 app.use('/v1.0/bugs', bugReportsRouter);
 app.use('/v1.0/support', supportRoutes);
+app.use('/v1.0', secretSantaRoutes);
 
 // --- 7. Basic/Utility Routes ---
 app.get('/api/v1.0/health', (req, res) => {
