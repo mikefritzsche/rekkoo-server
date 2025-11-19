@@ -83,6 +83,7 @@ CREATE TABLE lists
     category_id      INTEGER      REFERENCES list_categories (id) ON DELETE SET NULL,
     is_public        BOOLEAN                  DEFAULT false,
     is_collaborative BOOLEAN                  DEFAULT false,
+    secret_santa_enabled BOOLEAN               DEFAULT false,
     occasion         VARCHAR(100),
     list_type        VARCHAR(50)  NOT NULL,
     custom_fields    JSONB,
