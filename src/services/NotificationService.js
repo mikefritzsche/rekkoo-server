@@ -37,6 +37,41 @@ const allowsEmailNotifications = (preferences = {}) => {
   return true;
 };
 
+const readBooleanPreference = (preferences = {}, ...keys) => {
+  const flattened = preferences || {};
+  for (const keyPath of keys) {
+    const segments = Array.isArray(keyPath) ? keyPath : [keyPath];
+    let current = flattened;
+    for (const segment of segments) {
+      if (!current || typeof current !== 'object') {
+        current = undefined;
+        break;
+      }
+      current = current[segment];
+    }
+    if (typeof current === 'boolean') {
+      return current;
+    }
+  }
+  return undefined;
+};
+
+const allowsSecretSantaEmail = (preferences = {}) => {
+  const explicit = readBooleanPreference(preferences, 'secret_santa_email', ['secretSanta', 'email'], ['secret_santa', 'email']);
+  if (typeof explicit === 'boolean') {
+    return explicit;
+  }
+  return allowsEmailNotifications(preferences);
+};
+
+const allowsSecretSantaPush = (preferences = {}) => {
+  const explicit = readBooleanPreference(preferences, 'secret_santa_push', ['secretSanta', 'push'], ['secret_santa', 'push']);
+  if (typeof explicit === 'boolean') {
+    return explicit;
+  }
+  return true;
+};
+
 class NotificationService {
   constructor() {
     this.socketService = null;
@@ -96,6 +131,269 @@ class NotificationService {
       console.error('Error sending email:', error);
       // Don't throw - email failure shouldn't break the flow
     }
+  }
+
+  async fetchUsersWithPreferences(userIds = []) {
+    const normalized = Array.from(
+      new Set((userIds || []).map((id) => String(id))).values()
+    ).filter(Boolean);
+    if (!normalized.length) {
+      return [];
+    }
+
+    const { rows } = await db.query(
+      `SELECT u.id,
+              u.email,
+              u.username,
+              u.full_name,
+              COALESCE(us.notification_preferences, '{}'::jsonb) AS notification_preferences
+         FROM users u
+         LEFT JOIN user_settings us ON us.user_id = u.id
+        WHERE u.id = ANY($1::uuid[])
+          AND u.deleted_at IS NULL`,
+      [normalized]
+    );
+    return rows;
+  }
+
+  async fetchListManagers(listId, excludeUserIds = []) {
+    if (!listId) {
+      return [];
+    }
+    const excludeSet = new Set(
+      (excludeUserIds || []).map((id) => String(id)).filter(Boolean)
+    );
+    const { rows } = await db.query(
+      `WITH managers AS (
+          SELECT l.owner_id AS user_id
+            FROM lists l
+           WHERE l.id = $1
+          UNION
+        SELECT lc.user_id
+            FROM list_collaborators lc
+           WHERE lc.list_id = $1
+             AND lc.permission IN ('admin','edit')
+        )
+        SELECT u.id,
+               u.email,
+               u.username,
+               u.full_name,
+               COALESCE(us.notification_preferences, '{}'::jsonb) AS notification_preferences
+          FROM users u
+          LEFT JOIN user_settings us ON us.user_id = u.id
+         WHERE u.id IN (SELECT user_id FROM managers)
+           AND u.deleted_at IS NULL`,
+      [listId]
+    );
+    const unique = new Map(
+      rows.map((row) => [String(row.id), row])
+    );
+    return Array.from(unique.values()).filter(
+      (row) => !excludeSet.has(String(row.id))
+    );
+  }
+
+  async getUserDisplayName(userId) {
+    if (!userId) {
+      return null;
+    }
+    const { rows } = await db.query(
+      `SELECT full_name, username, email
+         FROM users
+        WHERE id = $1
+          AND deleted_at IS NULL`,
+      [userId]
+    );
+    if (!rows.length) {
+      return null;
+    }
+    const record = rows[0];
+    return record.full_name || record.username || record.email || null;
+  }
+
+  buildSecretSantaCopy(event, { actorName, listTitle, participantSummary, exchangeDateLabel }) {
+    switch (event) {
+      case 'participant_invited':
+        return {
+          title: `Secret Santa invite on ${listTitle}`,
+          message: `${actorName || 'Someone'} invited you to join the Secret Santa round on "${listTitle}".`,
+          emailSubject: `You're invited to ${listTitle} Secret Santa`,
+          emailHtml: `
+            <p>${actorName || 'Someone'} invited you to participate in the Secret Santa round for <strong>${listTitle}</strong>.</p>
+            ${
+              exchangeDateLabel
+                ? `<p><strong>Exchange date:</strong> ${exchangeDateLabel}</p>`
+                : ''
+            }
+            <p>Open Rekkoo to review the details and accept or decline.</p>
+          `,
+        };
+      case 'participant_removed':
+        return {
+          title: `Removed from ${listTitle} Secret Santa`,
+          message: `${actorName || 'An organizer'} removed you from the Secret Santa round on "${listTitle}".`,
+          emailSubject: `Removed from ${listTitle} Secret Santa`,
+          emailHtml: `
+            <p>${actorName || 'An organizer'} removed you from the Secret Santa round for <strong>${listTitle}</strong>.</p>
+            <p>If this was unexpected, reach out to the list owner for details.</p>
+          `,
+        };
+      case 'participant_accepted':
+        return {
+          title: 'Secret Santa participant accepted',
+          message: `${participantSummary || 'A participant'} accepted the invite for "${listTitle}".`,
+          emailSubject: `${participantSummary || 'Participant'} accepted your Secret Santa invite`,
+          emailHtml: `
+            <p><strong>${participantSummary || 'A participant'}</strong> accepted the Secret Santa invite for <strong>${listTitle}</strong>.</p>
+            ${
+              exchangeDateLabel
+                ? `<p>The exchange is scheduled for ${exchangeDateLabel}.</p>`
+                : ''
+            }
+            <p>You can proceed once enough participants have accepted.</p>
+          `,
+        };
+      case 'participant_declined':
+        return {
+          title: 'Secret Santa participant declined',
+          message: `${participantSummary || 'A participant'} declined the Secret Santa invite for "${listTitle}".`,
+          emailSubject: `${participantSummary || 'Participant'} declined your Secret Santa invite`,
+          emailHtml: `
+            <p><strong>${participantSummary || 'A participant'}</strong> declined the Secret Santa invite for <strong>${listTitle}</strong>.</p>
+            <p>Consider inviting someone else or adjusting the participant list.</p>
+          `,
+        };
+      default:
+        return null;
+    }
+  }
+
+  async notifySecretSantaParticipants({ event, listId, roundId, actorId, targetUserIds = [] }) {
+    if (!event || !listId || !roundId) {
+      return;
+    }
+
+    const normalizedTargets = Array.from(
+      new Set((targetUserIds || []).map((id) => String(id))).values()
+    ).filter(Boolean);
+    if (['participant_invited', 'participant_removed'].includes(event) && !normalizedTargets.length) {
+      return;
+    }
+
+    const [{ rows: listRows }, { rows: roundRows }] = await Promise.all([
+      db.query(
+        `SELECT id, title
+           FROM lists
+          WHERE id = $1`,
+        [listId]
+      ),
+      db.query(
+        `SELECT id, list_id, exchange_date
+           FROM secret_santa_rounds
+          WHERE id = $1`,
+        [roundId]
+      ),
+    ]);
+
+    if (!listRows.length) {
+      return;
+    }
+
+    const listTitle = listRows[0].title || 'your list';
+    const round = roundRows[0] || {};
+    const exchangeDateLabel = round.exchange_date
+      ? new Date(round.exchange_date).toLocaleDateString()
+      : null;
+    const actorName = (await this.getUserDisplayName(actorId)) || null;
+
+    const targetUsers = normalizedTargets.length
+      ? await this.fetchUsersWithPreferences(normalizedTargets)
+      : [];
+
+    const participantSummary = targetUsers
+      .map((user) => user.full_name || user.username || user.email || 'Participant')
+      .join(', ');
+
+    let recipients = [];
+    if (event === 'participant_invited' || event === 'participant_removed') {
+      recipients = targetUsers;
+    } else if (event === 'participant_accepted' || event === 'participant_declined') {
+      recipients = await this.fetchListManagers(listId, actorId ? [actorId] : []);
+    }
+
+    if (!recipients.length) {
+      return;
+    }
+
+    const notificationTypeMap = {
+      participant_invited: 'secret_santa_invite',
+      participant_removed: 'secret_santa_removed',
+      participant_accepted: 'secret_santa_participant_update',
+      participant_declined: 'secret_santa_participant_update',
+    };
+
+    const socketEventMap = {
+      participant_invited: 'secret_santa:participant_invited',
+      participant_removed: 'secret_santa:participant_removed',
+      participant_accepted: 'secret_santa:participant_status',
+      participant_declined: 'secret_santa:participant_status',
+    };
+
+    const baseData = {
+      entity_type: 'secret_santa_rounds',
+      entity_id: roundId,
+      list_id: listId,
+      round_id: roundId,
+      list_title: listTitle,
+      event,
+      participant_ids: normalizedTargets,
+    };
+
+    const content = this.buildSecretSantaCopy(event, {
+      actorName,
+      listTitle,
+      participantSummary,
+      exchangeDateLabel,
+    });
+    if (!content) {
+      return;
+    }
+
+    await Promise.all(
+      recipients.map(async (recipient) => {
+        const prefs = recipient.notification_preferences || {};
+        if (allowsSecretSantaPush(prefs)) {
+          await this.createNotification({
+            userId: recipient.id,
+            type: notificationTypeMap[event] || 'secret_santa_event',
+            title: content.title,
+            message: content.message,
+            data: baseData,
+          });
+
+          const socketEvent = socketEventMap[event];
+          if (socketEvent) {
+            this.emitSocketEvent(recipient.id, socketEvent, {
+              ...baseData,
+              recipientId: recipient.id,
+            });
+          }
+        }
+
+        if (
+          recipient.email &&
+          allowsSecretSantaEmail(prefs) &&
+          content.emailSubject &&
+          content.emailHtml
+        ) {
+          await this.sendEmail({
+            to: recipient.email,
+            subject: content.emailSubject,
+            html: content.emailHtml,
+          });
+        }
+      })
+    );
   }
 
   // Notify all group members about an action

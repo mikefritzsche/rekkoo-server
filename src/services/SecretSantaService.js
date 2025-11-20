@@ -1,6 +1,14 @@
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/db');
 const { logger } = require('../utils/logger');
+const NotificationService = require('./NotificationService');
+
+const PARTICIPANT_STATUS = {
+  INVITED: 'invited',
+  ACCEPTED: 'accepted',
+  DECLINED: 'declined',
+  REMOVED: 'removed',
+};
 
 const createHttpError = (status, message) => {
   const error = new Error(message);
@@ -18,7 +26,7 @@ const mapUserDisplay = (row) => ({
   displayName: row.full_name || row.username,
   email: row.email || null,
   avatarUrl: row.profile_image_url || null,
-  status: row.status || 'confirmed',
+  status: row.status || PARTICIPANT_STATUS.INVITED,
   isOwner: row.is_owner || false,
   isCoOwner: row.is_co_owner || false,
   isCurrentUser: row.is_current_user || false,
@@ -36,9 +44,13 @@ const ensureSecretSantaSchema = async () => {
         status text NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'active', 'closed')),
         budget_cents integer,
         currency varchar(16) DEFAULT 'USD',
-        exchange_date date,
+        exchange_date timestamptz,
+        signup_cutoff_date timestamptz,
         note text,
         message text,
+        auto_draw_enabled boolean NOT NULL DEFAULT false,
+        notify_via_push boolean NOT NULL DEFAULT true,
+        notify_via_email boolean NOT NULL DEFAULT false,
         created_by uuid NOT NULL REFERENCES public.users (id),
         published_at timestamptz,
         created_at timestamptz NOT NULL DEFAULT NOW(),
@@ -49,6 +61,7 @@ const ensureSecretSantaSchema = async () => {
     `CREATE TABLE IF NOT EXISTS public.secret_santa_round_participants (
         id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
         round_id uuid NOT NULL REFERENCES public.secret_santa_rounds (id) ON DELETE CASCADE,
+        list_id uuid NOT NULL REFERENCES public.lists (id) ON DELETE CASCADE,
         user_id uuid NOT NULL REFERENCES public.users (id) ON DELETE CASCADE,
         status text NOT NULL DEFAULT 'confirmed',
         created_at timestamptz NOT NULL DEFAULT NOW(),
@@ -56,6 +69,8 @@ const ensureSecretSantaSchema = async () => {
       )`,
     `CREATE INDEX IF NOT EXISTS idx_secret_santa_participants_round
         ON public.secret_santa_round_participants (round_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_secret_santa_participants_list
+        ON public.secret_santa_round_participants (list_id)`,
     `CREATE TABLE IF NOT EXISTS public.secret_santa_pairings (
         id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
         round_id uuid NOT NULL REFERENCES public.secret_santa_rounds (id) ON DELETE CASCADE,
@@ -149,8 +164,9 @@ class SecretSantaService {
          FROM secret_santa_round_participants rsp
          JOIN users u ON u.id = rsp.user_id
         WHERE rsp.round_id = $1
+          AND rsp.status <> $3
         ORDER BY u.full_name NULLS LAST, u.username ASC`,
-      [roundId, viewerId]
+      [roundId, viewerId, PARTICIPANT_STATUS.REMOVED]
     );
     return rows.map(mapUserDisplay);
   }
@@ -212,10 +228,10 @@ class SecretSantaService {
                mu.is_owner,
                CASE WHEN mu.permission = 'admin' THEN true ELSE false END AS is_co_owner,
                CASE WHEN mu.user_id = $2 THEN true ELSE false END AS is_current_user,
-               'confirmed' AS status
+               $3::text AS status
           FROM member_union mu
           JOIN users u ON u.id = mu.user_id`,
-      [listId, viewerId]
+      [listId, viewerId, PARTICIPANT_STATUS.ACCEPTED]
     );
     return rows.map(mapUserDisplay);
   }
@@ -284,34 +300,177 @@ class SecretSantaService {
     if (!Array.isArray(participantIds) || participantIds.length < 2) {
       throw createHttpError(
         400,
-        'Select at least two confirmed participants'
+        'Select at least two participants'
       );
     }
   }
 
-  async persistParticipants(roundId, participantIds) {
-    await db.query(
-      'DELETE FROM secret_santa_round_participants WHERE round_id = $1',
+  async persistParticipants(round, participantIds = [], actorId = null) {
+    if (!round) {
+      throw createHttpError(400, 'Secret Santa round context is required');
+    }
+    const roundId = typeof round === 'string' ? round : round.id;
+    let listId = typeof round === 'object' ? round.list_id : null;
+    if (!listId) {
+      const { rows } = await db.query(
+        `SELECT list_id FROM secret_santa_rounds WHERE id = $1`,
+        [roundId]
+      );
+      listId = rows[0]?.list_id || null;
+    }
+    if (!listId) {
+      throw createHttpError(400, 'Unable to resolve list for Secret Santa round');
+    }
+    const normalizedParticipants = Array.from(
+      new Set((participantIds || []).map((id) => String(id)))
+    );
+
+    const { rows: existingRows } = await db.query(
+      `SELECT user_id, status
+         FROM secret_santa_round_participants
+        WHERE round_id = $1`,
       [roundId]
     );
-    const inserts = [];
-    const params = [];
-    participantIds.forEach((participantId, idx) => {
-      inserts.push(
-        `($${idx * 4 + 1}, $${idx * 4 + 2}, $${idx * 4 + 3}, $${idx * 4 + 4})`
-      );
-      params.push(uuidv4(), roundId, participantId, 'confirmed');
-    });
-    await db.query(
-      `INSERT INTO secret_santa_round_participants (id, round_id, user_id, status)
-       VALUES ${inserts.join(', ')}`,
-      params
+
+    const existingMap = new Map(
+      existingRows.map((row) => [String(row.user_id), row])
     );
+    const desiredSet = new Set(normalizedParticipants);
+
+    const removedUserIds = existingRows
+      .filter(
+        (row) =>
+          row.status !== PARTICIPANT_STATUS.REMOVED &&
+          !desiredSet.has(String(row.user_id))
+      )
+      .map((row) => String(row.user_id));
+
+    if (removedUserIds.length > 0) {
+      logger.info('[SecretSanta] Removing participants from round %s: %o', roundId, removedUserIds);
+      await db.query(
+        `UPDATE secret_santa_round_participants
+            SET status = $3
+          WHERE round_id = $1
+            AND user_id = ANY($2::uuid[])`,
+        [roundId, removedUserIds, PARTICIPANT_STATUS.REMOVED]
+      );
+    }
+
+    const newUserIds = normalizedParticipants.filter((userId) => {
+      const existing = existingMap.get(userId);
+      return !existing || existing.status === PARTICIPANT_STATUS.REMOVED;
+    });
+
+    if (newUserIds.length > 0) {
+      logger.info('[SecretSanta] Adding participants to round %s: %o', roundId, newUserIds);
+      const values = [];
+      const params = [];
+      let paramIndex = 1;
+      newUserIds.forEach((userId) => {
+        values.push(
+          `($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2}, $${paramIndex + 3}, $${paramIndex + 4})`
+        );
+        const isActor = actorId && String(actorId) === String(userId);
+        params.push(
+          uuidv4(),
+          roundId,
+          listId,
+          userId,
+          isActor ? PARTICIPANT_STATUS.ACCEPTED : PARTICIPANT_STATUS.INVITED
+        );
+        paramIndex += 5;
+      });
+
+      await db.query(
+        `INSERT INTO secret_santa_round_participants (id, round_id, list_id, user_id, status)
+         VALUES ${values.join(', ')}
+         ON CONFLICT (round_id, user_id)
+         DO UPDATE SET status = EXCLUDED.status,
+                       list_id = EXCLUDED.list_id`,
+        params
+      );
+    }
+
+    if (newUserIds.length > 0) {
+      logger.info('[SecretSanta] Notifying participants invited: %o', newUserIds);
+      await NotificationService.notifySecretSantaParticipants({
+        event: 'participant_invited',
+        listId,
+        roundId,
+        actorId,
+        targetUserIds: newUserIds,
+      });
+    }
+
+    if (removedUserIds.length > 0) {
+      logger.info('[SecretSanta] Notifying participants removed: %o', removedUserIds);
+      await NotificationService.notifySecretSantaParticipants({
+        event: 'participant_removed',
+        listId,
+        roundId,
+        actorId,
+        targetUserIds: removedUserIds,
+      });
+    }
+
+    if (newUserIds.length > 0 || removedUserIds.length > 0) {
+      logger.info(
+        '[SecretSanta] Participant change complete. added=%d removed=%d round=%s',
+        newUserIds.length,
+        removedUserIds.length,
+        roundId
+      );
+      await db.query(
+        `UPDATE secret_santa_rounds
+            SET updated_at = NOW()
+          WHERE id = $1`,
+        [roundId]
+      );
+
+      const changeRecipients = normalizedParticipants
+        .map((userId) => String(userId))
+        .filter((userId, index, arr) => arr.indexOf(userId) === index)
+        .filter((userId) => !actorId || String(userId) !== String(actorId));
+
+      if (changeRecipients.length > 0) {
+        try {
+          const { rows } = await db.query(
+            `SELECT to_jsonb(sr.*) AS round_data
+               FROM secret_santa_rounds sr
+              WHERE sr.id = $1`,
+            [roundId]
+          );
+          const roundData = rows[0]?.round_data;
+
+          if (roundData) {
+            for (const recipientId of changeRecipients) {
+              await db.query(
+                `INSERT INTO change_log (table_name, record_id, operation, change_data, user_id)
+                 VALUES ($1, $2, 'update', $3::jsonb, $4)`,
+                ['secret_santa_rounds', roundId, roundData, recipientId]
+              );
+            }
+          }
+        } catch (error) {
+          logger.warn('[SecretSanta] Failed to enqueue change_log rows for recipients %o on round %s: %s', changeRecipients, roundId, error?.message || error);
+        }
+      }
+    }
+
+    const affectedParticipants = [...newUserIds, ...removedUserIds];
+    if (affectedParticipants.length > 0) {
+      await this.enqueueParticipantChangeLogs({
+        roundId,
+        listId,
+        participantUserIds: affectedParticipants,
+        actorId,
+      });
+    }
   }
 
   async ensureParticipantsExist(participantIds = []) {
     if (!participantIds.length) {
-      throw createHttpError(400, 'Select at least two confirmed participants');
+      throw createHttpError(400, 'Select at least two participants');
     }
     const { rows } = await db.query(
       `SELECT id FROM users WHERE id = ANY($1::uuid[])`,
@@ -401,21 +560,29 @@ class SecretSantaService {
     const roundId = payload.id || uuidv4();
     await db.query(
       `INSERT INTO secret_santa_rounds
-         (id, list_id, status, budget_cents, currency, exchange_date, note, message, created_by)
-       VALUES ($1,$2,'draft',$3,$4,$5,$6,$7,$8)`,
+         (id, list_id, status, budget_cents, currency, exchange_date, signup_cutoff_date, note, message, auto_draw_enabled, notify_via_push, notify_via_email, created_by)
+       VALUES ($1,$2,'draft',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
         roundId,
         listId,
         payload.budgetCents || null,
         sanitizeCurrency(payload.currency),
         payload.exchangeDate || null,
+        payload.signupCutoffDate || null,
         payload.note || null,
         payload.message || null,
+        payload.autoDrawEnabled ?? false,
+        payload.notifyViaPush ?? true,
+        payload.notifyViaEmail ?? false,
         userId,
       ]
     );
 
-    await this.persistParticipants(roundId, participantIds);
+    await this.persistParticipants(
+      { id: roundId, list_id: listId },
+      participantIds,
+      userId
+    );
     logger.info(`[SecretSanta] Round ${roundId} created for list ${listId}`);
 
     return this.getActiveRound(listId, userId);
@@ -436,6 +603,13 @@ class SecretSantaService {
       note: payload.note,
       message: payload.message,
       status: payload.status,
+      signup_cutoff_date: payload.signupCutoffDate,
+      auto_draw_enabled:
+        payload.autoDrawEnabled === undefined ? undefined : Boolean(payload.autoDrawEnabled),
+      notify_via_push:
+        payload.notifyViaPush === undefined ? undefined : Boolean(payload.notifyViaPush),
+      notify_via_email:
+        payload.notifyViaEmail === undefined ? undefined : Boolean(payload.notifyViaEmail),
     };
 
     Object.entries(fields).forEach(([column, value]) => {
@@ -464,7 +638,7 @@ class SecretSantaService {
         access.list.owner_id,
         normalized
       );
-      await this.persistParticipants(roundId, normalized);
+      await this.persistParticipants(round, normalized, userId);
     }
 
     return this.getActiveRound(round.list_id, userId);
@@ -502,8 +676,9 @@ class SecretSantaService {
     const participantRows = await db.query(
       `SELECT user_id
          FROM secret_santa_round_participants
-        WHERE round_id = $1`,
-      [roundId]
+        WHERE round_id = $1
+          AND status = $2`,
+      [roundId, PARTICIPANT_STATUS.ACCEPTED]
     );
     const participantIds = participantRows.rows.map((row) => String(row.user_id));
     this.validateParticipantIds(participantIds);
@@ -549,6 +724,117 @@ class SecretSantaService {
     }
 
     return this.getActiveRound(round.list_id, userId);
+  }
+
+  async respondToParticipantInvite(roundId, userId, decision) {
+    await ensureSecretSantaSchema();
+    const normalizedDecision = (decision || '').toLowerCase();
+    if (!['accept', 'decline'].includes(normalizedDecision)) {
+      throw createHttpError(400, 'Specify accept or decline');
+    }
+
+    const { rows } = await db.query(
+      `SELECT rsp.id,
+              rsp.status,
+              rsp.user_id,
+              rsp.round_id,
+              COALESCE(rsp.list_id, r.list_id) AS list_id
+         FROM secret_santa_round_participants rsp
+         JOIN secret_santa_rounds r ON r.id = rsp.round_id
+        WHERE rsp.round_id = $1
+          AND rsp.user_id = $2`,
+      [roundId, userId]
+    );
+    if (rows.length === 0) {
+      throw createHttpError(404, 'Secret Santa invite not found');
+    }
+
+    const participant = rows[0];
+    if (participant.status === PARTICIPANT_STATUS.REMOVED) {
+      throw createHttpError(410, 'You are no longer part of this Secret Santa round');
+    }
+
+    const nextStatus =
+      normalizedDecision === 'accept'
+        ? PARTICIPANT_STATUS.ACCEPTED
+        : PARTICIPANT_STATUS.DECLINED;
+
+    if (participant.status !== nextStatus) {
+      await db.query(
+        `UPDATE secret_santa_round_participants
+            SET status = $3
+          WHERE round_id = $1
+            AND user_id = $2`,
+        [roundId, userId, nextStatus]
+      );
+
+      await NotificationService.notifySecretSantaParticipants({
+        event:
+          nextStatus === PARTICIPANT_STATUS.ACCEPTED
+            ? 'participant_accepted'
+            : 'participant_declined',
+        listId: participant.list_id,
+        roundId,
+        actorId: userId,
+        targetUserIds: [userId],
+      });
+
+      await this.enqueueParticipantChangeLogs({
+        roundId,
+        listId: participant.list_id,
+        participantUserIds: [userId],
+        actorId: userId,
+      });
+    }
+
+    return this.getActiveRound(participant.list_id, userId);
+  }
+
+  async removeParticipant(roundId, actorId, participantId) {
+    await ensureSecretSantaSchema();
+    const { round } = await this.ensureCanManage(roundId, actorId);
+    const targetId = String(participantId);
+    const { rowCount } = await db.query(
+      `UPDATE secret_santa_round_participants
+          SET status = $3
+        WHERE round_id = $1
+          AND user_id = $2
+          AND status <> $3`,
+      [roundId, targetId, PARTICIPANT_STATUS.REMOVED]
+    );
+
+    if (rowCount === 0) {
+      const { rows } = await db.query(
+        `SELECT status
+           FROM secret_santa_round_participants
+          WHERE round_id = $1
+            AND user_id = $2`,
+        [roundId, targetId]
+      );
+      if (rows.length === 0) {
+        throw createHttpError(404, 'Participant not found in this round');
+      }
+      if (rows[0].status !== PARTICIPANT_STATUS.REMOVED) {
+        throw createHttpError(409, 'Unable to remove participant');
+      }
+    }
+
+    await NotificationService.notifySecretSantaParticipants({
+      event: 'participant_removed',
+      listId: round.list_id,
+      roundId,
+      actorId,
+      targetUserIds: [targetId],
+    });
+
+    await this.enqueueParticipantChangeLogs({
+      roundId,
+      listId: round.list_id,
+      participantUserIds: [targetId],
+      actorId,
+    });
+
+    return this.getActiveRound(round.list_id, actorId);
   }
 
   async inviteGuests(listId, userId, payload = {}) {
@@ -601,6 +887,109 @@ class SecretSantaService {
     }
 
     return { invitationIds: insertedIds };
+  }
+
+  async getListManagerIds(listId) {
+    if (!listId) {
+      return [];
+    }
+    const { rows } = await db.query(
+      `WITH manager_ids AS (
+         SELECT owner_id AS user_id
+           FROM lists
+          WHERE id = $1
+         UNION
+         SELECT lc.user_id
+           FROM list_collaborators lc
+          WHERE lc.list_id = $1
+            AND lc.permission IN ('admin','edit')
+       )
+       SELECT DISTINCT user_id FROM manager_ids`,
+      [listId]
+    );
+    return rows.map((row) => String(row.user_id));
+  }
+
+  async enqueueParticipantChangeLogs({
+    roundId,
+    listId = null,
+    participantUserIds = [],
+    actorId = null,
+  }) {
+    if (!roundId || !Array.isArray(participantUserIds) || participantUserIds.length === 0) {
+      return;
+    }
+
+    const normalizedParticipants = Array.from(
+      new Set(participantUserIds.map((id) => String(id)).filter(Boolean))
+    );
+    if (!normalizedParticipants.length) {
+      return;
+    }
+
+    const { rows } = await db.query(
+      `SELECT rsp.*,
+              COALESCE(rsp.list_id, sr.list_id) AS resolved_list_id
+         FROM secret_santa_round_participants rsp
+         JOIN secret_santa_rounds sr ON sr.id = rsp.round_id
+        WHERE rsp.round_id = $1
+          AND rsp.user_id = ANY($2::uuid[])`,
+      [roundId, normalizedParticipants]
+    );
+
+    if (!rows.length) {
+      return;
+    }
+
+    const resolvedListId = listId || rows[0].resolved_list_id;
+    const managerIds = await this.getListManagerIds(resolvedListId);
+
+    const recipientSet = new Set(managerIds);
+    rows.forEach((row) => recipientSet.add(String(row.user_id)));
+    if (actorId) {
+      recipientSet.add(String(actorId));
+    }
+
+    const recipients = Array.from(recipientSet).filter(Boolean);
+    if (!recipients.length) {
+      return;
+    }
+
+    const values = [];
+    const params = [];
+    let paramIndex = 1;
+
+    rows.forEach((row) => {
+      const payload = JSON.stringify({
+        ...row,
+        list_id: resolvedListId,
+      });
+      recipients.forEach((userId) => {
+        values.push(
+          `('secret_santa_round_participants', $${paramIndex}, 'update', $${paramIndex + 1}::jsonb, $${paramIndex + 2})`
+        );
+        params.push(row.id, payload, userId);
+        paramIndex += 3;
+      });
+    });
+
+    if (!values.length) {
+      return;
+    }
+
+    try {
+      await db.query(
+        `INSERT INTO change_log (table_name, record_id, operation, change_data, user_id)
+         VALUES ${values.join(', ')}`,
+        params
+      );
+    } catch (error) {
+      logger.warn(
+        '[SecretSanta] Failed to enqueue participant change_log entries for round %s: %s',
+        roundId,
+        error?.message || error
+      );
+    }
   }
 }
 

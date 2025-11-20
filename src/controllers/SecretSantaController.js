@@ -63,6 +63,32 @@ class SecretSantaController {
     }
   }
 
+  async respondToInvite(req, res) {
+    try {
+      const data = await SecretSantaService.respondToParticipantInvite(
+        req.params.roundId,
+        req.user.id,
+        req.body?.decision
+      );
+      return res.json(data);
+    } catch (error) {
+      return handleError(res, error);
+    }
+  }
+
+  async removeParticipant(req, res) {
+    try {
+      const data = await SecretSantaService.removeParticipant(
+        req.params.roundId,
+        req.user.id,
+        req.params.participantId
+      );
+      return res.json(data);
+    } catch (error) {
+      return handleError(res, error);
+    }
+  }
+
   async inviteGuests(req, res) {
     try {
       const result = await SecretSantaService.inviteGuests(

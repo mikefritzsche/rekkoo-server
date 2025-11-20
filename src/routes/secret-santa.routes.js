@@ -26,6 +26,16 @@ router.post(
 );
 
 router.post(
+  '/secret-santa/:roundId/participants/respond',
+  (req, res) => SecretSantaController.respondToInvite(req, res)
+);
+
+router.delete(
+  '/secret-santa/:roundId/participants/:participantId',
+  (req, res) => SecretSantaController.removeParticipant(req, res)
+);
+
+router.post(
   '/lists/:listId/secret-santa/invitations',
   (req, res) => SecretSantaController.inviteGuests(req, res)
 );

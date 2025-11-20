@@ -34,6 +34,14 @@ function optimizedSyncControllerFactory(socketService) {
         WHERE luo.user_id = $1
           AND luo.deleted_at IS NULL
           AND luo.role NOT IN ('blocked', 'inherit')
+
+        UNION
+
+        -- Lists with Secret Santa participation
+        SELECT DISTINCT sr.list_id
+        FROM secret_santa_round_participants rsp
+        JOIN secret_santa_rounds sr ON rsp.round_id = sr.id
+        WHERE rsp.user_id = $1
       ) as accessible_lists
     `;
 
@@ -123,6 +131,24 @@ function optimizedSyncControllerFactory(socketService) {
           // Pre-validate UUID format to avoid regex in queries
           if (change.record_id.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)) {
             recordIdsByTable[change.table_name].add(change.record_id);
+          }
+          if (change.table_name === 'secret_santa_round_participants' && change.change_data) {
+            const payload = typeof change.change_data === 'string'
+              ? (() => {
+                  try {
+                    return JSON.parse(change.change_data);
+                  } catch {
+                    return null;
+                  }
+                })()
+              : change.change_data;
+            const roundId = payload?.round_id || payload?.roundId;
+            if (
+              typeof roundId === 'string' &&
+              roundId.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+            ) {
+              recordIdsByTable.secret_santa_rounds.add(roundId);
+            }
           }
         }
       }
@@ -340,14 +366,11 @@ function optimizedSyncControllerFactory(socketService) {
       if (recordIdsByTable.secret_santa_rounds.size > 0) {
         const roundIds = Array.from(recordIdsByTable.secret_santa_rounds);
         const roundsQuery = `
-          SELECT sr.*
-          FROM public.secret_santa_rounds sr
-          JOIN public.lists l ON sr.list_id = l.id
-          WHERE sr.id = ANY($1::uuid[])
-            AND sr.deleted_at IS NULL
-            AND (l.owner_id = $2 OR sr.list_id = ANY($3::uuid[]) OR sr.created_by = $2)
+          SELECT *
+          FROM public.secret_santa_rounds
+          WHERE id = ANY($1::uuid[])
         `;
-        const roundsResult = await db.query(roundsQuery, [roundIds, userId, listIdsArray]);
+        const roundsResult = await db.query(roundsQuery, [roundIds]);
         fetchedData.secret_santa_rounds = {};
         for (const row of roundsResult.rows) {
           fetchedData.secret_santa_rounds[row.id] = row;
@@ -357,12 +380,12 @@ function optimizedSyncControllerFactory(socketService) {
       if (recordIdsByTable.secret_santa_round_participants.size > 0) {
         const participantIds = Array.from(recordIdsByTable.secret_santa_round_participants);
         const participantsQuery = `
-          SELECT sp.*
+          SELECT sp.*,
+                 sr.list_id AS round_list_id
           FROM public.secret_santa_round_participants sp
           JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
           JOIN public.lists l ON sr.list_id = l.id
           WHERE sp.id = ANY($1::uuid[])
-            AND sp.deleted_at IS NULL
             AND (
               sp.user_id = $2
               OR l.owner_id = $2
@@ -372,7 +395,12 @@ function optimizedSyncControllerFactory(socketService) {
         const participantsResult = await db.query(participantsQuery, [participantIds, userId, listIdsArray]);
         fetchedData.secret_santa_round_participants = {};
         for (const row of participantsResult.rows) {
-          fetchedData.secret_santa_round_participants[row.id] = row;
+          const normalizedRow = {
+            ...row,
+            list_id: row.list_id || row.round_list_id,
+          };
+          delete normalizedRow.round_list_id;
+          fetchedData.secret_santa_round_participants[row.id] = normalizedRow;
         }
       }
 
@@ -384,7 +412,6 @@ function optimizedSyncControllerFactory(socketService) {
           JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
           JOIN public.lists l ON sr.list_id = l.id
           WHERE sp.id = ANY($1::uuid[])
-            AND sp.deleted_at IS NULL
             AND (
               sp.giver_user_id = $2
               OR l.owner_id = $2
@@ -495,6 +522,45 @@ function optimizedSyncControllerFactory(socketService) {
               changes[table_name].updated.push(current_data);
             }
           }
+        }
+      }
+
+      // Ensure list metadata is available for Secret Santa invitees
+      const referencedListIds = new Set(
+        [...changes.secret_santa_rounds.created, ...changes.secret_santa_rounds.updated]
+          .map((round) => round?.list_id)
+          .filter(Boolean)
+      );
+      if (referencedListIds.size > 0) {
+        const knownListIds = new Set([
+          ...changes.lists.created.map((list) => String(list.id)),
+          ...changes.lists.updated.map((list) => String(list.id)),
+        ]);
+        const missingListIds = Array.from(referencedListIds).filter(
+          (listId) => !knownListIds.has(String(listId))
+        );
+        if (missingListIds.length > 0) {
+          const { rows: invitedLists } = await db.query(
+            `SELECT *
+               FROM public.lists
+              WHERE id = ANY($1::uuid[])`,
+            [missingListIds]
+          );
+          invitedLists.forEach((listRow) => {
+            if (listRow.created_at) listRow.created_at = new Date(listRow.created_at).getTime();
+            if (listRow.updated_at) listRow.updated_at = new Date(listRow.updated_at).getTime();
+            listRow.shared_with_me = true;
+            if (!listRow.share_type) {
+              listRow.share_type = 'individual_shared';
+            }
+            listRow.shared_by_owner =
+              typeof listRow.shared_by_owner === 'boolean'
+                ? listRow.shared_by_owner
+                : true;
+            listRow.access_type = listRow.access_type || 'shared';
+            listRow.type_shared = listRow.share_type;
+            changes.lists.updated.push(listRow);
+          });
         }
       }
 
@@ -708,8 +774,17 @@ function optimizedSyncControllerFactory(socketService) {
             SELECT sr.*
             FROM public.secret_santa_rounds sr
             JOIN public.lists l ON sr.list_id = l.id
-            WHERE sr.deleted_at IS NULL
-              AND (sr.list_id = ANY($1::uuid[]) OR l.owner_id = $2 OR sr.created_by = $2)
+            WHERE (
+              sr.list_id = ANY($1::uuid[])
+              OR l.owner_id = $2
+              OR sr.created_by = $2
+              OR EXISTS (
+                SELECT 1
+                FROM public.secret_santa_round_participants rsp
+                WHERE rsp.round_id = sr.id
+                  AND rsp.user_id = $2
+              )
+            )
           `;
           const secretSantaRoundsBaselineResult = await db.query(secretSantaRoundsBaselineQuery, [listIdsArray, userId]);
           for (const row of secretSantaRoundsBaselineResult.rows) {
@@ -720,12 +795,12 @@ function optimizedSyncControllerFactory(socketService) {
           }
 
           const secretSantaParticipantsBaselineQuery = `
-            SELECT sp.*
+            SELECT sp.*,
+                   sr.list_id AS round_list_id
             FROM public.secret_santa_round_participants sp
             JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
             JOIN public.lists l ON sr.list_id = l.id
-            WHERE sp.deleted_at IS NULL
-              AND (
+            WHERE (
                 sp.user_id = $2
                 OR l.owner_id = $2
                 OR sr.list_id = ANY($1::uuid[])
@@ -733,8 +808,12 @@ function optimizedSyncControllerFactory(socketService) {
           `;
           const secretSantaParticipantsBaselineResult = await db.query(secretSantaParticipantsBaselineQuery, [listIdsArray, userId]);
           for (const row of secretSantaParticipantsBaselineResult.rows) {
+            if (!row.list_id && row.round_list_id) {
+              row.list_id = row.round_list_id;
+            }
             if (row.created_at) row.created_at = new Date(row.created_at).getTime();
             if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            delete row.round_list_id;
             changes.secret_santa_round_participants.created.push(row);
           }
 
@@ -743,8 +822,7 @@ function optimizedSyncControllerFactory(socketService) {
             FROM public.secret_santa_pairings sp
             JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
             JOIN public.lists l ON sr.list_id = l.id
-            WHERE sp.deleted_at IS NULL
-              AND (
+            WHERE (
                 sp.giver_user_id = $2
                 OR l.owner_id = $2
               )

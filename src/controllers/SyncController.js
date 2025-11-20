@@ -1,6 +1,7 @@
 // server/src/controllers/SyncController.js
 const db = require('../config/db'); // Ensure this path is correct
 const ListService = require('../services/ListService'); // Import ListService
+const SecretSantaService = require('../services/SecretSantaService');
 const { logger } = require('../utils/logger'); // Assuming logger is in utils
 const EmbeddingService = require('../services/embeddingService'); // Import EmbeddingService
 // Lazy-load spotifyService only when needed to avoid ESM import issues in tests
@@ -29,6 +30,58 @@ const DETAIL_TABLES_MAP = {
 };
 
 function syncControllerFactory(socketService) {
+  const coerceBoolean = (value, fallback) => {
+    if (value === undefined || value === null) return fallback;
+    return Boolean(value);
+  };
+
+  const normalizeSecretSantaRoundPayload = (payload = {}, { forCreate = false } = {}) => {
+    const participantIdsRaw = payload.participantIds ?? payload.participant_ids;
+    const normalized = {};
+    if (Array.isArray(participantIdsRaw)) {
+      normalized.participantIds = participantIdsRaw.map((id) => String(id));
+    } else if (forCreate) {
+      normalized.participantIds = [];
+    }
+
+    const coalesce = (primary, secondary, fallbackValue, assignKey) => {
+      if (primary !== undefined) {
+        normalized[assignKey] = primary;
+      } else if (secondary !== undefined) {
+        normalized[assignKey] = secondary;
+      } else if (forCreate) {
+        normalized[assignKey] = fallbackValue;
+      }
+    };
+
+    coalesce(payload.budgetCents, payload.budget_cents, null, 'budgetCents');
+    if (payload.currency !== undefined || payload.currency_code !== undefined || forCreate) {
+      normalized.currency = payload.currency || payload.currency_code || 'USD';
+    }
+    coalesce(payload.exchangeDate, payload.exchange_date, null, 'exchangeDate');
+    coalesce(payload.signupCutoffDate, payload.signup_cutoff_date, null, 'signupCutoffDate');
+    if (payload.note !== undefined || forCreate) {
+      normalized.note = payload.note ?? null;
+    }
+    if (payload.message !== undefined || forCreate) {
+      normalized.message = payload.message ?? null;
+    }
+
+    const autoDrawValue = payload.autoDrawEnabled ?? payload.auto_draw_enabled;
+    if (autoDrawValue !== undefined || forCreate) {
+      normalized.autoDrawEnabled = coerceBoolean(autoDrawValue, false);
+    }
+    const notifyPushValue = payload.notifyViaPush ?? payload.notify_via_push;
+    if (notifyPushValue !== undefined || forCreate) {
+      normalized.notifyViaPush = coerceBoolean(notifyPushValue, true);
+    }
+    const notifyEmailValue = payload.notifyViaEmail ?? payload.notify_via_email;
+    if (notifyEmailValue !== undefined || forCreate) {
+      normalized.notifyViaEmail = coerceBoolean(notifyEmailValue, false);
+    }
+
+    return normalized;
+  };
   // Permission check: can user edit items on list?
   async function userCanEditList(client, userId, listId) {
     // Owner can edit
@@ -814,6 +867,176 @@ function syncControllerFactory(socketService) {
           // operation === 'delete'.
           if (!dataPayload && operation !== 'delete') {
             logger.warn(`[SyncController] Skipping change with no data for record ${clientRecordId}`);
+            continue;
+          }
+
+          if (tableName === 'secret_santa_rounds') {
+            const listId = dataPayload?.listId || dataPayload?.list_id;
+            if (!listId) {
+              results.push({
+                tableName,
+                operation,
+                clientRecordId,
+                status: 'error_missing_list_id',
+                error: 'Secret Santa round change missing listId',
+              });
+              continue;
+            }
+
+            try {
+              if (operation === 'create') {
+                const roundInput = normalizeSecretSantaRoundPayload(dataPayload, { forCreate: true });
+                const serviceResult = await SecretSantaService.createRound(
+                  listId,
+                  userId,
+                  roundInput
+                );
+                const serverRoundId = serviceResult?.round?.id || dataPayload?.id || clientRecordId;
+                results.push({
+                  tableName,
+                  operation,
+                  clientRecordId: clientRecordId || dataPayload?.id || serverRoundId,
+                  serverId: serverRoundId,
+                  status: 'created',
+                });
+              } else if (operation === 'update') {
+                const roundId =
+                  clientRecordId ||
+                  dataPayload?.id ||
+                  dataPayload?.roundId ||
+                  dataPayload?.round_id;
+                if (!roundId) {
+                  results.push({
+                    tableName,
+                    operation,
+                    clientRecordId,
+                    status: 'error_missing_round_id',
+                    error: 'Secret Santa round update missing roundId',
+                  });
+                  continue;
+                }
+                const updatePayload = normalizeSecretSantaRoundPayload(dataPayload);
+                const serviceResult = await SecretSantaService.updateRound(
+                  roundId,
+                  userId,
+                  updatePayload
+                );
+                const serverRoundId = serviceResult?.round?.id || roundId;
+                results.push({
+                  tableName,
+                  operation,
+                  clientRecordId: clientRecordId || roundId,
+                  serverId: serverRoundId,
+                  status: 'updated',
+                });
+              } else {
+                results.push({
+                  tableName,
+                  operation,
+                  clientRecordId,
+                  status: 'error_unsupported_operation',
+                  error: `Unsupported Secret Santa round operation: ${operation}`,
+                });
+              }
+            } catch (secretSantaError) {
+              logger.error('[SyncController] Secret Santa round change failed:', secretSantaError);
+              results.push({
+                tableName,
+                operation,
+                clientRecordId,
+                status: 'error',
+                error: secretSantaError?.message || 'Failed to process Secret Santa round change.',
+              });
+            }
+            continue;
+          }
+
+          if (tableName === 'secret_santa_round_participants') {
+            const roundId =
+              dataPayload?.roundId ||
+              dataPayload?.round_id ||
+              dataPayload?.id ||
+              clientRecordId;
+            if (!roundId) {
+              results.push({
+                tableName,
+                operation,
+                clientRecordId,
+                status: 'error_missing_round_id',
+                error: 'Secret Santa participant change missing roundId',
+              });
+              continue;
+            }
+
+            try {
+              if (operation === 'update') {
+                const statusValue = (dataPayload?.status || '').toLowerCase();
+                if (statusValue === 'accepted' || statusValue === 'declined') {
+                  const decision = statusValue === 'accepted' ? 'accept' : 'decline';
+                  await SecretSantaService.respondToParticipantInvite(
+                    roundId,
+                    userId,
+                    decision
+                  );
+                  results.push({
+                    tableName,
+                    operation,
+                    clientRecordId: clientRecordId || dataPayload?.id || roundId,
+                    status: 'updated',
+                  });
+                } else if (statusValue === 'removed') {
+                  const targetParticipantId =
+                    dataPayload?.userId || dataPayload?.user_id;
+                  if (!targetParticipantId) {
+                    results.push({
+                      tableName,
+                      operation,
+                      clientRecordId,
+                      status: 'error_missing_participant_id',
+                      error:
+                        'Secret Santa participant removal requires userId/user_id',
+                    });
+                    continue;
+                  }
+                  await SecretSantaService.removeParticipant(
+                    roundId,
+                    userId,
+                    targetParticipantId
+                  );
+                  results.push({
+                    tableName,
+                    operation,
+                    clientRecordId: clientRecordId || targetParticipantId,
+                    status: 'removed',
+                  });
+                } else {
+                  results.push({
+                    tableName,
+                    operation,
+                    clientRecordId,
+                    status: 'error_unsupported_participant_status',
+                    error: `Unsupported participant status: ${dataPayload?.status}`,
+                  });
+                }
+              } else {
+                results.push({
+                  tableName,
+                  operation,
+                  clientRecordId,
+                  status: 'error_unsupported_operation',
+                  error: `Unsupported Secret Santa participant operation: ${operation}`,
+                });
+              }
+            } catch (participantError) {
+              logger.error('[SyncController] Secret Santa participant change failed:', participantError);
+              results.push({
+                tableName,
+                operation,
+                clientRecordId,
+                status: 'error',
+                error: participantError?.message || 'Failed to process Secret Santa participant change.',
+              });
+            }
             continue;
           }
 
