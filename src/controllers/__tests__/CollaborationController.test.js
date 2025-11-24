@@ -8,6 +8,14 @@ describe('CollaborationController', () => {
 
   beforeEach(() => {
     // Create controller instance
+    db.query = db.query || jest.fn();
+    db.pool = {
+      connect: jest.fn().mockResolvedValue({
+        query: db.query,
+        release: jest.fn(),
+      }),
+    };
+    db.connect = jest.fn().mockResolvedValue({ query: db.query, release: jest.fn() });
     CollaborationController = collaborationControllerFactory();
     req = {
       body: {},
@@ -24,6 +32,9 @@ describe('CollaborationController', () => {
 
   afterEach(() => {
     jest.clearAllMocks();
+    if (db.connect?.mockClear) {
+      db.connect.mockClear();
+    }
   });
 
   describe('createGroup', () => {
