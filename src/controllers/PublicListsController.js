@@ -10,12 +10,6 @@ function publicListsControllerFactory() {
     const { id } = req.params;
     const requestor_id = req.user?.id; // Can be null for public, unauthenticated requests
 
-    console.log('[PublicListsController.getListById] Request received:', {
-      listId: id,
-      requestorId: requestor_id,
-      userInfo: req.user
-    });
-
     if (!id) return res.status(400).json({ error: 'id param required' });
 
     try {
@@ -74,21 +68,17 @@ function publicListsControllerFactory() {
       const isPublic = list.is_public === true;
       const canAccess = isOwner || isPublic || hasGroupAccess || hasIndividualAccess;
 
-      console.log('[PublicListsController.getListById] Access check:', {
-        listId: id,
-        requestorId: requestor_id,
-        listOwnerId: list.owner_id,
-        isOwner,
-        isPublic,
-        hasGroupAccess,
-        hasIndividualAccess,
-        canAccess,
-        listType: list.list_type
-      });
-
       if (!canAccess) {
-        console.log('[PublicListsController.getListById] Access DENIED for user:', requestor_id);
         return res.status(403).json({ error: 'You do not have permission to view this list' });
+      }
+
+      // If owner is fetching a gift list, suppress this fetch (owner should rely on sync)
+      if (isOwner && list.list_type === 'gifts') {
+        return res.status(200).json({
+          list,
+          items: [],
+          suppressed: true,
+        });
       }
 
       // Always fetch all item fields for consistency

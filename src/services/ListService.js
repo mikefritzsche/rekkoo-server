@@ -288,6 +288,14 @@ class ListService {
       const { rows } = await client.query(query, insertValues);
       return rows[0];
     } catch (err) {
+      logger.error('[ListService.createDetailRecord] SQL error while upserting detail', {
+        tableName,
+        listItemId,
+        message: err?.message,
+        code: err?.code,
+        detail: err?.detail,
+        constraint: err?.constraint,
+      });
       // Gracefully handle attempts to insert a duplicate google_place_id for place_details.
       // When this happens we simply fetch the existing row so the caller can link to it
       // instead of aborting the whole transaction.

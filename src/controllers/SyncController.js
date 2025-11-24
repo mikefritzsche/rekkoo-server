@@ -1727,8 +1727,6 @@ function syncControllerFactory(socketService) {
                     break;
                   case 'gift':
                   case 'gifts':
-                    logger.info('[SyncController] CREATE: Detected gift list type - will create gift_details');
-                    logger.info('[SyncController] CREATE: Gift item data:', JSON.stringify(createData));
                     detailTable = 'gift_details';
                     detailIdColumn = 'gift_detail_id';
                     break;
@@ -1738,13 +1736,11 @@ function syncControllerFactory(socketService) {
                 }
 
                 if (detailTable && detailIdColumn) {
-                  logger.info(`[SyncController] CREATE: Creating detail record in table: ${detailTable}`);
                   // Prioritize the 'raw' field for place_details, as it contains the full object
                   // needed by the ListService, whereas api_metadata might be partial.
                   // For gift_details, use the item data directly
                   const detailSource = detailTable === 'gift_details' ? createData : 
                                      (detailTable === 'place_details' && createData.raw) ? createData.raw : createData.api_metadata;
-                  logger.info(`[SyncController] CREATE: Detail source for ${detailTable}:`, typeof detailSource === 'string' ? detailSource : JSON.stringify(detailSource));
 
                   const detailRec = await ListService.createDetailRecord(
                     client,
@@ -1795,13 +1791,30 @@ function syncControllerFactory(socketService) {
             let updateListId = undefined; // Store list_id for notifications
 
             // Enforce collaboration permissions for list_items update
+            let existingApiMetadata = null;
             if (tableName === 'list_items') {
-              const { rows: liRows } = await client.query('SELECT list_id FROM public.list_items WHERE id = $1', [recordId]);
+              const { rows: liRows } = await client.query(
+                'SELECT list_id, api_metadata FROM public.list_items WHERE id = $1',
+                [recordId]
+              );
               if (liRows.length === 0) {
                 results.push({ tableName, operation, clientRecordId: recordId, status: 'error_not_found' });
                 continue;
               }
               updateListId = liRows[0].list_id; // Store for later use
+              try {
+                existingApiMetadata = liRows[0].api_metadata
+                  ? (typeof liRows[0].api_metadata === 'string'
+                      ? JSON.parse(liRows[0].api_metadata)
+                      : liRows[0].api_metadata)
+                  : null;
+              } catch (parseErr) {
+                logger.warn('[SyncController] Failed to parse existing api_metadata for list_item', {
+                  recordId,
+                  error: parseErr,
+                });
+                existingApiMetadata = null;
+              }
               const allowed = await userCanEditList(client, userId, updateListId);
               if (!allowed) {
                 results.push({ tableName, operation, clientRecordId: recordId, status: 'error_forbidden', error: 'Not allowed to edit items on this list' });
@@ -1814,12 +1827,76 @@ function syncControllerFactory(socketService) {
                 continue;
             }
             
-            // For list_items, parse custom_fields if it's a string
+            // For list_items, parse custom_fields if it's a string and keep api_metadata as an object for merging
+            let parsedApiMetadata = null;
             if (tableName === 'list_items') {
-                ['custom_fields', 'api_metadata'].forEach(col => {
-                    if (updateData[col] && typeof updateData[col] === 'object') {
-                        updateData[col] = JSON.stringify(updateData[col]);
+                if (updateData.custom_fields && typeof updateData.custom_fields === 'object') {
+                    updateData.custom_fields = JSON.stringify(updateData.custom_fields);
+                }
+                if (updateData.api_metadata) {
+                    if (typeof updateData.api_metadata === 'object') {
+                        parsedApiMetadata = updateData.api_metadata;
+                    } else if (typeof updateData.api_metadata === 'string') {
+                        try {
+                            parsedApiMetadata = JSON.parse(updateData.api_metadata);
+                        } catch {
+                            parsedApiMetadata = null;
+                        }
                     }
+                }
+                if (!parsedApiMetadata && updateData.api_metadata) {
+                  try {
+                    parsedApiMetadata = JSON.parse(updateData.api_metadata);
+                  } catch {
+                    parsedApiMetadata = null;
+                  }
+                }
+
+                // Build/merge api_metadata and ensure latest gift fields are present
+                if (!parsedApiMetadata || typeof parsedApiMetadata !== 'object') {
+                  parsedApiMetadata = {};
+                }
+                const mergedApiMetadata = {
+                  ...(existingApiMetadata || {}),
+                  ...(parsedApiMetadata || {}),
+                };
+
+                const ratingFromPayload =
+                  updateData.rating !== undefined && updateData.rating !== null
+                    ? Number(updateData.rating)
+                    : updateData.priority !== undefined && updateData.priority !== null
+                      ? Number(updateData.priority)
+                      : mergedApiMetadata.rating;
+                if (ratingFromPayload !== undefined && ratingFromPayload !== null && !Number.isNaN(ratingFromPayload)) {
+                  mergedApiMetadata.rating = ratingFromPayload;
+                }
+                if (updateData.quantity !== undefined && updateData.quantity !== null) {
+                  mergedApiMetadata.quantity = updateData.quantity;
+                }
+                const metaWebLink = updateData.web_link || updateData.webLink;
+                if (metaWebLink !== undefined) {
+                  mergedApiMetadata.web_link = metaWebLink;
+                }
+                const metaWhereToBuy = updateData.where_to_buy || updateData.whereToBuy;
+                if (metaWhereToBuy !== undefined) {
+                  mergedApiMetadata.where_to_buy = metaWhereToBuy;
+                }
+                if (updateData.price !== undefined && updateData.price !== null) {
+                  mergedApiMetadata.price = updateData.price;
+                }
+                if (updateData.description !== undefined && updateData.description !== null) {
+                  mergedApiMetadata.description = updateData.description;
+                }
+
+                // Keep as object for downstream updates (cast to jsonb in queries)
+                updateData.api_metadata = { ...mergedApiMetadata };
+
+                const giftFields = ['quantity','where_to_buy','amazon_url','web_link','rating','price','description'];
+                giftFields.forEach((field) => {
+                  const value = mergedApiMetadata[field];
+                  if (value !== undefined && updateData[field] === undefined) {
+                    updateData[field] = value;
+                  }
                 });
             }
 
@@ -1857,7 +1934,14 @@ function syncControllerFactory(socketService) {
               updateData.background = JSON.stringify(updateData.background);
             }
 
-            const queryValues = fieldsToUpdate.map(field => filteredData[field]);
+            const queryValues = fieldsToUpdate.map(field => {
+              if (tableName === 'list_items' && field === 'api_metadata') {
+                return typeof filteredData[field] === 'string'
+                  ? filteredData[field]
+                  : JSON.stringify(filteredData[field] || {});
+              }
+              return filteredData[field];
+            });
 
             // Only append automatic timestamp update if client did NOT include updated_at
             const needsTimestamp = !fieldsToUpdate.includes('updated_at');
@@ -1866,7 +1950,90 @@ function syncControllerFactory(socketService) {
               '[DEBUG-JSON] about to UPDATE list_items',
               JSON.stringify(filteredData, null, 2)
             );
-            await client.query(updateQuery, [...queryValues, recordId]);
+            try {
+              await client.query(updateQuery, [...queryValues, recordId]);
+            } catch (sqlErr) {
+              logger.error('[SyncController] list_items base UPDATE failed', {
+                recordId,
+                message: sqlErr?.message,
+                code: sqlErr?.code,
+                detail: sqlErr?.detail,
+                constraint: sqlErr?.constraint,
+              });
+              throw sqlErr;
+            }
+
+            // For list_items, force-write critical fields to avoid stale api_metadata/rating
+            if (tableName === 'list_items') {
+              const ratingVal =
+                updateData.rating !== undefined && updateData.rating !== null
+                  ? Number(updateData.rating)
+                  : updateData.priority !== undefined && updateData.priority !== null
+                    ? Number(updateData.priority)
+                    : null;
+              const descriptionToPersist =
+                dataPayload?.description !== undefined
+                  ? dataPayload.description
+                  : updateData.description !== undefined
+                    ? updateData.description
+                    : null;
+              const whereToBuyToPersist =
+                updateData.where_to_buy !== undefined
+                  ? updateData.where_to_buy
+                  : updateData.whereToBuy !== undefined
+                    ? updateData.whereToBuy
+                    : null;
+              const webLinkToPersist =
+                updateData.web_link !== undefined
+                  ? updateData.web_link
+                  : updateData.webLink !== undefined
+                    ? updateData.webLink
+                    : null;
+              const priceToPersist =
+                updateData.price !== undefined && updateData.price !== null
+                  ? updateData.price
+                  : null;
+
+              // Always write merged api_metadata and critical fields in one simple update
+              const finalApiMetaObj =
+                (updateData.api_metadata && typeof updateData.api_metadata === 'object'
+                  ? updateData.api_metadata
+                  : null) ||
+                existingApiMetadata ||
+                {};
+              const finalApiMetaJson =
+                typeof finalApiMetaObj === 'string'
+                  ? finalApiMetaObj
+                  : JSON.stringify(finalApiMetaObj || {});
+
+              try {
+                await client.query(
+                  `UPDATE list_items
+                     SET api_metadata = $1::jsonb,
+                         priority = COALESCE($2, priority),
+                         description = COALESCE($3, description),
+                         price = COALESCE($4, price),
+                         updated_at = CURRENT_TIMESTAMP
+                   WHERE id = $5`,
+                  [
+                    finalApiMetaJson,
+                    ratingVal,
+                    descriptionToPersist,
+                    priceToPersist,
+                    recordId,
+                  ]
+                );
+              } catch (forceErr) {
+                logger.error('[SyncController] Failed force-writing list_items fields', {
+                  recordId,
+                  message: forceErr?.message,
+                  code: forceErr?.code,
+                  detail: forceErr?.detail,
+                  constraint: forceErr?.constraint,
+                });
+                throw forceErr;
+              }
+            }
 
             // ---- Spotify raw-details upsert on UPDATE ----
             if (tableName === 'list_items' && updateData.api_source === 'spotify') {
@@ -1946,9 +2113,9 @@ function syncControllerFactory(socketService) {
                     break;
                   case 'gift':
                   case 'gifts':
-                    logger.info('[SyncController] UPDATE: Detected gift list type - will ensure gift_details');
-                    logger.info('[SyncController] UPDATE: Gift item data:', JSON.stringify(updateData));
                     detailTable = 'gift_details';
+                    // Normalize api_source for gifts to avoid movie/other lookups
+                    updateData.api_source = 'gift';
                     break;
                   default:
                     break; // Unknown/custom types => skip
@@ -1956,13 +2123,93 @@ function syncControllerFactory(socketService) {
 
                  if (detailTable) {
                   // Ensure a detail row exists – ListService.createDetailRecord is idempotent (ON CONFLICT list_item_id)
-                  await ListService.createDetailRecord(
+                  const detailSource =
+                    detailTable === 'gift_details'
+                      ? {
+                          ...(existingApiMetadata || {}),
+                          ...(parsedApiMetadata || {}),
+                          // Always include latest top-level gift fields
+                          rating:
+                            updateData.rating !== undefined && updateData.rating !== null
+                              ? Number(updateData.rating)
+                              : updateData.priority !== undefined && updateData.priority !== null
+                                ? Number(updateData.priority)
+                                : undefined,
+                          quantity: updateData.quantity,
+                          where_to_buy: updateData.where_to_buy || updateData.whereToBuy,
+                          web_link: updateData.web_link || updateData.webLink,
+                          amazon_url: updateData.amazon_url,
+                          price: updateData.price,
+                          description: updateData.description,
+                          link: updateData.link,
+                        }
+                      : updateData.api_metadata;
+                  const detailRec = await ListService.createDetailRecord(
                     client,
                     detailTable,
-                    updateData.api_metadata,
+                    detailSource,
                     recordId,
                     updateData
                   );
+
+                  // For gifts, link the FK back to list_items and ensure the gift_details row is refreshed
+                  if (detailTable === 'gift_details') {
+                    const mergedGiftMeta = {
+                      ...(existingApiMetadata || {}),
+                      ...(parsedApiMetadata || {}),
+                      ...(detailSource || {}),
+                    };
+
+                    try {
+                      if (detailRec && detailRec.id) {
+                        await client.query(
+                          'UPDATE list_items SET gift_detail_id = $1 WHERE id = $2',
+                          [detailRec.id, recordId]
+                        );
+                      }
+
+                      // Ensure gift_details row is refreshed with the latest values even if the trigger was skipped
+                      if (detailRec) {
+                        const gdUpdate = `
+                          UPDATE gift_details
+                          SET quantity = COALESCE($1, quantity),
+                              where_to_buy = COALESCE($2, where_to_buy),
+                              amazon_url = COALESCE($3, amazon_url),
+                              web_link = COALESCE($4, web_link),
+                              rating = COALESCE($5, rating),
+                              updated_at = CURRENT_TIMESTAMP
+                          WHERE id = $6 OR list_item_id = $7
+                        `;
+                        await client.query(gdUpdate, [
+                          detailSource?.quantity ?? detailRec.quantity ?? null,
+                          detailSource?.where_to_buy ?? detailRec.where_to_buy ?? null,
+                          detailSource?.amazon_url ?? detailRec.amazon_url ?? null,
+                          detailSource?.web_link ?? detailRec.web_link ?? null,
+                          detailSource?.rating ?? detailRec.rating ?? null,
+                          detailRec.id,
+                          recordId,
+                        ]);
+                      }
+
+                      // Force-sync api_metadata, api_source, and description on list_items for gift items so UI sees latest values
+                      await client.query(
+                        `UPDATE list_items
+                           SET api_metadata = $1::jsonb,
+                               description = COALESCE($2, description),
+                               api_source = 'gift',
+                               updated_at = CURRENT_TIMESTAMP
+                         WHERE id = $3`,
+                        [
+                          JSON.stringify(mergedGiftMeta || {}),
+                          updateData.description ?? dataPayload?.description ?? null,
+                          recordId,
+                        ]
+                      );
+
+                    } catch (linkErr) {
+                      logger.error('[SyncController] UPDATE: failed to refresh gift_details/list_items', linkErr);
+                    }
+                  }
                 }
               } catch (detailErr) {
                 logger.error('[SyncController] Failed ensuring detail record on update:', detailErr);
@@ -2281,24 +2528,24 @@ function syncControllerFactory(socketService) {
                   'id', li.id,
                   'list_id', li.list_id,
                   'title', li.title,
-                  'description', li.description,
+                  'description', COALESCE(li.description, gd.description, gd.details->>'description'),
                   'status', li.status,
-                  'priority', li.priority,
+                  'priority', COALESCE(li.priority, li.rating, gd.rating, (li.api_metadata->>'rating')::numeric),
                   'image_url', li.image_url,
-                  'link', li.link,
+                  'link', COALESCE(li.link, li.api_metadata->>'web_link', gd.web_link),
                   'custom_fields', li.custom_fields,
                   'owner_id', li.owner_id,
                   'created_at', li.created_at,
                   'updated_at', li.updated_at,
                   'deleted_at', li.deleted_at,
-                  'price', li.price,
+                  'price', COALESCE(li.price, (li.api_metadata->>'price')::numeric),
                   'api_metadata', li.api_metadata,
                   'gift_detail_id', li.gift_detail_id,
-                  'quantity', gd.quantity,
-                  'where_to_buy', gd.where_to_buy,
+                  'quantity', COALESCE(gd.quantity, (li.api_metadata->>'quantity')::numeric),
+                  'where_to_buy', COALESCE(li.where_to_buy, li.api_metadata->>'where_to_buy', gd.where_to_buy),
                   'amazon_url', gd.amazon_url,
-                  'web_link', gd.web_link,
-                  'rating', gd.rating
+                  'web_link', COALESCE(li.web_link, li.api_metadata->>'web_link', gd.web_link),
+                  'rating', COALESCE(li.rating, gd.rating, (li.api_metadata->>'rating')::numeric)
                 )
               ELSE row_to_json(li.*)
             END as json_build_object
@@ -2759,16 +3006,66 @@ function syncControllerFactory(socketService) {
           return res.status(403).json({ error: 'Access denied' });
         }
       }
+
+      // Fetch list metadata to decide whether to skip owner fetch for gift lists
+      const { rows: listMetaRows } = await db.query(
+        'SELECT owner_id, list_type FROM public.lists WHERE id = $1',
+        [listId]
+      );
+      const listMeta = listMetaRows[0];
+      const isGiftListOwner =
+        listMeta &&
+        String(listMeta.owner_id) === String(userId) &&
+        listMeta.list_type &&
+        String(listMeta.list_type).toLowerCase() === 'gifts';
+
+      // Suppress redundant owner fetches for gift lists (owner already uses sync)
+      if (isGiftListOwner) {
+        logger.info(`[SyncController] Skipping list items fetch for gift list (owner) ${listId}`);
+        return res.status(200).json({
+          success: true,
+          items: [],
+          count: 0,
+          suppressed: true,
+        });
+      }
       
-      // Fetch all non-deleted items for this list
+      // Fetch items plus list_type and gift details so we can normalise api_source for gifts
       const itemsQuery = `
-        SELECT * FROM public.list_items 
-        WHERE list_id = $1 AND deleted_at IS NULL
-        ORDER BY created_at DESC
+        SELECT 
+          li.*,
+          l.list_type,
+          gd.quantity   AS gift_quantity,
+          gd.where_to_buy AS gift_where_to_buy,
+          gd.amazon_url AS gift_amazon_url,
+          gd.web_link   AS gift_web_link,
+          gd.rating     AS gift_rating
+        FROM public.list_items li
+        JOIN public.lists l ON l.id = li.list_id
+        LEFT JOIN public.gift_details gd ON gd.list_item_id = li.id
+        WHERE li.list_id = $1 AND li.deleted_at IS NULL
+        ORDER BY li.created_at DESC
       `;
-      const { rows: items } = await db.query(itemsQuery, [listId]);
-      
-      logger.info(`[SyncController] User ${userId} fetched ${items.length} items for list ${listId}`);
+      const { rows: rawItems } = await db.query(itemsQuery, [listId]);
+
+      const items = rawItems.map(item => {
+        const isGift = (item.list_type && String(item.list_type).toLowerCase() === 'gifts') ||
+                       (item.api_source && String(item.api_source).toLowerCase() === 'gift') ||
+                       Boolean(item.gift_detail_id);
+        if (isGift) {
+          return {
+            ...item,
+            api_source: 'gift',
+            // include latest gift details for clients relying on list_items payload
+            quantity: item.gift_quantity ?? item.quantity ?? null,
+            where_to_buy: item.gift_where_to_buy ?? item.where_to_buy ?? null,
+            amazon_url: item.gift_amazon_url ?? item.amazon_url ?? null,
+            web_link: item.gift_web_link ?? item.web_link ?? null,
+            rating: item.gift_rating ?? item.rating ?? null,
+          };
+        }
+        return item;
+      });
       
       res.status(200).json({ 
         success: true,

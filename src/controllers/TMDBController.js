@@ -43,11 +43,14 @@ async function rateLimitedFetch(url) {
  * @param {Object} socketService - Optional socket service for real-time updates
  * @returns {Object} Controller object with TMDB API methods
  */
-function tmdbControllerFactory(socketService = null) {
+function tmdbControllerFactory(socketService = null, db = null) {
   // Create a dummy socket service if none is provided
   const safeSocketService = socketService || {
     emitToUser: () => {} // No-op function
   };
+
+  // Lazy-load db pool to avoid circular imports when not provided
+  const pool = db || require('../config/db');
 
   async function getConfiguration(req, res) {
     try {
@@ -125,6 +128,30 @@ function tmdbControllerFactory(socketService = null) {
   const getMediaDetails = async (req, res) => {
     const { mediaType, id } = req.params;
     console.log('getMediaDetails mediaType', mediaType);
+
+    // Guard: if the requested id belongs to a gift item, skip TMDB lookups
+    try {
+      const { rows } = await pool.query(
+        `SELECT li.id, li.api_source, l.list_type
+           FROM public.list_items li
+           JOIN public.lists l ON l.id = li.list_id
+          WHERE li.item_id_from_api = $1
+          LIMIT 1`,
+        [id]
+      );
+      if (rows.length) {
+        const row = rows[0];
+        const isGift = (row.api_source && row.api_source.toLowerCase() === 'gift') ||
+                       (row.list_type && row.list_type.toLowerCase() === 'gifts') ||
+                       Boolean(row.id);
+        if (isGift) {
+          return res.status(404).json({ error: 'No media details for gift items' });
+        }
+      }
+    } catch (guardErr) {
+      console.error('getMediaDetails guard failed:', guardErr);
+      // continue to TMDB lookup rather than fail hard
+    }
 
     const appendToResponseString = 'append_to_response';
     // Include watch provider availability in the same request
