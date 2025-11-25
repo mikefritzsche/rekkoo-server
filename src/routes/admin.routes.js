@@ -81,6 +81,36 @@ router.get('/users', authenticateJWT, async (req, res) => {
   }
 });
 
+// GET /v1.0/admin/users/:userId/settings – inspect user settings/preferences
+router.get('/users/:userId/settings', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+    const { userId } = req.params;
+    const { rows } = await db.query(
+      `SELECT
+         u.id,
+         u.username,
+         u.email,
+         u.full_name,
+         us.privacy_settings,
+         us.notification_preferences,
+         us.created_at,
+         us.updated_at
+       FROM users u
+       LEFT JOIN user_settings us ON us.user_id = u.id
+       WHERE u.id = $1`,
+      [userId],
+    );
+    if (!rows.length) return res.status(404).json({ message: 'User not found' });
+    res.json({ settings: rows[0] });
+  } catch (err) {
+    console.error('Admin user settings fetch error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // GET /v1.0/admin/roles – list all available roles
 router.get('/roles', authenticateJWT, async (req, res) => {
   try {
@@ -1192,6 +1222,362 @@ router.get('/lists/:id/items', authenticateJWT, async (req, res) => {
     res.json({ items: rows });
   } catch (err) {
     console.error('Admin list-items fetch error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// GET /v1.0/admin/list-items – global list items browser with pagination, search, and filters
+router.get('/list-items', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+
+    const limit = Math.max(Math.min(parseInt(req.query.limit ?? '50', 10) || 50, 200), 1);
+    const offset = Math.max(parseInt(req.query.offset ?? '0', 10) || 0, 0);
+    const rawSearch = (req.query.search || '').toString().trim().toLowerCase();
+    const listId = req.query.listId || req.query.list_id || null;
+    const ownerId = req.query.ownerId || req.query.owner_id || null;
+    const listType = req.query.listType || req.query.list_type || null;
+    const userIdFilter = req.query.userId || req.query.user_id || null;
+    const status = (req.query.status || 'active').toString().toLowerCase();
+    const sortParam = (req.query.sort || '').toString().trim().toLowerCase();
+
+    const params = [];
+    const filters = ['l.deleted_at IS NULL']; // keep to non-deleted lists
+
+    if (status === 'deleted') {
+      filters.push('li.deleted_at IS NOT NULL');
+    } else if (status === 'all') {
+      // no filter on deleted_at for items
+    } else {
+      filters.push('li.deleted_at IS NULL');
+    }
+
+    if (listId) {
+      params.push(listId);
+      filters.push(`li.list_id = $${params.length}`);
+    }
+
+    if (ownerId) {
+      params.push(ownerId);
+      filters.push(`l.owner_id = $${params.length}`);
+    }
+
+    if (userIdFilter) {
+      params.push(userIdFilter);
+      const idx = params.length;
+      filters.push(`(li.owner_id = $${idx} OR l.owner_id = $${idx})`);
+    }
+
+    if (listType) {
+      params.push(listType);
+      filters.push(`l.list_type = $${params.length}`);
+    }
+
+    if (rawSearch) {
+      params.push(`%${rawSearch}%`);
+      const idx = params.length;
+      filters.push(`(
+        LOWER(li.title) LIKE $${idx}
+        OR LOWER(COALESCE(li.description, '')) LIKE $${idx}
+        OR LOWER(COALESCE(l.title, '')) LIKE $${idx}
+        OR LOWER(COALESCE(owner.email, '')) LIKE $${idx}
+        OR LOWER(COALESCE(owner.username, '')) LIKE $${idx}
+      )`);
+    }
+
+    const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+
+    let orderClause = 'ORDER BY li.updated_at DESC';
+    if (sortParam) {
+      const [field, dirRaw] = sortParam.split(':');
+      const direction = dirRaw === 'asc' ? 'ASC' : 'DESC';
+      switch (field) {
+        case 'created_at':
+          orderClause = `ORDER BY li.created_at ${direction}`;
+          break;
+        case 'title':
+          orderClause = `ORDER BY li.title ${direction}, li.updated_at DESC`;
+          break;
+        case 'list':
+          orderClause = `ORDER BY l.title ${direction}, li.updated_at DESC`;
+          break;
+        case 'owner':
+          orderClause = `ORDER BY owner.email ${direction}, li.updated_at DESC`;
+          break;
+        case 'status':
+          orderClause = `ORDER BY li.status ${direction}, li.updated_at DESC`;
+          break;
+        default:
+          break;
+      }
+    }
+
+    const limitIdx = params.length + 1;
+    const offsetIdx = params.length + 2;
+
+    const baseSelect = `
+      SELECT
+        li.id,
+        li.title,
+        li.description,
+        li.list_id,
+        li.status,
+        li.priority,
+        li.price,
+        li.link,
+        li.created_at,
+        li.updated_at,
+        li.deleted_at,
+        l.title AS list_title,
+        l.list_type,
+        l.is_public AS list_is_public,
+        l.owner_id AS owner_id,
+        owner.email AS owner_email,
+        owner.username AS owner_username
+      FROM list_items li
+      JOIN lists l ON l.id = li.list_id
+      LEFT JOIN users owner ON owner.id = l.owner_id
+      ${whereSql}
+    `;
+
+    const dataQuery = `
+      ${baseSelect}
+      ${orderClause}
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+    `;
+
+    const countQuery = `
+      SELECT COUNT(*)::int AS total
+      FROM list_items li
+      JOIN lists l ON l.id = li.list_id
+      LEFT JOIN users owner ON owner.id = l.owner_id
+      ${whereSql}
+    `;
+
+    const queryParams = params.concat([limit, offset]);
+    const [dataResult, countResult] = await Promise.all([
+      db.query(dataQuery, queryParams),
+      db.query(countQuery, params),
+    ]);
+
+    const total = countResult.rows[0] ? Number(countResult.rows[0].total) : 0;
+    res.json({
+      items: dataResult.rows,
+      total,
+      limit,
+      offset,
+      hasMore: total > offset + dataResult.rows.length,
+    });
+  } catch (err) {
+    console.error('Admin global list-items fetch error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// --- Admin connection invitations management ---
+router.get('/connection-requests', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) {
+      return res.status(403).json({ message: 'Admin role required' });
+    }
+
+    const limit = Math.max(Math.min(parseInt(req.query.limit ?? '50', 10) || 50, 200), 1);
+    const offset = Math.max(parseInt(req.query.offset ?? '0', 10) || 0, 0);
+    const status = (req.query.status || 'pending').toString().toLowerCase();
+    const search = (req.query.search || '').toString().trim().toLowerCase();
+
+    const params = [];
+    const filters = [];
+
+    if (status && status !== 'all') {
+      params.push(status);
+      filters.push(`LOWER(ci.status) = $${params.length}`);
+    }
+
+    if (search) {
+      params.push(`%${search}%`);
+      const idx = params.length;
+      filters.push(`(
+        LOWER(s.username) LIKE $${idx} OR LOWER(COALESCE(s.email, '')) LIKE $${idx}
+        OR LOWER(r.username) LIKE $${idx} OR LOWER(COALESCE(r.email, '')) LIKE $${idx}
+      )`);
+    }
+
+    const whereSql = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+    const limitIdx = params.length + 1;
+    const offsetIdx = params.length + 2;
+
+    const dataQuery = `
+      SELECT
+        ci.*,
+        s.username AS sender_username,
+        s.email AS sender_email,
+        r.username AS recipient_username,
+        r.email AS recipient_email
+      FROM connection_invitations ci
+      JOIN users s ON s.id = ci.sender_id
+      JOIN users r ON r.id = ci.recipient_id
+      ${whereSql}
+      ORDER BY ci.created_at DESC
+      LIMIT $${limitIdx} OFFSET $${offsetIdx}
+    `;
+
+    const countQuery = `
+      SELECT COUNT(*)::int AS total
+      FROM connection_invitations ci
+      JOIN users s ON s.id = ci.sender_id
+      JOIN users r ON r.id = ci.recipient_id
+      ${whereSql}
+    `;
+
+    const queryParams = params.concat([limit, offset]);
+    const [dataResult, countResult] = await Promise.all([
+      db.query(dataQuery, queryParams),
+      db.query(countQuery, params),
+    ]);
+
+    const total = countResult.rows[0] ? Number(countResult.rows[0].total) : 0;
+    res.json({
+      requests: dataResult.rows,
+      total,
+      limit,
+      offset,
+      hasMore: total > offset + dataResult.rows.length,
+    });
+  } catch (err) {
+    console.error('Admin connection requests list error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+async function upsertAcceptedConnections(userA, userB) {
+  // create or update both directions to accepted mutual
+  await db.query(
+    `INSERT INTO connections
+       (user_id, connection_id, status, connection_type, initiated_by, visibility_level, accepted_at, updated_at)
+     VALUES ($1, $2, 'accepted', 'mutual', $1, 'friends', NOW(), NOW())
+     ON CONFLICT (user_id, connection_id) DO UPDATE SET
+       status = 'accepted',
+       connection_type = 'mutual',
+       accepted_at = NOW(),
+       updated_at = NOW()`,
+    [userA, userB],
+  );
+  await db.query(
+    `INSERT INTO connections
+       (user_id, connection_id, status, connection_type, initiated_by, visibility_level, accepted_at, updated_at)
+     VALUES ($1, $2, 'accepted', 'mutual', $1, 'friends', NOW(), NOW())
+     ON CONFLICT (user_id, connection_id) DO UPDATE SET
+       status = 'accepted',
+       connection_type = 'mutual',
+       accepted_at = NOW(),
+       updated_at = NOW()`,
+    [userB, userA],
+  );
+}
+
+async function deletePendingConnections(userA, userB) {
+  await db.query(
+    `DELETE FROM connections
+     WHERE ((user_id = $1 AND connection_id = $2)
+        OR (user_id = $2 AND connection_id = $1))
+       AND status = 'pending'`,
+    [userA, userB],
+  );
+}
+
+async function setInvitationStatus(id, status, declineType = null, declineMessage = null) {
+  const result = await db.query(
+    `UPDATE connection_invitations
+     SET status = $2,
+         responded_at = NOW(),
+         decline_type = $3,
+         decline_message = $4
+     WHERE id = $1
+     RETURNING sender_id, recipient_id`,
+    [id, status, declineType, declineMessage],
+  );
+  return result.rows[0];
+}
+
+router.post('/connection-requests/:id/accept', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+
+    await db.query('BEGIN');
+    const row = await setInvitationStatus(req.params.id, 'accepted');
+    if (!row) {
+      await db.query('ROLLBACK');
+      return res.status(404).json({ message: 'Invitation not found' });
+    }
+    await upsertAcceptedConnections(row.sender_id, row.recipient_id);
+    await db.query('COMMIT');
+    res.json({ success: true });
+  } catch (err) {
+    await db.query('ROLLBACK');
+    console.error('Admin accept connection request error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.post('/connection-requests/:id/decline', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+    const { declineType = 'standard', declineMessage = null } = req.body || {};
+    await db.query('BEGIN');
+    const row = await setInvitationStatus(req.params.id, 'declined', declineType, declineMessage);
+    if (!row) {
+      await db.query('ROLLBACK');
+      return res.status(404).json({ message: 'Invitation not found' });
+    }
+    await deletePendingConnections(row.sender_id, row.recipient_id);
+    await db.query('COMMIT');
+    res.json({ success: true });
+  } catch (err) {
+    await db.query('ROLLBACK');
+    console.error('Admin decline connection request error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.post('/connection-requests/:id/cancel', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+    await db.query('BEGIN');
+    const row = await setInvitationStatus(req.params.id, 'cancelled');
+    if (!row) {
+      await db.query('ROLLBACK');
+      return res.status(404).json({ message: 'Invitation not found' });
+    }
+    await deletePendingConnections(row.sender_id, row.recipient_id);
+    await db.query('COMMIT');
+    res.json({ success: true });
+  } catch (err) {
+    await db.query('ROLLBACK');
+    console.error('Admin cancel connection request error', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.delete('/connection-requests/:id', authenticateJWT, async (req, res) => {
+  try {
+    if (!(await ensureAdmin(req.user.id))) return res.status(403).json({ message: 'Admin role required' });
+    const { rows } = await db.query(
+      `DELETE FROM connection_invitations
+       WHERE id = $1
+       RETURNING sender_id, recipient_id, status`,
+      [req.params.id],
+    );
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Invitation not found' });
+    }
+    // Clean up any pending connection rows if the invite was pending
+    if ((rows[0].status || '').toLowerCase() === 'pending') {
+      await deletePendingConnections(rows[0].sender_id, rows[0].recipient_id);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Admin delete connection request error', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
