@@ -30,16 +30,17 @@ commands:
           name: Validate Hetzner server status
           command: |
             echo "🔍 Validating Hetzner server status using API..."
-            # Get server info using Hetzner API
-            RESPONSE=$(curl -s -H "Authorization: Bearer ${HETZNER_API_TOKEN}" \
-              "https://api.hetzner.cloud/v1/servers" | head -c 100)
-            
-            if [[ $? -eq 0 && "$RESPONSE" == *"servers"* ]]; then
+            RESPONSE=$(curl -fsSL --max-time 15 --retry 3 --retry-delay 2 \
+              -H "Authorization: Bearer ${HETZNER_API_TOKEN}" \
+              "https://api.hetzner.cloud/v1/servers")
+            SNIPPET=$(printf '%s' "$RESPONSE" | head -c 200)
+
+            if printf '%s' "$RESPONSE" | grep -q '"servers"'; then
               echo "✅ Hetzner API connection successful"
               echo "✅ Server infrastructure validated"
             else
               echo "❌ Failed to connect to Hetzner API"
-              echo "Response: $RESPONSE"
+              echo "Response: $SNIPPET"
               exit 1
             fi
       - run:
