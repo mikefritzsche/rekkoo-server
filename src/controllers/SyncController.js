@@ -66,6 +66,14 @@ function syncControllerFactory(socketService) {
     if (payload.message !== undefined || forCreate) {
       normalized.message = payload.message ?? null;
     }
+    if (
+      payload.exclusions !== undefined ||
+      payload.exclusion_pairs !== undefined ||
+      forCreate
+    ) {
+      const rawExclusions = payload.exclusions ?? payload.exclusion_pairs ?? [];
+      normalized.exclusions = Array.isArray(rawExclusions) ? rawExclusions : [];
+    }
 
     const autoDrawValue = payload.autoDrawEnabled ?? payload.auto_draw_enabled;
     if (autoDrawValue !== undefined || forCreate) {

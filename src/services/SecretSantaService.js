@@ -21,6 +21,60 @@ const sanitizeCurrency = (currency) => {
   return currency.toUpperCase().slice(0, 8);
 };
 
+const parseExclusionInput = (value) => {
+  if (!value && value !== 0) return [];
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === 'object') return [value];
+  return [];
+};
+
+const normalizeExclusionPairs = (rawPairs = [], allowedParticipants = []) => {
+  const allowedSet = new Set((allowedParticipants || []).map((id) => String(id)));
+  const seen = new Set();
+  const pairs = [];
+
+  parseExclusionInput(rawPairs).forEach((entry) => {
+    const userId = entry?.user_id || entry?.userId || entry?.giver_user_id;
+    const excludedId =
+      entry?.excluded_user_id ||
+      entry?.excludedUserId ||
+      entry?.recipient_user_id ||
+      entry?.recipientUserId;
+
+    if (!userId || !excludedId) return;
+    const giver = String(userId);
+    const recipient = String(excludedId);
+    if (giver === recipient) return;
+    if (allowedSet.size && (!allowedSet.has(giver) || !allowedSet.has(recipient))) return;
+
+    const [first, second] = giver < recipient ? [giver, recipient] : [recipient, giver];
+    const key = `${first}__${second}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    pairs.push({ user_id: giver, excluded_user_id: recipient });
+  });
+
+  return pairs.sort((a, b) => `${a.user_id}${a.excluded_user_id}`.localeCompare(`${b.user_id}${b.excluded_user_id}`));
+};
+
+const areExclusionsEqual = (a = [], b = []) => {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i].user_id !== b[i].user_id || a[i].excluded_user_id !== b[i].excluded_user_id) {
+      return false;
+    }
+  }
+  return true;
+};
+
 const mapUserDisplay = (row) => ({
   userId: row.user_id,
   displayName: row.full_name || row.username,
@@ -48,6 +102,7 @@ const ensureSecretSantaSchema = async () => {
         signup_cutoff_date timestamptz,
         note text,
         message text,
+        exclusion_pairs jsonb DEFAULT '[]'::jsonb,
         auto_draw_enabled boolean NOT NULL DEFAULT false,
         notify_via_push boolean NOT NULL DEFAULT true,
         notify_via_email boolean NOT NULL DEFAULT false,
@@ -96,6 +151,8 @@ const ensureSecretSantaSchema = async () => {
       )`,
     `CREATE INDEX IF NOT EXISTS idx_secret_santa_guest_invites_round
         ON public.secret_santa_guest_invites (round_id)`,
+    `ALTER TABLE public.secret_santa_rounds
+        ADD COLUMN IF NOT EXISTS exclusion_pairs jsonb DEFAULT '[]'::jsonb`,
   ];
 
   for (const statement of statements) {
@@ -249,7 +306,9 @@ class SecretSantaService {
       [listId]
     );
 
-    const round = rows[0] || null;
+    const round = rows[0]
+      ? { ...rows[0], exclusion_pairs: rows[0].exclusion_pairs || [] }
+      : null;
     let participants;
     let pairings = [];
     let viewerPairing = null;
@@ -466,6 +525,10 @@ class SecretSantaService {
         actorId,
       });
     }
+
+    if (normalizedParticipants.length > 0) {
+      await this.pruneExclusionsForRound(roundId, normalizedParticipants);
+    }
   }
 
   async ensureParticipantsExist(participantIds = []) {
@@ -523,6 +586,43 @@ class SecretSantaService {
     );
   }
 
+  async pruneExclusionsForRound(roundId, allowedParticipantIds = []) {
+    if (!roundId) return [];
+    let allowed = allowedParticipantIds && allowedParticipantIds.length ? allowedParticipantIds : [];
+    if (!allowed.length) {
+      const { rows } = await db.query(
+        `SELECT user_id
+           FROM secret_santa_round_participants
+          WHERE round_id = $1
+            AND status <> $2`,
+        [roundId, PARTICIPANT_STATUS.REMOVED]
+      );
+      allowed = rows.map((row) => String(row.user_id));
+    }
+
+    const { rows: exclusionRows } = await db.query(
+      `SELECT exclusion_pairs
+         FROM secret_santa_rounds
+        WHERE id = $1`,
+      [roundId]
+    );
+
+    const normalizedCurrent = normalizeExclusionPairs(exclusionRows[0]?.exclusion_pairs || [], allowed);
+    const storedNormalized = normalizeExclusionPairs(exclusionRows[0]?.exclusion_pairs || []);
+
+    if (!areExclusionsEqual(normalizedCurrent, storedNormalized)) {
+      await db.query(
+        `UPDATE secret_santa_rounds
+            SET exclusion_pairs = $2,
+                updated_at = NOW()
+          WHERE id = $1`,
+        [roundId, JSON.stringify(normalizedCurrent)]
+      );
+    }
+
+    return normalizedCurrent;
+  }
+
   async createRound(listId, userId, payload = {}) {
     await ensureSecretSantaSchema();
     const access = await this.getListAccess(listId, userId);
@@ -556,12 +656,13 @@ class SecretSantaService {
       access.list.owner_id,
       participantIds
     );
+    const exclusions = normalizeExclusionPairs(payload.exclusions, participantIds);
 
     const roundId = payload.id || uuidv4();
     await db.query(
       `INSERT INTO secret_santa_rounds
-         (id, list_id, status, budget_cents, currency, exchange_date, signup_cutoff_date, note, message, auto_draw_enabled, notify_via_push, notify_via_email, created_by)
-       VALUES ($1,$2,'draft',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+         (id, list_id, status, budget_cents, currency, exchange_date, signup_cutoff_date, note, message, exclusion_pairs, auto_draw_enabled, notify_via_push, notify_via_email, created_by)
+       VALUES ($1,$2,'draft',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         roundId,
         listId,
@@ -571,6 +672,7 @@ class SecretSantaService {
         payload.signupCutoffDate || null,
         payload.note || null,
         payload.message || null,
+        JSON.stringify(exclusions),
         payload.autoDrawEnabled ?? false,
         payload.notifyViaPush ?? true,
         payload.notifyViaEmail ?? false,
@@ -595,6 +697,8 @@ class SecretSantaService {
     const updates = [];
     const params = [];
     let idx = 1;
+    let participantIdsForExclusions = null;
+    let participantIdsChanged = false;
 
     const fields = {
       budget_cents: payload.budgetCents,
@@ -620,18 +724,11 @@ class SecretSantaService {
       }
     });
 
-    if (updates.length > 0) {
-      updates.push('updated_at = NOW()');
-      await db.query(
-        `UPDATE secret_santa_rounds SET ${updates.join(', ')}
-          WHERE id = $${idx}`,
-        [...params, roundId]
-      );
-    }
-
     if (Array.isArray(payload.participantIds)) {
+      participantIdsChanged = true;
       this.validateParticipantIds(payload.participantIds);
       const normalized = payload.participantIds.map(String);
+      participantIdsForExclusions = normalized;
       await this.ensureParticipantsExist(normalized);
       await this.ensureParticipantsHaveAccess(
         round.list_id,
@@ -641,10 +738,47 @@ class SecretSantaService {
       await this.persistParticipants(round, normalized, userId);
     }
 
+    if (!participantIdsForExclusions) {
+      const { rows } = await db.query(
+        `SELECT user_id
+           FROM secret_santa_round_participants
+          WHERE round_id = $1
+            AND status <> $2`,
+        [roundId, PARTICIPANT_STATUS.REMOVED]
+      );
+      participantIdsForExclusions = rows.map((row) => String(row.user_id));
+    }
+
+    const nextExclusions = normalizeExclusionPairs(
+      payload.exclusions !== undefined ? payload.exclusions : round.exclusion_pairs || [],
+      participantIdsForExclusions
+    );
+    const currentNormalized = normalizeExclusionPairs(
+      round.exclusion_pairs || [],
+      participantIdsForExclusions
+    );
+    const shouldUpdateExclusions =
+      payload.exclusions !== undefined || participantIdsChanged || !areExclusionsEqual(currentNormalized, nextExclusions);
+
+    if (shouldUpdateExclusions) {
+      updates.push(`exclusion_pairs = $${idx}`);
+      params.push(JSON.stringify(nextExclusions));
+      idx += 1;
+    }
+
+    if (updates.length > 0 || participantIdsChanged) {
+      updates.push('updated_at = NOW()');
+      await db.query(
+        `UPDATE secret_santa_rounds SET ${updates.join(', ')}
+          WHERE id = $${idx}`,
+        [...params, roundId]
+      );
+    }
+
     return this.getActiveRound(round.list_id, userId);
   }
 
-  generatePairings(participantIds) {
+  generatePairings(participantIds, exclusions = []) {
     if (participantIds.length < 2) {
       throw createHttpError(
         400,
@@ -652,21 +786,54 @@ class SecretSantaService {
       );
     }
 
-    const shuffled = [...participantIds];
+    const shuffled = [...participantIds.map(String)];
     for (let i = shuffled.length - 1; i > 0; i -= 1) {
       const j = Math.floor(Math.random() * (i + 1));
       [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
     }
 
+    const forbidden = new Set();
+    normalizeExclusionPairs(exclusions, participantIds).forEach((pair) => {
+      forbidden.add(`${pair.user_id}__${pair.excluded_user_id}`);
+      forbidden.add(`${pair.excluded_user_id}__${pair.user_id}`);
+    });
+
     const pairings = [];
-    for (let idx = 0; idx < shuffled.length; idx += 1) {
-      const giver = shuffled[idx];
-      const recipient = shuffled[(idx + 1) % shuffled.length];
-      if (giver === recipient) {
-        return this.generatePairings(participantIds);
+    const usedRecipients = new Set();
+
+    const backtrack = (index) => {
+      if (index >= shuffled.length) {
+        return true;
       }
-      pairings.push({ giver, recipient });
+      const giver = shuffled[index];
+      const candidates = shuffled.filter(
+        (candidate) =>
+          !usedRecipients.has(candidate) &&
+          candidate !== giver &&
+          !forbidden.has(`${giver}__${candidate}`)
+      );
+
+      for (let cIdx = 0; cIdx < candidates.length; cIdx += 1) {
+        const recipient = candidates[cIdx];
+        usedRecipients.add(recipient);
+        pairings.push({ giver, recipient });
+        if (backtrack(index + 1)) {
+          return true;
+        }
+        usedRecipients.delete(recipient);
+        pairings.pop();
+      }
+      return false;
+    };
+
+    const success = backtrack(0);
+    if (!success) {
+      throw createHttpError(
+        400,
+        'Unable to create Secret Santa assignments with the current exclusions. Try removing an exclusion or adding participants.'
+      );
     }
+
     return pairings;
   }
 
@@ -683,7 +850,8 @@ class SecretSantaService {
     const participantIds = participantRows.rows.map((row) => String(row.user_id));
     this.validateParticipantIds(participantIds);
 
-    const pairings = this.generatePairings(participantIds);
+    const exclusions = normalizeExclusionPairs(round.exclusion_pairs || [], participantIds);
+    const pairings = this.generatePairings(participantIds, exclusions);
 
     await db.query('BEGIN');
     try {
@@ -833,6 +1001,8 @@ class SecretSantaService {
       participantUserIds: [targetId],
       actorId,
     });
+
+    await this.pruneExclusionsForRound(round.id);
 
     return this.getActiveRound(round.list_id, actorId);
   }
