@@ -119,6 +119,10 @@ const ensureSecretSantaSchema = async () => {
         list_id uuid NOT NULL REFERENCES public.lists (id) ON DELETE CASCADE,
         user_id uuid NOT NULL REFERENCES public.users (id) ON DELETE CASCADE,
         status text NOT NULL DEFAULT 'confirmed',
+        wishlist_list_id uuid,
+        wishlist_type text,
+        wishlist_share_consent boolean DEFAULT false,
+        wishlist_share_consented_at timestamptz,
         created_at timestamptz NOT NULL DEFAULT NOW(),
         UNIQUE (round_id, user_id)
       )`,
@@ -153,6 +157,14 @@ const ensureSecretSantaSchema = async () => {
         ON public.secret_santa_guest_invites (round_id)`,
     `ALTER TABLE public.secret_santa_rounds
         ADD COLUMN IF NOT EXISTS exclusion_pairs jsonb DEFAULT '[]'::jsonb`,
+    `ALTER TABLE public.secret_santa_round_participants
+         ADD COLUMN IF NOT EXISTS wishlist_list_id uuid`,
+    `ALTER TABLE public.secret_santa_round_participants
+         ADD COLUMN IF NOT EXISTS wishlist_type text`,
+    `ALTER TABLE public.secret_santa_round_participants
+         ADD COLUMN IF NOT EXISTS wishlist_share_consent boolean DEFAULT false`,
+    `ALTER TABLE public.secret_santa_round_participants
+         ADD COLUMN IF NOT EXISTS wishlist_share_consented_at timestamptz`,
   ];
 
   for (const statement of statements) {
@@ -211,6 +223,10 @@ class SecretSantaService {
     const { rows } = await db.query(
       `SELECT rsp.user_id,
               rsp.status,
+              rsp.wishlist_list_id,
+              rsp.wishlist_type,
+              rsp.wishlist_share_consent,
+              rsp.wishlist_share_consented_at,
               u.full_name,
               u.username,
               u.email,
@@ -225,7 +241,13 @@ class SecretSantaService {
         ORDER BY u.full_name NULLS LAST, u.username ASC`,
       [roundId, viewerId, PARTICIPANT_STATUS.REMOVED]
     );
-    return rows.map(mapUserDisplay);
+    return rows.map((row) => ({
+      ...mapUserDisplay(row),
+      wishlist_list_id: row.wishlist_list_id,
+      wishlist_type: row.wishlist_type,
+      wishlist_share_consent: row.wishlist_share_consent,
+      wishlist_share_consented_at: row.wishlist_share_consented_at,
+    }));
   }
 
   async getRoundPairings(roundId) {
@@ -894,18 +916,29 @@ class SecretSantaService {
     return this.getActiveRound(round.list_id, userId);
   }
 
-  async respondToParticipantInvite(roundId, userId, decision) {
+  async respondToParticipantInvite(roundId, userId, payload = {}) {
     await ensureSecretSantaSchema();
-    const normalizedDecision = (decision || '').toLowerCase();
+    const normalizedDecision = (payload.decision || '').toLowerCase();
     if (!['accept', 'decline'].includes(normalizedDecision)) {
       throw createHttpError(400, 'Specify accept or decline');
     }
+    const wishlistListId =
+      payload.wishlistListId ||
+      payload.wishlist_list_id ||
+      payload.wishlistListID ||
+      null;
+    const wishlistType = payload.wishlistType || payload.wishlist_type || null;
+    const wishlistShareConsent = Boolean(payload.wishlistShareConsent ?? payload.wishlist_share_consent);
 
     const { rows } = await db.query(
       `SELECT rsp.id,
               rsp.status,
               rsp.user_id,
               rsp.round_id,
+              rsp.wishlist_list_id,
+              rsp.wishlist_type,
+              rsp.wishlist_share_consent,
+              rsp.wishlist_share_consented_at,
               COALESCE(rsp.list_id, r.list_id) AS list_id
          FROM secret_santa_round_participants rsp
          JOIN secret_santa_rounds r ON r.id = rsp.round_id
@@ -927,13 +960,56 @@ class SecretSantaService {
         ? PARTICIPANT_STATUS.ACCEPTED
         : PARTICIPANT_STATUS.DECLINED;
 
-    if (participant.status !== nextStatus) {
+    let wishlistColumns = {};
+    if (normalizedDecision === 'accept' && wishlistListId) {
+      const { rows: listRows } = await db.query(
+        `SELECT id, owner_id
+           FROM lists
+          WHERE id = $1
+            AND owner_id = $2`,
+        [wishlistListId, userId]
+      );
+      if (listRows.length === 0) {
+        throw createHttpError(400, 'Wishlist list not found or not owned by participant');
+      }
+      wishlistColumns = {
+        wishlist_list_id: wishlistListId,
+        wishlist_type: wishlistType || 'linked_list',
+        wishlist_share_consent: wishlistShareConsent,
+        wishlist_share_consented_at: wishlistShareConsent ? new Date() : null,
+      };
+    } else {
+      wishlistColumns = {
+        wishlist_list_id: null,
+        wishlist_type: null,
+        wishlist_share_consent: false,
+        wishlist_share_consented_at: null,
+      };
+    }
+
+    if (participant.status !== nextStatus || wishlistListId !== participant.wishlist_list_id || wishlistShareConsent !== participant.wishlist_share_consent) {
+      const updateFields = [
+        'status = $3',
+        'wishlist_list_id = $4',
+        'wishlist_type = $5',
+        'wishlist_share_consent = $6',
+        'wishlist_share_consented_at = $7',
+      ];
       await db.query(
         `UPDATE secret_santa_round_participants
-            SET status = $3
+            SET ${updateFields.join(', ')},
+                updated_at = NOW()
           WHERE round_id = $1
             AND user_id = $2`,
-        [roundId, userId, nextStatus]
+        [
+          roundId,
+          userId,
+          nextStatus,
+          wishlistColumns.wishlist_list_id,
+          wishlistColumns.wishlist_type,
+          wishlistColumns.wishlist_share_consent,
+          wishlistColumns.wishlist_share_consented_at,
+        ]
       );
 
       await NotificationService.notifySecretSantaParticipants({

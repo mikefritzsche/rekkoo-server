@@ -68,7 +68,7 @@ class SecretSantaController {
       const data = await SecretSantaService.respondToParticipantInvite(
         req.params.roundId,
         req.user.id,
-        req.body?.decision
+        req.body || {}
       );
       return res.json(data);
     } catch (error) {
