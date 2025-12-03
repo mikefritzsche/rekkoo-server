@@ -5,7 +5,7 @@ const createBugReportsController = require('../controllers/BugReportsController'
 
 const BUG_REPORTING_ENABLED = process.env.ENABLE_BUG_REPORTING === 'true';
 const BUG_REPORTING_REQUIRE_BETA = process.env.BUG_REPORTING_REQUIRE_BETA === 'true';
-const BUG_REPORTING_ALLOWED_ROLES = (process.env.BUG_REPORTING_ALLOWED_ROLES || 'admin,beta_tester')
+const BUG_REPORTING_ALLOWED_ROLES = (process.env.BUG_REPORTING_ALLOWED_ROLES || 'admin,beta,beta_tester')
   .split(',')
   .map((role) => role.trim())
   .filter(Boolean);

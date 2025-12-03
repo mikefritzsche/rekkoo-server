@@ -30,6 +30,11 @@ router.post(
   (req, res) => SecretSantaController.respondToInvite(req, res)
 );
 
+router.patch(
+  '/secret-santa/:roundId/participants/:participantId',
+  (req, res) => SecretSantaController.updateParticipant(req, res)
+);
+
 router.delete(
   '/secret-santa/:roundId/participants/:participantId',
   (req, res) => SecretSantaController.removeParticipant(req, res)

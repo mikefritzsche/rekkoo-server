@@ -76,6 +76,20 @@ class SecretSantaController {
     }
   }
 
+  async updateParticipant(req, res) {
+    try {
+      const data = await SecretSantaService.updateParticipantWishlist(
+        req.params.roundId,
+        req.user.id,
+        req.params.participantId || req.user.id,
+        req.body || {}
+      );
+      return res.json(data);
+    } catch (error) {
+      return handleError(res, error);
+    }
+  }
+
   async removeParticipant(req, res) {
     try {
       const data = await SecretSantaService.removeParticipant(

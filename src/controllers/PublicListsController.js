@@ -2,6 +2,56 @@ const db = require('../config/db');
 const { normalizeReservationQuantity, buildReservationResponse } = require('../utils/giftReservationUtils');
 
 function publicListsControllerFactory() {
+  const hasSecretSantaWishlistAccess = async (listId, userId) => {
+    if (!userId) return false;
+    try {
+      const { rows } = await db.query(
+        `SELECT 1
+           FROM secret_santa_round_participants wish
+           JOIN secret_santa_round_participants me
+             ON me.round_id = wish.round_id
+          WHERE wish.wishlist_list_id = $1
+            AND wish.wishlist_share_consent = true
+            AND wish.status <> 'removed'
+            AND me.user_id = $2
+            AND me.status <> 'removed'
+          LIMIT 1`,
+        [listId, userId]
+      );
+      return rows.length > 0;
+    } catch (error) {
+      console.warn(
+        '[PublicListsController] Secret Santa wishlist access check failed:',
+        error?.message || error
+      );
+      return false;
+    }
+  };
+
+  const hasSecretSantaRoundAccess = async (listId, userId) => {
+    if (!userId) return false;
+    try {
+      const { rows } = await db.query(
+        `SELECT 1
+           FROM secret_santa_rounds sr
+           JOIN secret_santa_round_participants sp
+             ON sp.round_id = sr.id
+          WHERE sr.list_id = $1
+            AND sp.user_id = $2
+            AND sp.status <> 'removed'
+          LIMIT 1`,
+        [listId, userId]
+      );
+      return rows.length > 0;
+    } catch (error) {
+      console.warn(
+        '[PublicListsController] Secret Santa round access check failed:',
+        error?.message || error
+      );
+      return false;
+    }
+  };
+
   /**
    * GET /v1.0/lists/:id
    * Returns list metadata plus its non-deleted items
@@ -66,7 +116,11 @@ function publicListsControllerFactory() {
       // Check access permissions
       const isOwner = list.owner_id === requestor_id;
       const isPublic = list.is_public === true;
-      const canAccess = isOwner || isPublic || hasGroupAccess || hasIndividualAccess;
+      const hasSecretSantaAccess =
+        (await hasSecretSantaWishlistAccess(id, requestor_id)) ||
+        (await hasSecretSantaRoundAccess(id, requestor_id));
+
+      const canAccess = isOwner || isPublic || hasGroupAccess || hasIndividualAccess || hasSecretSantaAccess;
 
       if (!canAccess) {
         return res.status(403).json({ error: 'You do not have permission to view this list' });
@@ -158,6 +212,17 @@ function publicListsControllerFactory() {
         `;
         const itemsResult = await db.query(itemsQuery, [id]);
         items = itemsResult.rows;
+      }
+
+      if (!isOwner) {
+        list.shared_with_me = true;
+        list.share_type = list.share_type || 'individual_shared';
+        list.shared_by_owner =
+          typeof list.shared_by_owner === 'boolean'
+            ? list.shared_by_owner
+            : true;
+        list.access_type = list.access_type || 'shared';
+        list.type_shared = list.share_type;
       }
 
       res.json({ list, items });

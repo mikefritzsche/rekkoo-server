@@ -124,6 +124,7 @@ const ensureSecretSantaSchema = async () => {
         wishlist_share_consent boolean DEFAULT false,
         wishlist_share_consented_at timestamptz,
         created_at timestamptz NOT NULL DEFAULT NOW(),
+        updated_at timestamptz NOT NULL DEFAULT NOW(),
         UNIQUE (round_id, user_id)
       )`,
     `CREATE INDEX IF NOT EXISTS idx_secret_santa_participants_round
@@ -165,6 +166,8 @@ const ensureSecretSantaSchema = async () => {
          ADD COLUMN IF NOT EXISTS wishlist_share_consent boolean DEFAULT false`,
     `ALTER TABLE public.secret_santa_round_participants
          ADD COLUMN IF NOT EXISTS wishlist_share_consented_at timestamptz`,
+    `ALTER TABLE public.secret_santa_round_participants
+         ADD COLUMN IF NOT EXISTS updated_at timestamptz DEFAULT NOW()`,
   ];
 
   for (const statement of statements) {
@@ -227,6 +230,9 @@ class SecretSantaService {
               rsp.wishlist_type,
               rsp.wishlist_share_consent,
               rsp.wishlist_share_consented_at,
+              wl.title AS wishlist_title,
+              wl.list_type AS wishlist_list_type,
+              wl.owner_id AS wishlist_owner_id,
               u.full_name,
               u.username,
               u.email,
@@ -236,6 +242,7 @@ class SecretSantaService {
               false AS is_co_owner
          FROM secret_santa_round_participants rsp
          JOIN users u ON u.id = rsp.user_id
+         LEFT JOIN lists wl ON wl.id = rsp.wishlist_list_id
         WHERE rsp.round_id = $1
           AND rsp.status <> $3
         ORDER BY u.full_name NULLS LAST, u.username ASC`,
@@ -247,6 +254,25 @@ class SecretSantaService {
       wishlist_type: row.wishlist_type,
       wishlist_share_consent: row.wishlist_share_consent,
       wishlist_share_consented_at: row.wishlist_share_consented_at,
+      wishlist_title: row.wishlist_title,
+      wishlist_list_type: row.wishlist_list_type,
+      wishlist_owner_id: row.wishlist_owner_id,
+      wishlist_shared_with_me: row.wishlist_list_id ? true : false,
+      wishlist_share_type: 'individual_shared',
+      wishlist_access_type: 'shared',
+      wishlist:
+        row.wishlist_list_id && row.wishlist_title
+          ? {
+              id: row.wishlist_list_id,
+              server_id: row.wishlist_list_id,
+              title: row.wishlist_title,
+              list_type: row.wishlist_list_type,
+              owner_id: row.wishlist_owner_id,
+              shared_with_me: true,
+              share_type: 'individual_shared',
+              access_type: 'shared',
+            }
+          : null,
     }));
   }
 
@@ -259,9 +285,20 @@ class SecretSantaService {
               sp.created_at,
               sp.updated_at,
               recipient.full_name AS recipient_name,
-              recipient.username AS recipient_username
+              recipient.username AS recipient_username,
+              recip_part.wishlist_list_id AS recipient_wishlist_list_id,
+              recip_part.wishlist_type AS recipient_wishlist_type,
+              recip_part.wishlist_share_consent AS recipient_wishlist_share_consent,
+              recip_part.wishlist_share_consented_at AS recipient_wishlist_share_consented_at,
+              wl.title AS recipient_wishlist_title,
+              wl.list_type AS recipient_wishlist_list_type,
+              wl.owner_id AS recipient_wishlist_owner_id
          FROM secret_santa_pairings sp
          JOIN users recipient ON recipient.id = sp.recipient_user_id
+         LEFT JOIN secret_santa_round_participants recip_part
+           ON recip_part.round_id = sp.round_id
+          AND recip_part.user_id = sp.recipient_user_id
+         LEFT JOIN lists wl ON wl.id = recip_part.wishlist_list_id
         WHERE sp.round_id = $1`,
       [roundId]
     );
@@ -277,6 +314,24 @@ class SecretSantaService {
       revealedAt: row.revealed_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      recipientWishlist: row.recipient_wishlist_list_id
+        ? {
+            id: row.recipient_wishlist_list_id,
+            server_id: row.recipient_wishlist_list_id,
+            title: row.recipient_wishlist_title || null,
+            list_type: row.recipient_wishlist_list_type || null,
+            owner_id: row.recipient_wishlist_owner_id || null,
+            share_type: 'individual_shared',
+            access_type: 'shared',
+            shared_with_me: true,
+            wishlist_shared_with_me: true,
+            wishlist_share_type: 'individual_shared',
+            wishlist_access_type: 'shared',
+            wishlist_share_consent: row.recipient_wishlist_share_consent ?? null,
+            wishlist_share_consented_at: row.recipient_wishlist_share_consented_at || null,
+            wishlist_type: row.recipient_wishlist_type || null,
+          }
+        : null,
     }));
   }
 
@@ -916,6 +971,212 @@ class SecretSantaService {
     return this.getActiveRound(round.list_id, userId);
   }
 
+  async updateParticipantWishlist(roundId, actorId, participantId, payload = {}) {
+    await ensureSecretSantaSchema();
+    const targetParticipantId = participantId || actorId;
+    if (!targetParticipantId) {
+      throw createHttpError(400, 'Participant id is required for wishlist updates');
+    }
+    const targetId = String(targetParticipantId);
+
+    const { rows } = await db.query(
+      `SELECT rsp.id,
+              rsp.status,
+              rsp.user_id,
+              rsp.round_id,
+              rsp.wishlist_list_id,
+              rsp.wishlist_type,
+              rsp.wishlist_share_consent,
+              rsp.wishlist_share_consented_at,
+              COALESCE(rsp.list_id, r.list_id) AS list_id
+         FROM secret_santa_round_participants rsp
+         JOIN secret_santa_rounds r ON r.id = rsp.round_id
+        WHERE rsp.round_id = $1
+          AND rsp.user_id = $2`,
+      [roundId, targetId]
+    );
+    if (rows.length === 0) {
+      throw createHttpError(404, 'Secret Santa participant not found');
+    }
+
+    const participant = rows[0];
+    if (participant.status === PARTICIPANT_STATUS.REMOVED) {
+      throw createHttpError(
+        410,
+        'You are no longer part of this Secret Santa round'
+      );
+    }
+
+    const actorIsParticipant = String(actorId) === targetId;
+    if (!actorIsParticipant) {
+      const access = await this.getListAccess(participant.list_id, actorId);
+      if (!access.canManage) {
+        throw createHttpError(
+          403,
+          'You do not have permission to update this participant'
+        );
+      }
+    }
+
+    if (
+      payload.status !== undefined &&
+      payload.status !== null &&
+      String(payload.status).toLowerCase() !== participant.status
+    ) {
+      throw createHttpError(
+        400,
+        'Use the invitation response endpoint to change status'
+      );
+    }
+
+    const wishlistListIdProvided =
+      Object.prototype.hasOwnProperty.call(payload, 'wishlistListId') ||
+      Object.prototype.hasOwnProperty.call(payload, 'wishlist_list_id') ||
+      Object.prototype.hasOwnProperty.call(payload, 'wishlistListID');
+    const wishlistTypeProvided =
+      Object.prototype.hasOwnProperty.call(payload, 'wishlistType') ||
+      Object.prototype.hasOwnProperty.call(payload, 'wishlist_type');
+    const shareConsentProvided =
+      Object.prototype.hasOwnProperty.call(payload, 'wishlistShareConsent') ||
+      Object.prototype.hasOwnProperty.call(payload, 'wishlist_share_consent');
+
+    const previousWishlistListId = participant.wishlist_list_id
+      ? String(participant.wishlist_list_id)
+      : null;
+
+    let nextWishlistListId = wishlistListIdProvided
+      ? payload.wishlistListId ??
+        payload.wishlist_list_id ??
+        payload.wishlistListID ??
+        null
+      : participant.wishlist_list_id;
+    let nextWishlistType = wishlistTypeProvided
+      ? payload.wishlistType ?? payload.wishlist_type ?? null
+      : participant.wishlist_type;
+    let nextWishlistShareConsent = shareConsentProvided
+      ? Boolean(payload.wishlistShareConsent ?? payload.wishlist_share_consent)
+      : Boolean(participant.wishlist_share_consent);
+    let nextWishlistShareConsentedAt =
+      participant.wishlist_share_consented_at || null;
+
+    if (wishlistListIdProvided) {
+      if (nextWishlistListId) {
+        const { rows: listRows } = await db.query(
+          `SELECT id, owner_id
+             FROM lists
+            WHERE id = $1`,
+          [nextWishlistListId]
+        );
+        if (listRows.length === 0 || String(listRows[0].owner_id) !== targetId) {
+          throw createHttpError(
+            400,
+            'Wishlist list not found or not owned by participant'
+          );
+        }
+
+        if (!wishlistTypeProvided && !nextWishlistType) {
+          nextWishlistType = 'linked_list';
+        }
+      } else {
+        nextWishlistType = wishlistTypeProvided ? nextWishlistType : null;
+        if (!shareConsentProvided) {
+          nextWishlistShareConsent = false;
+          nextWishlistShareConsentedAt = null;
+        }
+      }
+    }
+
+    if (wishlistListIdProvided && nextWishlistListId && !shareConsentProvided) {
+      nextWishlistShareConsent = true;
+      nextWishlistShareConsentedAt = new Date();
+    }
+
+    if (shareConsentProvided) {
+      nextWishlistShareConsentedAt = nextWishlistShareConsent
+        ? nextWishlistShareConsentedAt || new Date()
+        : null;
+    }
+
+    const currentConsentedAt = participant.wishlist_share_consented_at
+      ? new Date(participant.wishlist_share_consented_at).toISOString()
+      : null;
+    const nextConsentedAtIso = nextWishlistShareConsentedAt
+      ? new Date(nextWishlistShareConsentedAt).toISOString()
+      : null;
+
+    const hasChanges =
+      nextWishlistListId !== participant.wishlist_list_id ||
+      nextWishlistType !== participant.wishlist_type ||
+      nextWishlistShareConsent !== Boolean(participant.wishlist_share_consent) ||
+      nextConsentedAtIso !== currentConsentedAt;
+
+    if (!hasChanges) {
+      const recipientIds = await this.collectWishlistRecipients({
+        roundId,
+        listId: participant.list_id,
+        participantUserId: targetId,
+        actorId,
+      });
+      if (nextWishlistListId) {
+        await this.enqueueWishlistListLogs({
+          listId: nextWishlistListId,
+          recipientUserIds: recipientIds,
+          shared: true,
+        });
+      }
+      return this.getActiveRound(participant.list_id, actorId);
+    }
+
+    await db.query(
+      `UPDATE secret_santa_round_participants
+          SET wishlist_list_id = $1,
+              wishlist_type = $2,
+              wishlist_share_consent = $3,
+              wishlist_share_consented_at = $4,
+              updated_at = NOW()
+        WHERE round_id = $5
+          AND user_id = $6`,
+      [
+        nextWishlistListId,
+        nextWishlistType,
+        nextWishlistShareConsent,
+        nextWishlistShareConsentedAt,
+        roundId,
+        targetId,
+      ]
+    );
+
+    await this.enqueueParticipantChangeLogs({
+      roundId,
+      listId: participant.list_id,
+      participantUserIds: [targetId],
+      actorId,
+    });
+
+    const recipientIds = await this.collectWishlistRecipients({
+      roundId,
+      listId: participant.list_id,
+      participantUserId: targetId,
+      actorId,
+    });
+    if (nextWishlistListId) {
+      await this.enqueueWishlistListLogs({
+        listId: nextWishlistListId,
+        recipientUserIds: recipientIds,
+        shared: true,
+      });
+    }
+    if (previousWishlistListId && previousWishlistListId !== nextWishlistListId) {
+      await this.enqueueWishlistListLogs({
+        listId: previousWishlistListId,
+        recipientUserIds: recipientIds,
+        shared: false,
+      });
+    }
+
+    return this.getActiveRound(participant.list_id, actorId);
+  }
+
   async respondToParticipantInvite(roundId, userId, payload = {}) {
     await ensureSecretSantaSchema();
     const normalizedDecision = (payload.decision || '').toLowerCase();
@@ -1188,10 +1449,56 @@ class SecretSantaService {
     }
 
     const resolvedListId = listId || rows[0].resolved_list_id;
+    const wishlistIds = Array.from(
+      new Set(
+        rows
+          .map((row) => (row.wishlist_list_id ? String(row.wishlist_list_id) : null))
+          .filter(Boolean)
+      )
+    );
+    const wishlistInfoMap = new Map();
+    if (wishlistIds.length) {
+      try {
+        const { rows: wishlistRows } = await db.query(
+          `SELECT id, title, list_type, owner_id, deleted_at
+             FROM lists
+            WHERE id = ANY($1::uuid[])`,
+          [wishlistIds]
+        );
+        wishlistRows.forEach((wl) => {
+          wishlistInfoMap.set(String(wl.id), wl);
+        });
+      } catch (error) {
+        logger.warn(
+          '[SecretSanta] Failed to load wishlist metadata for change log: %s',
+          error?.message || error
+        );
+      }
+    }
     const managerIds = await this.getListManagerIds(resolvedListId);
+
+    let pairingCounterpartIds = [];
+    try {
+      const { rows: giverRows } = await db.query(
+        `SELECT giver_user_id, recipient_user_id
+           FROM secret_santa_pairings
+          WHERE round_id = $1
+            AND (recipient_user_id = ANY($2::uuid[]) OR giver_user_id = ANY($2::uuid[]))`,
+        [roundId, normalizedParticipants]
+      );
+      pairingCounterpartIds = giverRows
+        .flatMap((row) => [String(row.giver_user_id), String(row.recipient_user_id)])
+        .filter(Boolean);
+    } catch (error) {
+      logger.warn(
+        '[SecretSanta] Failed to load pairing givers for wishlist change propagation: %s',
+        error?.message || error
+      );
+    }
 
     const recipientSet = new Set(managerIds);
     rows.forEach((row) => recipientSet.add(String(row.user_id)));
+    pairingCounterpartIds.forEach((userId) => recipientSet.add(userId));
     if (actorId) {
       recipientSet.add(String(actorId));
     }
@@ -1205,10 +1512,58 @@ class SecretSantaService {
     const params = [];
     let paramIndex = 1;
 
+    const appendListChangeLog = (listRow, targetUserId) => {
+      if (!listRow || !targetUserId) return;
+      const payload = {
+        ...listRow,
+        server_id: listRow.id,
+        shared_with_me: true,
+        share_type: listRow.share_type || 'individual_shared',
+        shared_by_owner:
+          typeof listRow.shared_by_owner === 'boolean'
+            ? listRow.shared_by_owner
+            : true,
+        access_type: listRow.access_type || 'shared',
+        type_shared: listRow.share_type || 'individual_shared',
+      };
+      values.push(
+        `('lists', $${paramIndex}, 'update', $${paramIndex + 1}::jsonb, $${paramIndex + 2})`
+      );
+      params.push(listRow.id, JSON.stringify(payload), targetUserId);
+      paramIndex += 3;
+    };
+
     rows.forEach((row) => {
+      const wishlistMeta = row.wishlist_list_id
+        ? wishlistInfoMap.get(String(row.wishlist_list_id)) || null
+        : null;
       const payload = JSON.stringify({
         ...row,
         list_id: resolvedListId,
+        wishlist_title: wishlistMeta?.title || null,
+        wishlist_list_type: wishlistMeta?.list_type || null,
+        wishlist_owner_id: wishlistMeta?.owner_id || null,
+        wishlist_deleted_at: wishlistMeta?.deleted_at || null,
+        wishlist_shared_with_me: row.wishlist_list_id ? true : false,
+        wishlist_share_type: 'individual_shared',
+        wishlist_access_type: 'shared',
+        wishlist_shared_by_owner:
+          typeof wishlistMeta?.shared_by_owner === 'boolean'
+            ? wishlistMeta.shared_by_owner
+            : true,
+        wishlist:
+          row.wishlist_list_id && wishlistMeta
+            ? {
+                id: row.wishlist_list_id,
+                server_id: row.wishlist_list_id,
+                title: wishlistMeta.title,
+                list_type: wishlistMeta.list_type,
+                owner_id: wishlistMeta.owner_id,
+                shared_with_me: true,
+                share_type: 'individual_shared',
+                access_type: 'shared',
+              }
+            : null,
       });
       recipients.forEach((userId) => {
         values.push(
@@ -1216,6 +1571,10 @@ class SecretSantaService {
         );
         params.push(row.id, payload, userId);
         paramIndex += 3;
+
+        if (wishlistMeta) {
+          appendListChangeLog(wishlistMeta, userId);
+        }
       });
     });
 
@@ -1233,6 +1592,124 @@ class SecretSantaService {
       logger.warn(
         '[SecretSanta] Failed to enqueue participant change_log entries for round %s: %s',
         roundId,
+        error?.message || error
+      );
+    }
+  }
+
+  async collectWishlistRecipients({ roundId, listId, participantUserId, actorId }) {
+    const recipientSet = new Set();
+    if (participantUserId) recipientSet.add(String(participantUserId));
+    if (actorId) recipientSet.add(String(actorId));
+
+    if (listId) {
+      try {
+        const managers = await this.getListManagerIds(listId);
+        managers.forEach((id) => recipientSet.add(String(id)));
+      } catch (error) {
+        logger.warn(
+          '[SecretSanta] Failed to load list managers for wishlist share propagation: %s',
+          error?.message || error
+        );
+      }
+    }
+
+    try {
+      const { rows } = await db.query(
+        `SELECT giver_user_id, recipient_user_id
+           FROM secret_santa_pairings
+          WHERE round_id = $1
+            AND (giver_user_id = $2 OR recipient_user_id = $2)`,
+        [roundId, participantUserId]
+      );
+      rows.forEach((row) => {
+        if (row.giver_user_id) recipientSet.add(String(row.giver_user_id));
+        if (row.recipient_user_id) recipientSet.add(String(row.recipient_user_id));
+      });
+    } catch (error) {
+      logger.warn(
+        '[SecretSanta] Failed to load pairing recipients for wishlist propagation: %s',
+        error?.message || error
+      );
+    }
+
+    return Array.from(recipientSet).filter(Boolean);
+  }
+
+  async enqueueWishlistListLogs({ listId, recipientUserIds = [], shared = true }) {
+    if (!listId || !recipientUserIds.length) return;
+
+    let listRow = null;
+    try {
+      const { rows } = await db.query(
+        `SELECT *
+           FROM lists
+          WHERE id = $1`,
+        [listId]
+      );
+      listRow = rows[0] || null;
+    } catch (error) {
+      logger.warn(
+        '[SecretSanta] Failed to load wishlist list for change log: %s',
+        error?.message || error
+      );
+      return;
+    }
+
+    if (!listRow) {
+      return;
+    }
+
+    const operation = shared ? 'update' : 'delete';
+    const payload = shared
+      ? {
+          ...listRow,
+          server_id: listRow.id,
+          shared_with_me: true,
+          share_type: listRow.share_type || 'individual_shared',
+          shared_by_owner:
+            typeof listRow.shared_by_owner === 'boolean' ? listRow.shared_by_owner : true,
+          access_type: listRow.access_type || 'shared',
+          type_shared: listRow.share_type || 'individual_shared',
+          wishlist_shared_with_me: true,
+          wishlist_share_type: 'individual_shared',
+          wishlist_access_type: 'shared',
+        }
+      : null;
+
+    const filteredRecipients =
+      operation === 'delete'
+        ? recipientUserIds.filter((id) => String(id) !== String(listRow.owner_id))
+        : recipientUserIds;
+
+    const values = [];
+    const params = [];
+    let paramIndex = 1;
+
+    filteredRecipients.forEach((userId) => {
+      values.push(
+        `('lists', $${paramIndex}, '${operation}', ${
+          payload ? `$${paramIndex + 1}::jsonb` : 'NULL'
+        }, $${paramIndex + (payload ? 2 : 1)})`
+      );
+      if (payload) {
+        params.push(listId, JSON.stringify(payload), userId);
+        paramIndex += 3;
+      } else {
+        params.push(listId, userId);
+        paramIndex += 2;
+      }
+    });
+
+    try {
+      await db.query(
+        `INSERT INTO change_log (table_name, record_id, operation, change_data, user_id)
+         VALUES ${values.join(', ')}`,
+        params
+      );
+    } catch (error) {
+      logger.warn(
+        '[SecretSanta] Failed to enqueue wishlist list change_log entries: %s',
         error?.message || error
       );
     }

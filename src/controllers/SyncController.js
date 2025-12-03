@@ -978,6 +978,38 @@ function syncControllerFactory(socketService) {
 
             try {
               if (operation === 'update') {
+                const mutationType = (dataPayload?.mutationType || dataPayload?.mutation_type || '').toLowerCase();
+                const hasWishlistFields =
+                  dataPayload?.wishlistListId !== undefined ||
+                  dataPayload?.wishlist_list_id !== undefined ||
+                  dataPayload?.wishlistType !== undefined ||
+                  dataPayload?.wishlist_type !== undefined ||
+                  dataPayload?.wishlistShareConsent !== undefined ||
+                  dataPayload?.wishlist_share_consent !== undefined;
+
+                if (mutationType === 'wishlist_update' || hasWishlistFields) {
+                  const targetParticipantId =
+                    dataPayload?.participantId ||
+                    dataPayload?.participant_id ||
+                    dataPayload?.userId ||
+                    dataPayload?.user_id ||
+                    userId;
+                  await SecretSantaService.updateParticipantWishlist(
+                    roundId,
+                    userId,
+                    targetParticipantId,
+                    dataPayload
+                  );
+                  results.push({
+                    tableName,
+                    operation,
+                    clientRecordId: clientRecordId || dataPayload?.id || roundId,
+                    serverId: roundId,
+                    status: 'updated',
+                  });
+                  continue;
+                }
+
                 const statusValue = (dataPayload?.status || '').toLowerCase();
                 if (statusValue === 'accepted' || statusValue === 'declined') {
                   const decision = statusValue === 'accepted' ? 'accept' : 'decline';

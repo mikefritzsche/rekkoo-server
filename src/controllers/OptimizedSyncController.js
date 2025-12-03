@@ -381,10 +381,15 @@ function optimizedSyncControllerFactory(socketService) {
         const participantIds = Array.from(recordIdsByTable.secret_santa_round_participants);
         const participantsQuery = `
           SELECT sp.*,
-                 sr.list_id AS round_list_id
+                 sr.list_id AS round_list_id,
+                 wl.title AS wishlist_title,
+                 wl.list_type AS wishlist_list_type,
+                 wl.owner_id AS wishlist_owner_id,
+                 wl.deleted_at AS wishlist_deleted_at
           FROM public.secret_santa_round_participants sp
           JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
           JOIN public.lists l ON sr.list_id = l.id
+          LEFT JOIN public.lists wl ON wl.id = sp.wishlist_list_id
           WHERE sp.id = ANY($1::uuid[])
             AND (
               sp.user_id = $2
@@ -398,6 +403,13 @@ function optimizedSyncControllerFactory(socketService) {
           const normalizedRow = {
             ...row,
             list_id: row.list_id || row.round_list_id,
+            wishlist_shared_with_me: row.wishlist_list_id ? true : false,
+            wishlist_share_type: 'individual_shared',
+            wishlist_access_type: 'shared',
+            wishlist_shared_by_owner:
+              typeof row.wishlist_shared_by_owner === 'boolean'
+                ? row.wishlist_shared_by_owner
+                : true,
           };
           delete normalizedRow.round_list_id;
           fetchedData.secret_santa_round_participants[row.id] = normalizedRow;
@@ -407,10 +419,22 @@ function optimizedSyncControllerFactory(socketService) {
       if (recordIdsByTable.secret_santa_pairings.size > 0) {
         const pairingIds = Array.from(recordIdsByTable.secret_santa_pairings);
         const pairingsQuery = `
-          SELECT sp.*
+          SELECT sp.*,
+                 recip_part.wishlist_list_id AS recipient_wishlist_list_id,
+                 recip_part.wishlist_type AS recipient_wishlist_type,
+                 recip_part.wishlist_share_consent AS recipient_wishlist_share_consent,
+                 recip_part.wishlist_share_consented_at AS recipient_wishlist_share_consented_at,
+                 wl.title AS recipient_wishlist_title,
+                 wl.list_type AS recipient_wishlist_list_type,
+                 wl.owner_id AS recipient_wishlist_owner_id,
+                 wl.id AS recipient_wishlist_server_id
           FROM public.secret_santa_pairings sp
           JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
           JOIN public.lists l ON sr.list_id = l.id
+          LEFT JOIN public.secret_santa_round_participants recip_part
+            ON recip_part.round_id = sp.round_id
+           AND recip_part.user_id = sp.recipient_user_id
+          LEFT JOIN public.lists wl ON wl.id = recip_part.wishlist_list_id
           WHERE sp.id = ANY($1::uuid[])
             AND (
               sp.giver_user_id = $2
@@ -531,6 +555,11 @@ function optimizedSyncControllerFactory(socketService) {
           .map((round) => round?.list_id)
           .filter(Boolean)
       );
+      [...changes.secret_santa_round_participants.created, ...changes.secret_santa_round_participants.updated].forEach((participant) => {
+        if (participant?.wishlist_list_id) {
+          referencedListIds.add(String(participant.wishlist_list_id));
+        }
+      });
       if (referencedListIds.size > 0) {
         const knownListIds = new Set([
           ...changes.lists.created.map((list) => String(list.id)),
@@ -549,6 +578,7 @@ function optimizedSyncControllerFactory(socketService) {
           invitedLists.forEach((listRow) => {
             if (listRow.created_at) listRow.created_at = new Date(listRow.created_at).getTime();
             if (listRow.updated_at) listRow.updated_at = new Date(listRow.updated_at).getTime();
+            listRow.server_id = listRow.id;
             listRow.shared_with_me = true;
             if (!listRow.share_type) {
               listRow.share_type = 'individual_shared';
@@ -562,6 +592,166 @@ function optimizedSyncControllerFactory(socketService) {
             changes.lists.updated.push(listRow);
           });
         }
+      }
+
+      // Fallback: ensure wishlist lists for current user's Secret Santa context are available even when no participant changes were emitted
+      const knownListIds = new Set([
+        ...changes.lists.created.map((list) => String(list.id)),
+        ...changes.lists.updated.map((list) => String(list.id)),
+      ]);
+      try {
+        const { rows: wishlistRows } = await db.query(
+          `SELECT DISTINCT wl.*
+             FROM secret_santa_round_participants recip
+             JOIN secret_santa_rounds sr ON sr.id = recip.round_id
+             LEFT JOIN secret_santa_pairings sp ON sp.round_id = sr.id
+             JOIN lists wl ON wl.id = recip.wishlist_list_id
+            WHERE recip.wishlist_list_id IS NOT NULL
+              AND recip.status <> 'removed'
+              AND (
+                recip.user_id = $1
+                OR sp.giver_user_id = $1
+                OR sp.recipient_user_id = $1
+              )`,
+          [userId]
+        );
+        wishlistRows.forEach((listRow) => {
+          if (knownListIds.has(String(listRow.id))) {
+            return;
+          }
+          if (listRow.created_at) listRow.created_at = new Date(listRow.created_at).getTime();
+          if (listRow.updated_at) listRow.updated_at = new Date(listRow.updated_at).getTime();
+          listRow.server_id = listRow.id;
+          listRow.shared_with_me = true;
+          if (!listRow.share_type) {
+            listRow.share_type = 'individual_shared';
+          }
+          listRow.shared_by_owner =
+            typeof listRow.shared_by_owner === 'boolean'
+              ? listRow.shared_by_owner
+              : true;
+          listRow.access_type = listRow.access_type || 'shared';
+          listRow.type_shared = listRow.share_type;
+          changes.lists.updated.push(listRow);
+          knownListIds.add(String(listRow.id));
+        });
+      } catch (error) {
+        console.warn(
+          '[OptimizedSync] Failed to load wishlist lists for fallback inclusion:',
+          error?.message || error
+        );
+      }
+
+      // Deduplicate list updates by id, preferring the most complete payload
+      if (changes.lists.updated.length > 1) {
+        const mergedById = new Map();
+        for (const row of changes.lists.updated) {
+          const existing = mergedById.get(String(row.id));
+          if (!existing) {
+            mergedById.set(String(row.id), { ...row });
+            continue;
+          }
+          mergedById.set(
+            String(row.id),
+            {
+              ...existing,
+              ...row,
+              // Preserve created_at/updated_at if present on either
+              created_at: row.created_at || existing.created_at,
+              updated_at: row.updated_at || existing.updated_at,
+            }
+          );
+        }
+        changes.lists.updated = Array.from(mergedById.values());
+      }
+
+      // Refresh Secret Santa participant records for the current user (and related rounds) to ensure wishlist metadata is present even when no change logs fire
+      try {
+        const participantRefreshQuery = `
+          SELECT rsp.*,
+                 sr.list_id AS round_list_id,
+                 wl.title AS wishlist_title,
+                 wl.list_type AS wishlist_list_type,
+                 wl.owner_id AS wishlist_owner_id
+            FROM secret_santa_round_participants rsp
+            JOIN secret_santa_rounds sr ON sr.id = rsp.round_id
+            JOIN lists l ON sr.list_id = l.id
+            LEFT JOIN lists wl ON wl.id = rsp.wishlist_list_id
+           WHERE rsp.status <> 'removed'
+             AND (
+               rsp.user_id = $1
+               OR sr.id IN (
+                 SELECT round_id FROM secret_santa_pairings WHERE giver_user_id = $1 OR recipient_user_id = $1
+               )
+             )
+        `;
+        const { rows: participantRefreshRows } = await db.query(participantRefreshQuery, [userId]);
+        const seenParticipantIds = new Set(changes.secret_santa_round_participants.updated.map((p) => String(p.id)));
+        participantRefreshRows.forEach((row) => {
+          const normalized = {
+            ...row,
+            list_id: row.list_id || row.round_list_id,
+            wishlist_shared_with_me: row.wishlist_list_id ? true : false,
+            wishlist_share_type: 'individual_shared',
+            wishlist_access_type: 'shared',
+            wishlist_shared_by_owner:
+              typeof row.wishlist_shared_by_owner === 'boolean'
+                ? row.wishlist_shared_by_owner
+                : true,
+          };
+          delete normalized.round_list_id;
+          if (!seenParticipantIds.has(String(normalized.id))) {
+            changes.secret_santa_round_participants.updated.push(normalized);
+            seenParticipantIds.add(String(normalized.id));
+          }
+        });
+      } catch (error) {
+        console.warn(
+          '[OptimizedSync] Failed to refresh Secret Santa participants for wishlist metadata:',
+          error?.message || error
+        );
+      }
+
+      // Refresh Secret Santa pairings for the current user to ensure recipient wishlist metadata is present on reload
+      try {
+        const pairingsRefreshQuery = `
+          SELECT sp.*,
+                 recip_part.wishlist_list_id AS recipient_wishlist_list_id,
+                 recip_part.wishlist_type AS recipient_wishlist_type,
+                 recip_part.wishlist_share_consent AS recipient_wishlist_share_consent,
+                 recip_part.wishlist_share_consented_at AS recipient_wishlist_share_consented_at,
+                 wl.title AS recipient_wishlist_title,
+                 wl.list_type AS recipient_wishlist_list_type,
+                 wl.owner_id AS recipient_wishlist_owner_id,
+                 wl.id AS recipient_wishlist_server_id
+            FROM secret_santa_pairings sp
+            JOIN secret_santa_rounds sr ON sr.id = sp.round_id
+            LEFT JOIN secret_santa_round_participants recip_part
+              ON recip_part.round_id = sp.round_id
+             AND recip_part.user_id = sp.recipient_user_id
+            LEFT JOIN lists wl ON wl.id = recip_part.wishlist_list_id
+           WHERE sp.giver_user_id = $1
+              OR sp.recipient_user_id = $1
+              OR sr.id IN (
+                SELECT round_id FROM secret_santa_round_participants WHERE user_id = $1
+              )
+        `;
+        const { rows: pairingRefreshRows } = await db.query(pairingsRefreshQuery, [userId]);
+        const seenPairingIds = new Set(changes.secret_santa_pairings.updated.map((p) => String(p.id)));
+        pairingRefreshRows.forEach((row) => {
+          if (row.created_at) row.created_at = new Date(row.created_at).getTime();
+          if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+          if (row.revealed_at) row.revealed_at = new Date(row.revealed_at).getTime();
+          if (!seenPairingIds.has(String(row.id))) {
+            changes.secret_santa_pairings.updated.push(row);
+            seenPairingIds.add(String(row.id));
+          }
+        });
+      } catch (error) {
+        console.warn(
+          '[OptimizedSync] Failed to refresh Secret Santa pairings for wishlist metadata:',
+          error?.message || error
+        );
       }
 
       // Step 6: Batch fetch gift status for non-owned gift lists
@@ -796,16 +986,20 @@ function optimizedSyncControllerFactory(socketService) {
 
           const secretSantaParticipantsBaselineQuery = `
             SELECT sp.*,
-                   sr.list_id AS round_list_id
+                   sr.list_id AS round_list_id,
+                   wl.title AS wishlist_title,
+                   wl.list_type AS wishlist_list_type,
+                   wl.owner_id AS wishlist_owner_id
             FROM public.secret_santa_round_participants sp
             JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
             JOIN public.lists l ON sr.list_id = l.id
+            LEFT JOIN public.lists wl ON wl.id = sp.wishlist_list_id
             WHERE (
                 sp.user_id = $2
                 OR l.owner_id = $2
                 OR sr.list_id = ANY($1::uuid[])
               )
-          `;
+         `;
           const secretSantaParticipantsBaselineResult = await db.query(secretSantaParticipantsBaselineQuery, [listIdsArray, userId]);
           for (const row of secretSantaParticipantsBaselineResult.rows) {
             if (!row.list_id && row.round_list_id) {
@@ -813,15 +1007,34 @@ function optimizedSyncControllerFactory(socketService) {
             }
             if (row.created_at) row.created_at = new Date(row.created_at).getTime();
             if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            row.wishlist_shared_with_me = row.wishlist_list_id ? true : false;
+            row.wishlist_share_type = 'individual_shared';
+            row.wishlist_access_type = 'shared';
+            row.wishlist_shared_by_owner =
+              typeof row.wishlist_shared_by_owner === 'boolean'
+                ? row.wishlist_shared_by_owner
+                : true;
             delete row.round_list_id;
             changes.secret_santa_round_participants.created.push(row);
           }
 
           const secretSantaPairingsBaselineQuery = `
-            SELECT sp.*
+            SELECT sp.*,
+                   recip_part.wishlist_list_id AS recipient_wishlist_list_id,
+                   recip_part.wishlist_type AS recipient_wishlist_type,
+                   recip_part.wishlist_share_consent AS recipient_wishlist_share_consent,
+                   recip_part.wishlist_share_consented_at AS recipient_wishlist_share_consented_at,
+                   wl.title AS recipient_wishlist_title,
+                   wl.list_type AS recipient_wishlist_list_type,
+                   wl.owner_id AS recipient_wishlist_owner_id,
+                   wl.id AS recipient_wishlist_server_id
             FROM public.secret_santa_pairings sp
             JOIN public.secret_santa_rounds sr ON sp.round_id = sr.id
             JOIN public.lists l ON sr.list_id = l.id
+            LEFT JOIN public.secret_santa_round_participants recip_part
+              ON recip_part.round_id = sp.round_id
+             AND recip_part.user_id = sp.recipient_user_id
+            LEFT JOIN public.lists wl ON wl.id = recip_part.wishlist_list_id
             WHERE (
                 sp.giver_user_id = $2
                 OR l.owner_id = $2

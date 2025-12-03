@@ -79,6 +79,54 @@ function collaborationControllerFactory(socketService = null) {
     return ROLE_TO_PERMISSION[role] || 'view';
   };
 
+  const hasSecretSantaWishlistAccess = async (listId, userId) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT 1
+           FROM secret_santa_round_participants wish
+           JOIN secret_santa_round_participants me
+             ON me.round_id = wish.round_id
+          WHERE wish.wishlist_list_id = $1
+            AND wish.wishlist_share_consent = true
+            AND wish.status <> 'removed'
+            AND me.user_id = $2
+            AND me.status <> 'removed'
+          LIMIT 1`,
+        [listId, userId]
+      );
+      return rows.length > 0;
+    } catch (error) {
+      console.warn(
+        '[CollaborationController] Secret Santa wishlist access check failed:',
+        error?.message || error
+      );
+      return false;
+    }
+  };
+
+  const hasSecretSantaRoundAccess = async (listId, userId) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT 1
+           FROM secret_santa_rounds sr
+           JOIN secret_santa_round_participants sp
+             ON sp.round_id = sr.id
+          WHERE sr.list_id = $1
+            AND sp.user_id = $2
+            AND sp.status <> 'removed'
+          LIMIT 1`,
+        [listId, userId]
+      );
+      return rows.length > 0;
+    } catch (error) {
+      console.warn(
+        '[CollaborationController] Secret Santa round access check failed:',
+        error?.message || error
+      );
+      return false;
+    }
+  };
+
   const getEffectiveRoleForList = async (listId, userId, ownerId = null) => {
     let resolvedOwnerId = ownerId;
 
@@ -759,6 +807,14 @@ const CollaborationController = {
     try {
       const { rows: listRows } = await db.query('SELECT owner_id FROM lists WHERE id = $1', [listId]);
       if (listRows.length === 0) return res.status(404).json({ error: 'List not found' });
+
+      const hasWishlistAccess = await hasSecretSantaWishlistAccess(listId, requester_id);
+      const hasRoundAccess = await hasSecretSantaRoundAccess(listId, requester_id);
+      if (hasWishlistAccess || hasRoundAccess) {
+        console.log(`[getListUserOverrides] Granting read-only Secret Santa access for user ${requester_id} on list ${listId}`);
+        return res.json([]);
+      }
+
       const permissionCheck = await ensureCanManageListMembership(listId, requester_id, listRows[0].owner_id);
       if (!permissionCheck.allowed) {
         console.log(`[getListUserOverrides] Access denied for user ${requester_id} on list ${listId}`);
@@ -2296,6 +2352,15 @@ const CollaborationController = {
             
             const listOwnerId = listRows[0].owner_id;
             const isOwner = listOwnerId === requester_id;
+
+            // Secret Santa participants can check their own role to avoid frontend polling loops
+            if (userId === requester_id && !isOwner) {
+                const hasWishlistAccess = await hasSecretSantaWishlistAccess(listId, requester_id);
+                const hasRoundAccess = await hasSecretSantaRoundAccess(listId, requester_id);
+                if (hasWishlistAccess || hasRoundAccess) {
+                    return res.json({ role: 'viewer', shared_with_me: true });
+                }
+            }
             
             // Users can only check their own role unless they're the owner
             if (userId !== requester_id && !isOwner) {
