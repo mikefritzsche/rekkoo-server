@@ -3,63 +3,7 @@ const router = express.Router();
 const fetch = require('node-fetch');
 
 const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const cheerio = require('cheerio');
-
-puppeteer.use(StealthPlugin());
-
-puppeteer.use(StealthPlugin());
-
-const AMAZON_SHORT_DOMAINS = ['a.co', 'amzn.to'];
-
-const getBaseHostname = (hostname = '') => {
-    const cleaned = hostname.toLowerCase().replace(/^www\./, '').replace(/^smile\./, '').replace(/^m\./, '');
-    const parts = cleaned.split('.');
-    if (parts.length > 2) {
-        return parts.slice(-2).join('.');
-    }
-    return cleaned;
-};
-
-const isAmazonHostname = (hostname = '') => {
-    const base = getBaseHostname(hostname);
-    return base === 'amazon.com' || base.startsWith('amazon.');
-};
-
-const isAmazonShortHostname = (hostname = '') => {
-    const base = getBaseHostname(hostname);
-    return AMAZON_SHORT_DOMAINS.includes(base);
-};
-
-const resolveShortAmazonUrl = async (url) => {
-    const followRedirect = async (method) => {
-        const response = await fetch(url, { method, redirect: 'follow' });
-        if (response?.url && response.url !== url) {
-            return response.url;
-        }
-        const location = response?.headers?.get?.('location');
-        if (location) {
-            return new URL(location, url).toString();
-        }
-        return null;
-    };
-
-    try {
-        const headResolved = await followRedirect('HEAD');
-        if (headResolved) return headResolved;
-    } catch (err) {
-        console.warn('[products.scrape] HEAD resolve failed for short Amazon URL:', err?.message || err);
-    }
-
-    try {
-        const getResolved = await followRedirect('GET');
-        if (getResolved) return getResolved;
-    } catch (err) {
-        console.warn('[products.scrape] GET resolve failed for short Amazon URL:', err?.message || err);
-    }
-
-    return url;
-};
+const { enqueueAmazonScrape, MAX_BATCH_SIZE } = require('../services/amazonScraperService');
 
 router.get('/link', async (req, res) => {
     // res.json({message: 'link fetch', link: req.query.link})
@@ -153,70 +97,15 @@ router.post('/scrape', async (req, res) => {
         return res.status(400).json({ error: 'Provide a valid Amazon product URL' });
     }
     try {
-        const parsed = new URL(url);
-        const baseHost = getBaseHostname(parsed.hostname);
-        if (!isAmazonHostname(baseHost) && isAmazonShortHostname(baseHost)) {
-            url = await resolveShortAmazonUrl(url);
+        const result = await enqueueAmazonScrape(url);
+        if (!result?.ok) {
+            return res.status(400).json({ error: result?.error || 'Scraping failed' });
         }
-
-        const finalHost = getBaseHostname(new URL(url).hostname);
-        if (!isAmazonHostname(finalHost)) {
-            return res.status(400).json({ error: 'Provide a valid Amazon product URL' });
-        }
-    } catch (err) {
-        return res.status(400).json({ error: 'Provide a valid Amazon product URL' });
-    }
-    console.log('amazon associate ID:', process.env.AMAZON_ASSOCIATE_ID);
-
-    let browser;
-    try {
-        browser = await puppeteer.launch({ headless: 'new', args: ['--no-sandbox'] });
-        const page = await browser.newPage();
-        await page.setUserAgent(
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/123 Safari/537.36'
-        );
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-        const html = await page.content();
-        const finalUrl = page.url();
-        const $ = cheerio.load(html);
-
-        const title = $('#productTitle').text().trim();
-        const price = $('span.a-price.a-text-price.a-size-medium.apexPriceToPay span.a-offscreen')
-            .first().text().trim() ||
-            $('span.a-price span.a-offscreen').first().text().trim();
-        const image = $('#landingImage').attr('src') || $('#imgBlkFront').attr('src');
-        const bullets = $('#feature-bullets ul li span')
-            .map((_, el) => $(el).text().trim())
-            .get()
-            .filter(t => t.length > 0);
-
-        /* ---------- collect ALL product images ---------- */
-        const images = [
-            // primary image
-            $('#landingImage').attr('src'),
-            $('#imgBlkFront').attr('src'),
-
-            // alternate shots from the left-thumbnail strip
-            ...$('#altImages img[src], #altImages img[data-old-hires]')
-                .map((_, el) => $(el).attr('data-old-hires') || $(el).attr('src'))
-                .get(),
-
-            // additional hi-res images in the imageBlock
-            ...$('#imageBlock img[src]').map((_, el) => $(el).attr('src')).get()
-        ]
-            .filter(Boolean)           // remove null/undefined
-            .filter((u, i, arr) => arr.indexOf(u) === i) // unique
-            .filter(u => u.startsWith('http'));
-
-        if (!title) return res.status(404).json({ error: 'Product data not found' });
-        res.json({ title, price, image, images, bullets, resolvedUrl: finalUrl });
+        return res.json(result.result);
     } catch (err) {
         console.error(err);
-        res.status(500).json({ error: 'Scraping failed', err });
-    } finally {
-        if (browser) await browser.close();
+        res.status(500).json({ error: 'Scraping failed' });
     }
-
 });
 
 router.post('/data', async (req, res) => {
@@ -247,6 +136,48 @@ router.post('/data', async (req, res) => {
         res.status(500).json({ error: 'Scraping failed', details: err.message });
     } finally {
         if (browser) await browser.close();
+    }
+});
+
+router.post('/scrape/batch', async (req, res) => {
+    const urls = req.body?.urls;
+    if (!Array.isArray(urls) || urls.length === 0) {
+        return res.status(400).json({ error: 'Provide at least one URL to scrape' });
+    }
+    if (urls.length > MAX_BATCH_SIZE) {
+        return res.status(400).json({ error: `Batch limit is ${MAX_BATCH_SIZE} URLs` });
+    }
+
+    const normalizedInputs = urls
+        .map((u) => (typeof u === 'string' ? u.trim() : ''))
+        .filter((u) => u.length > 0);
+
+    if (normalizedInputs.length === 0) {
+        return res.status(400).json({ error: 'Provide at least one URL to scrape' });
+    }
+
+    try {
+        const jobMap = new Map();
+        normalizedInputs.forEach((u) => {
+            if (!jobMap.has(u)) {
+                jobMap.set(u, enqueueAmazonScrape(u));
+            }
+        });
+
+        const results = await Promise.all(
+            normalizedInputs.map(async (inputUrl) => {
+                const outcome = await jobMap.get(inputUrl);
+                if (!outcome?.ok) {
+                    return { inputUrl, error: outcome?.error || 'Scraping failed' };
+                }
+                return { inputUrl, ...outcome.result };
+            })
+        );
+
+        res.json({ results });
+    } catch (err) {
+        console.error('[products.scrape.batch] failed', err);
+        res.status(500).json({ error: 'Batch scraping failed' });
     }
 });
 
