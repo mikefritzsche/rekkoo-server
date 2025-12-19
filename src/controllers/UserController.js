@@ -3,6 +3,7 @@ const bcrypt = require("bcrypt");
 const saltRounds = 12;
 const { logger } = require('../utils/logger');
 const embeddingService = require('../services/embeddingService');
+const { normalizeTimestampFields } = require('../utils/timestampUtils');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -603,6 +604,7 @@ function userControllerFactory(socketService = null) {
       }
 
       const { rows } = await db.query(query, queryParams);
+      rows.forEach((row) => normalizeTimestampFields(row, ['created_at', 'updated_at', 'deleted_at']));
       res.status(200).json(rows);
     } catch (error) {
       logger.error(`[UserController] Error getting public lists for user ${targetUserId}:`, error);
@@ -787,6 +789,8 @@ function userControllerFactory(socketService = null) {
         logger.info(`  - "${row.title}" (${row.id}): ${row.access_type}${row.is_public ? ' [PUBLIC]' : ' [PRIVATE]'}`);
       });
       
+      rows.forEach((row) => normalizeTimestampFields(row, ['created_at', 'updated_at', 'deleted_at']));
+
       res.status(200).json({
         lists: rows,
         metadata: {
@@ -967,7 +971,8 @@ function userControllerFactory(socketService = null) {
         logger.info(`[UserController] Returning ${rows.length} total lists for user ${actualTargetUserId}:`);
         logger.info(`  - ${ownedLists.length} owned lists`);
         logger.info(`  - ${sharedLists.length} shared lists (${groupShared.length} via groups, ${individualShared.length} individual)`);
-        
+
+        rows.forEach((row) => normalizeTimestampFields(row, ['created_at', 'updated_at', 'deleted_at']));
         return res.status(200).json(rows);
       }
       

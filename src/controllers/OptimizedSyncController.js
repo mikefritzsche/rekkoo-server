@@ -2,6 +2,7 @@ const db = require('../config/db');
 const { logger } = require('../utils/logger');
 const syncOptimization = require('../config/sync-optimization');
 const { normalizeReservationQuantity, buildReservationResponse } = require('../utils/giftReservationUtils');
+const { normalizeTimestampToIso, normalizeTimestampFields } = require('../utils/timestampUtils');
 
 function optimizedSyncControllerFactory(socketService) {
 
@@ -515,29 +516,24 @@ function optimizedSyncControllerFactory(socketService) {
           }
 
           if (current_data) {
-            // Convert timestamps to milliseconds for client compatibility
-            if (current_data.created_at) {
-              current_data.created_at = new Date(current_data.created_at).getTime();
-            }
-            if (current_data.updated_at) {
-              current_data.updated_at = new Date(current_data.updated_at).getTime();
-            }
+            // Normalize timestamps to RFC3339 strings to avoid platform-specific parsing issues.
+            normalizeTimestampFields(current_data, ['created_at', 'updated_at']);
+
             if (table_name === 'gift_purchase_groups') {
-              for (const field of ['locked_at', 'completed_at', 'abandoned_at', 'reminder_scheduled_at']) {
-                if (current_data[field]) {
-                  current_data[field] = new Date(current_data[field]).getTime();
-                }
-              }
+              normalizeTimestampFields(current_data, [
+                'locked_at',
+                'completed_at',
+                'abandoned_at',
+                'reminder_scheduled_at',
+              ]);
             }
+
             if (table_name === 'gift_contributions') {
-              if (current_data.fulfilled_at) {
-                current_data.fulfilled_at = new Date(current_data.fulfilled_at).getTime();
-              }
+              normalizeTimestampFields(current_data, ['fulfilled_at']);
             }
+
             if (table_name === 'secret_santa_rounds') {
-              if (current_data.exchange_date) {
-                current_data.exchange_date = new Date(current_data.exchange_date).getTime();
-              }
+              normalizeTimestampFields(current_data, ['exchange_date']);
             }
 
             if (operation === 'create') {
@@ -576,8 +572,7 @@ function optimizedSyncControllerFactory(socketService) {
             [missingListIds]
           );
           invitedLists.forEach((listRow) => {
-            if (listRow.created_at) listRow.created_at = new Date(listRow.created_at).getTime();
-            if (listRow.updated_at) listRow.updated_at = new Date(listRow.updated_at).getTime();
+            normalizeTimestampFields(listRow, ['created_at', 'updated_at']);
             listRow.server_id = listRow.id;
             listRow.shared_with_me = true;
             if (!listRow.share_type) {
@@ -619,8 +614,7 @@ function optimizedSyncControllerFactory(socketService) {
           if (knownListIds.has(String(listRow.id))) {
             return;
           }
-          if (listRow.created_at) listRow.created_at = new Date(listRow.created_at).getTime();
-          if (listRow.updated_at) listRow.updated_at = new Date(listRow.updated_at).getTime();
+          normalizeTimestampFields(listRow, ['created_at', 'updated_at']);
           listRow.server_id = listRow.id;
           listRow.shared_with_me = true;
           if (!listRow.share_type) {
@@ -739,9 +733,7 @@ function optimizedSyncControllerFactory(socketService) {
         const { rows: pairingRefreshRows } = await db.query(pairingsRefreshQuery, [userId]);
         const seenPairingIds = new Set(changes.secret_santa_pairings.updated.map((p) => String(p.id)));
         pairingRefreshRows.forEach((row) => {
-          if (row.created_at) row.created_at = new Date(row.created_at).getTime();
-          if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
-          if (row.revealed_at) row.revealed_at = new Date(row.revealed_at).getTime();
+          normalizeTimestampFields(row, ['created_at', 'updated_at', 'revealed_at']);
           if (!seenPairingIds.has(String(row.id))) {
             changes.secret_santa_pairings.updated.push(row);
             seenPairingIds.add(String(row.id));
@@ -822,8 +814,7 @@ function optimizedSyncControllerFactory(socketService) {
           // Include all tags
           const catRes = await db.query(`SELECT * FROM public.tags WHERE deleted_at IS NULL`);
           for (const row of catRes.rows) {
-            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
-            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            normalizeTimestampFields(row, ['created_at', 'updated_at']);
             changes.tags = changes.tags || { created: [], updated: [], deleted: [] };
             changes.tags.created.push(row);
           }
@@ -846,8 +837,7 @@ function optimizedSyncControllerFactory(socketService) {
           logger.info(`[OptimizedSyncController] Found ${listsRes.rows.length} lists for initial sync`);
 
           for (const row of listsRes.rows) {
-            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
-            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            normalizeTimestampFields(row, ['created_at', 'updated_at']);
             changes.lists.created.push(row);
           }
 
@@ -884,8 +874,7 @@ function optimizedSyncControllerFactory(socketService) {
           const itemsRes = await db.query(itemsQuery, itemsQueryParams);
           logger.info(`[OptimizedSyncController] Found ${itemsRes.rows.length} items for initial sync`);
           for (const row of itemsRes.rows) {
-            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
-            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            normalizeTimestampFields(row, ['created_at', 'updated_at']);
             changes.list_items.created.push(row);
           }
 
@@ -910,8 +899,7 @@ function optimizedSyncControllerFactory(socketService) {
           const reservationsBaselineResult = await db.query(reservationsBaselineQuery, [userId, listIdsArray]);
           const reservationsRows = reservationsBaselineResult.rows || [];
           for (const row of reservationsRows) {
-            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
-            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            normalizeTimestampFields(row, ['created_at', 'updated_at']);
             changes.gift_reservations.created.push(row);
           }
 
@@ -929,8 +917,9 @@ function optimizedSyncControllerFactory(socketService) {
           const groupTimestampFields = ['created_at', 'updated_at', 'locked_at', 'completed_at', 'abandoned_at', 'reminder_scheduled_at'];
           for (const row of groupsBaselineResult.rows) {
             for (const field of groupTimestampFields) {
-              if (row[field]) {
-                row[field] = new Date(row[field]).getTime();
+              const normalized = normalizeTimestampToIso(row[field]);
+              if (normalized) {
+                row[field] = normalized;
               }
             }
             changes.gift_purchase_groups.created.push(row);
@@ -953,8 +942,9 @@ function optimizedSyncControllerFactory(socketService) {
           const contributionTimestampFields = ['created_at', 'updated_at', 'fulfilled_at'];
           for (const row of contributionsBaselineResult.rows) {
             for (const field of contributionTimestampFields) {
-              if (row[field]) {
-                row[field] = new Date(row[field]).getTime();
+              const normalized = normalizeTimestampToIso(row[field]);
+              if (normalized) {
+                row[field] = normalized;
               }
             }
             changes.gift_contributions.created.push(row);
@@ -978,9 +968,8 @@ function optimizedSyncControllerFactory(socketService) {
           `;
           const secretSantaRoundsBaselineResult = await db.query(secretSantaRoundsBaselineQuery, [listIdsArray, userId]);
           for (const row of secretSantaRoundsBaselineResult.rows) {
-            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
-            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
-            if (row.exchange_date) row.exchange_date = new Date(row.exchange_date).getTime();
+            normalizeTimestampFields(row, ['created_at', 'updated_at']);
+            normalizeTimestampFields(row, ['exchange_date']);
             changes.secret_santa_rounds.created.push(row);
           }
 
@@ -1005,8 +994,7 @@ function optimizedSyncControllerFactory(socketService) {
             if (!row.list_id && row.round_list_id) {
               row.list_id = row.round_list_id;
             }
-            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
-            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            normalizeTimestampFields(row, ['created_at', 'updated_at']);
             row.wishlist_shared_with_me = row.wishlist_list_id ? true : false;
             row.wishlist_share_type = 'individual_shared';
             row.wishlist_access_type = 'shared';
@@ -1043,9 +1031,8 @@ function optimizedSyncControllerFactory(socketService) {
           `;
           const secretSantaPairingsBaselineResult = await db.query(secretSantaPairingsBaselineQuery, [listIdsArray, userId]);
           for (const row of secretSantaPairingsBaselineResult.rows) {
-            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
-            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
-            if (row.revealed_at) row.revealed_at = new Date(row.revealed_at).getTime();
+            normalizeTimestampFields(row, ['created_at', 'updated_at']);
+            normalizeTimestampFields(row, ['revealed_at']);
             changes.secret_santa_pairings.created.push(row);
           }
 
@@ -1059,8 +1046,7 @@ function optimizedSyncControllerFactory(socketService) {
           `;
           const secretSantaInvitesBaselineResult = await db.query(secretSantaInvitesBaselineQuery, [listIdsArray, userId]);
           for (const row of secretSantaInvitesBaselineResult.rows) {
-            if (row.created_at) row.created_at = new Date(row.created_at).getTime();
-            if (row.updated_at) row.updated_at = new Date(row.updated_at).getTime();
+            normalizeTimestampFields(row, ['created_at', 'updated_at']);
             changes.secret_santa_guest_invites.created.push(row);
           }
 
@@ -1113,8 +1099,7 @@ function optimizedSyncControllerFactory(socketService) {
           );
           if (settingsRes.rows.length > 0) {
             const settings = settingsRes.rows[0];
-            if (settings.created_at) settings.created_at = new Date(settings.created_at).getTime();
-            if (settings.updated_at) settings.updated_at = new Date(settings.updated_at).getTime();
+            normalizeTimestampFields(settings, ['created_at', 'updated_at']);
             changes.user_settings.created.push(settings);
             logger.info(`[OptimizedSyncController] Including user_settings in initial sync for user ${userId}`);
           }
