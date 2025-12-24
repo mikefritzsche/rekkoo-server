@@ -19,6 +19,62 @@ function getSpotifyServiceLazy() {
   return spotifyService;
 }
 
+const parseJsonObject = (value) => {
+  if (!value) return null;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value === 'object') return value;
+  return null;
+};
+
+const isSpotifyPayload = (payload) => {
+  if (!payload || typeof payload !== 'object') return false;
+  if (payload.external_urls && payload.external_urls.spotify) return true;
+  if (typeof payload.uri === 'string' && payload.uri.startsWith('spotify:')) return true;
+  if (payload.album && payload.album.external_urls && payload.album.external_urls.spotify) return true;
+  if (typeof payload.album?.uri === 'string' && payload.album.uri.startsWith('spotify:')) return true;
+  if (Array.isArray(payload.artists)) {
+    return payload.artists.some((artist) => {
+      if (!artist || typeof artist !== 'object') return false;
+      return Boolean(artist.external_urls?.spotify) ||
+        (typeof artist.uri === 'string' && artist.uri.startsWith('spotify:'));
+    });
+  }
+  return false;
+};
+
+const buildSpotifyMetadata = (payload, fallback) => {
+  const candidate = isSpotifyPayload(payload) ? payload : null;
+  if (!candidate) return null;
+  const spotifyId =
+    fallback?.spotify_id ||
+    fallback?.source_id ||
+    fallback?.item_id_from_api ||
+    candidate.id ||
+    candidate.track?.id ||
+    candidate.episode?.id;
+  const spotifyType =
+    fallback?.spotify_item_type ||
+    fallback?.type ||
+    candidate.type ||
+    candidate.track?.type ||
+    candidate.episode?.type;
+
+  return {
+    source: 'spotify',
+    source_id: spotifyId ? String(spotifyId) : undefined,
+    spotify_id: spotifyId ? String(spotifyId) : undefined,
+    spotify_item_type: spotifyType,
+    raw_details: candidate,
+  };
+};
+
 // Define detail tables that are associated with records in the 'list_items' table
 const DETAIL_TABLES_MAP = {
   movie: 'movie_details',
@@ -825,6 +881,7 @@ function syncControllerFactory(socketService) {
         'users',
         'lists',
         'list_items',
+        'spotify_item_details',
         'favorites',
         // Add other tables in an order that respects dependencies
       ];
@@ -1078,6 +1135,39 @@ function syncControllerFactory(socketService) {
               });
             }
             continue;
+          }
+          
+          if (tableName === 'spotify_item_details') {
+            const listItemId =
+              dataPayload?.list_item_id ||
+              dataPayload?.listItemId ||
+              dataPayload?.list_item;
+            if (!listItemId) {
+              results.push({
+                tableName,
+                operation,
+                clientRecordId,
+                status: 'error_missing_list_item_id',
+                error: 'spotify_item_details change missing list_item_id',
+              });
+              continue;
+            }
+
+            const { rowCount: listItemExists } = await client.query(
+              'SELECT 1 FROM public.list_items WHERE id = $1',
+              [listItemId]
+            );
+
+            if (!listItemExists) {
+              results.push({
+                tableName,
+                operation,
+                clientRecordId: clientRecordId || listItemId,
+                status: 'error_not_found',
+                error: 'list_item missing for spotify_item_details',
+              });
+              continue;
+            }
           }
 
           // Handle BATCH_LIST_ORDER_UPDATE specifically
@@ -1486,6 +1576,32 @@ function syncControllerFactory(socketService) {
               }
             }
 
+            if (tableName === 'list_items') {
+              const rawPayload = parseJsonObject(createData.raw);
+              const currentMeta = parseJsonObject(createData.api_metadata) || {};
+              const metaSource = String(currentMeta?.source || '').toLowerCase();
+              if (rawPayload && isSpotifyPayload(rawPayload) && (!metaSource || metaSource === 'unknown')) {
+                const spotifyMeta = buildSpotifyMetadata(rawPayload, {
+                  ...createData,
+                  ...currentMeta,
+                });
+                if (spotifyMeta) {
+                  createData.api_metadata = {
+                    ...currentMeta,
+                    ...spotifyMeta,
+                    raw_details: spotifyMeta.raw_details,
+                  };
+                  createData.api_source = 'spotify';
+                  if (!createData.source_id && spotifyMeta.source_id) {
+                    createData.source_id = spotifyMeta.source_id;
+                  }
+                  if (!createData.item_id_from_api && spotifyMeta.source_id) {
+                    createData.item_id_from_api = spotifyMeta.source_id;
+                  }
+                }
+              }
+            }
+
             // Immediately after ensuring createData.id exists
             if (tableName === 'list_items') {
               // 1) If they’re strings that look like JSON we keep them as-is.
@@ -1652,15 +1768,93 @@ function syncControllerFactory(socketService) {
               try {
                 if (createData && createData.api_source === 'spotify') {
                   const spotifyId = createData.source_id || createData.item_id_from_api;
-                  if (spotifyId) {
-                    const raw = createData.api_metadata ? (typeof createData.api_metadata === 'string' ? createData.api_metadata : JSON.stringify(createData.api_metadata)) : null;
-                    await client.query(
-                      `INSERT INTO public.spotify_item_details (id, spotify_id, raw_json)
-                       VALUES ($1,$2,$3)
-                       ON CONFLICT (spotify_id) DO UPDATE
-                         SET raw_json = EXCLUDED.raw_json, updated_at = CURRENT_TIMESTAMP`,
-                      [insertedId, spotifyId, raw]
+                  const detailId = insertedId || createData.id;
+                  if (spotifyId && detailId) {
+                    const { rowCount: listItemExists } = await client.query(
+                      'SELECT 1 FROM list_items WHERE id = $1',
+                      [detailId]
                     );
+                    if (!listItemExists) {
+                      logger.warn('[SyncController] Skipping spotify_item_details upsert (list_item missing)', {
+                        listItemId: detailId,
+                        spotifyId,
+                      });
+                      return;
+                    }
+                    let apiMetaObj = null;
+                    if (createData.api_metadata) {
+                      if (typeof createData.api_metadata === 'string') {
+                        try {
+                          apiMetaObj = JSON.parse(createData.api_metadata);
+                        } catch (parseErr) {
+                          logger.warn('[SyncController] Failed to parse spotify api_metadata on create', parseErr);
+                        }
+                      } else {
+                        apiMetaObj = createData.api_metadata;
+                      }
+                    }
+                    const rawDetails =
+                      apiMetaObj?.raw_details ??
+                      apiMetaObj?.rawDetails ??
+                      apiMetaObj ??
+                      null;
+                    const spotifyType =
+                      apiMetaObj?.spotify_item_type ||
+                      rawDetails?.spotify_item_type ||
+                      rawDetails?.type ||
+                      apiMetaObj?.type ||
+                      'track';
+                    const spotifyName = rawDetails?.name || createData.title || null;
+                    const externalUrls = rawDetails?.external_urls || apiMetaObj?.external_urls || null;
+                    const images =
+                      rawDetails?.images ||
+                      rawDetails?.album?.images ||
+                      apiMetaObj?.images ||
+                      null;
+                    const uri = rawDetails?.uri || apiMetaObj?.uri || null;
+                    const itemSpecificMetaJson = apiMetaObj ? JSON.stringify(apiMetaObj) : null;
+                    const externalUrlsJson = externalUrls ? JSON.stringify(externalUrls) : null;
+                    const imagesJson = images ? JSON.stringify(images) : null;
+                    await client.query(
+                      `INSERT INTO public.spotify_item_details (
+                         id,
+                         list_item_id,
+                         spotify_id,
+                         spotify_item_type,
+                         name,
+                         external_urls_spotify,
+                         images,
+                         uri_spotify,
+                         item_specific_metadata
+                       )
+                       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9::jsonb)
+                       ON CONFLICT (list_item_id) DO UPDATE
+                         SET
+                           spotify_item_type = EXCLUDED.spotify_item_type,
+                           name = EXCLUDED.name,
+                           external_urls_spotify = EXCLUDED.external_urls_spotify,
+                           images = EXCLUDED.images,
+                           uri_spotify = EXCLUDED.uri_spotify,
+                           item_specific_metadata = EXCLUDED.item_specific_metadata,
+                           updated_at = CURRENT_TIMESTAMP`,
+                      [
+                        detailId,
+                        detailId,
+                        spotifyId,
+                        spotifyType,
+                        spotifyName,
+                        externalUrlsJson,
+                        imagesJson,
+                        uri,
+                        itemSpecificMetaJson,
+                      ]
+                    );
+                  } else if (!detailId) {
+                    logger.warn('[SyncController] Skipping spotify_item_details upsert (missing list_item id)', {
+                      listItemId: insertedId,
+                      createDataId: createData?.id,
+                      spotifyId,
+                    });
                   }
                 }
               } catch (spErr) {
@@ -1892,6 +2086,29 @@ function syncControllerFactory(socketService) {
                   }
                 }
 
+                const rawPayload = parseJsonObject(updateData.raw);
+                const metaSource = String(parsedApiMetadata?.source || '').toLowerCase();
+                if (rawPayload && isSpotifyPayload(rawPayload) && (!metaSource || metaSource === 'unknown')) {
+                  const spotifyMeta = buildSpotifyMetadata(rawPayload, {
+                    ...updateData,
+                    ...parsedApiMetadata,
+                  });
+                  if (spotifyMeta) {
+                    parsedApiMetadata = {
+                      ...(parsedApiMetadata || {}),
+                      ...spotifyMeta,
+                      raw_details: spotifyMeta.raw_details,
+                    };
+                    updateData.api_source = 'spotify';
+                    if (!updateData.source_id && spotifyMeta.source_id) {
+                      updateData.source_id = spotifyMeta.source_id;
+                    }
+                    if (!updateData.item_id_from_api && spotifyMeta.source_id) {
+                      updateData.item_id_from_api = spotifyMeta.source_id;
+                    }
+                  }
+                }
+
                 // Build/merge api_metadata and ensure latest gift fields are present
                 if (!parsedApiMetadata || typeof parsedApiMetadata !== 'object') {
                   parsedApiMetadata = {};
@@ -1901,10 +2118,26 @@ function syncControllerFactory(socketService) {
                   ...(parsedApiMetadata || {}),
                 };
 
+                let listTypeForRating = '';
+                if (updateData.list_id) {
+                  try {
+                    const listTypeResult = await client.query(
+                      'SELECT list_type FROM lists WHERE id = $1',
+                      [updateData.list_id]
+                    );
+                    listTypeForRating = (listTypeResult.rows?.[0]?.list_type || '').toLowerCase();
+                  } catch (listTypeError) {
+                    logger.warn('[SyncController] Failed to load list type for rating fallback', {
+                      recordId,
+                      message: listTypeError?.message,
+                    });
+                  }
+                }
+                const allowPriorityRatingFallback = listTypeForRating === 'gift' || listTypeForRating === 'gifts';
                 const ratingFromPayload =
                   updateData.rating !== undefined && updateData.rating !== null
                     ? Number(updateData.rating)
-                    : updateData.priority !== undefined && updateData.priority !== null
+                    : allowPriorityRatingFallback && updateData.priority !== undefined && updateData.priority !== null
                       ? Number(updateData.priority)
                       : mergedApiMetadata.rating;
                 if (ratingFromPayload !== undefined && ratingFromPayload !== null && !Number.isNaN(ratingFromPayload)) {
@@ -2005,12 +2238,14 @@ function syncControllerFactory(socketService) {
 
             // For list_items, force-write critical fields to avoid stale api_metadata/rating
             if (tableName === 'list_items') {
-              const ratingVal =
-                updateData.rating !== undefined && updateData.rating !== null
-                  ? Number(updateData.rating)
-                  : updateData.priority !== undefined && updateData.priority !== null
-                    ? Number(updateData.priority)
-                    : null;
+              const priorityCandidate =
+                updateData.priority !== undefined && updateData.priority !== null
+                  ? Number(updateData.priority)
+                  : null;
+              const priorityVal =
+                Number.isFinite(priorityCandidate) && Number.isInteger(priorityCandidate)
+                  ? priorityCandidate
+                  : null;
               const descriptionToPersist =
                 dataPayload?.description !== undefined
                   ? dataPayload.description
@@ -2057,7 +2292,7 @@ function syncControllerFactory(socketService) {
                    WHERE id = $5`,
                   [
                     finalApiMetaJson,
-                    ratingVal,
+                    priorityVal,
                     descriptionToPersist,
                     priceToPersist,
                     recordId,
@@ -2078,20 +2313,93 @@ function syncControllerFactory(socketService) {
             // ---- Spotify raw-details upsert on UPDATE ----
             if (tableName === 'list_items' && updateData.api_source === 'spotify') {
               const spotifyId = updateData.source_id || updateData.item_id_from_api;
-              if (spotifyId) {
-                const rawJson = updateData.api_metadata
-                  ? (typeof updateData.api_metadata === 'string'
-                      ? updateData.api_metadata
-                      : JSON.stringify(updateData.api_metadata))
-                  : null;
+              const detailId = updateData.id;
+              if (spotifyId && detailId) {
+                const { rowCount: listItemExists } = await client.query(
+                  'SELECT 1 FROM list_items WHERE id = $1',
+                  [detailId]
+                );
+                if (!listItemExists) {
+                  logger.warn('[SyncController] Skipping spotify_item_details upsert (list_item missing)', {
+                    listItemId: detailId,
+                    spotifyId,
+                  });
+                  return;
+                }
+                let apiMetaObj = null;
+                if (updateData.api_metadata) {
+                  if (typeof updateData.api_metadata === 'string') {
+                    try {
+                      apiMetaObj = JSON.parse(updateData.api_metadata);
+                    } catch (parseErr) {
+                      logger.warn('[SyncController] Failed to parse spotify api_metadata on update', parseErr);
+                    }
+                  } else {
+                    apiMetaObj = updateData.api_metadata;
+                  }
+                }
+                const rawDetails =
+                  apiMetaObj?.raw_details ??
+                  apiMetaObj?.rawDetails ??
+                  apiMetaObj ??
+                  null;
+                const spotifyType =
+                  apiMetaObj?.spotify_item_type ||
+                  rawDetails?.spotify_item_type ||
+                  rawDetails?.type ||
+                  apiMetaObj?.type ||
+                  'track';
+                const spotifyName = rawDetails?.name || updateData.title || null;
+                const externalUrls = rawDetails?.external_urls || apiMetaObj?.external_urls || null;
+                const images =
+                  rawDetails?.images ||
+                  rawDetails?.album?.images ||
+                  apiMetaObj?.images ||
+                  null;
+                const uri = rawDetails?.uri || apiMetaObj?.uri || null;
+                const itemSpecificMetaJson = apiMetaObj ? JSON.stringify(apiMetaObj) : null;
+                const externalUrlsJson = externalUrls ? JSON.stringify(externalUrls) : null;
+                const imagesJson = images ? JSON.stringify(images) : null;
 
                 await client.query(
-                  `INSERT INTO public.spotify_item_details (id, spotify_id, raw_json)
-                   VALUES ($1, $2, $3)
-                   ON CONFLICT (spotify_id)
-                   DO UPDATE SET raw_json = EXCLUDED.raw_json, updated_at = CURRENT_TIMESTAMP`,
-                  [updateData.id, spotifyId, rawJson]
+                  `INSERT INTO public.spotify_item_details (
+                     id,
+                     list_item_id,
+                     spotify_id,
+                     spotify_item_type,
+                     name,
+                     external_urls_spotify,
+                     images,
+                     uri_spotify,
+                     item_specific_metadata
+                   )
+                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb)
+                   ON CONFLICT (list_item_id)
+                   DO UPDATE SET
+                     spotify_item_type = EXCLUDED.spotify_item_type,
+                     name = EXCLUDED.name,
+                     external_urls_spotify = EXCLUDED.external_urls_spotify,
+                     images = EXCLUDED.images,
+                     uri_spotify = EXCLUDED.uri_spotify,
+                     item_specific_metadata = EXCLUDED.item_specific_metadata,
+                     updated_at = CURRENT_TIMESTAMP`,
+                  [
+                    detailId,
+                    detailId,
+                    spotifyId,
+                    spotifyType,
+                    spotifyName,
+                    externalUrlsJson,
+                    imagesJson,
+                    uri,
+                    itemSpecificMetaJson,
+                  ]
                 );
+              } else if (!detailId) {
+                logger.warn('[SyncController] Skipping spotify_item_details upsert (missing list_item id)', {
+                  listItemId: updateData?.id,
+                  spotifyId,
+                });
               }
             }
 
