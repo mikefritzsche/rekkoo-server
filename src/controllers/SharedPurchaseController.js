@@ -441,8 +441,7 @@ const SharedPurchaseController = {
       await ensureParticipationAccess(item, userId);
 
       const payload = req.body || {};
-      const amountCents = ensurePositiveInt(payload.amountCents, 'amountCents', { allowZero: false });
-      const markFulfilled = Boolean(payload.markFulfilled);
+      const markFulfilled = payload.markFulfilled;
       const note = payload.note ? String(payload.note).trim() : null;
 
       const group = await db.transaction(async (client) => {
@@ -454,23 +453,6 @@ const SharedPurchaseController = {
         if (TERMINAL_GROUP_STATUSES.has(groupRow.status)) {
           throw httpError(409, 'Shared purchase is no longer accepting contributions');
         }
-
-        if (groupRow.status === 'locked' && String(item.owner_id) !== String(userId)) {
-          throw httpError(409, 'Shared purchase is locked pending completion');
-        }
-
-        const contributionQuantity = groupRow.is_quantity_based
-          ? ensurePositiveInt(payload.quantity, 'quantity', { allowZero: false }) || 0
-          : 0;
-
-        if (!groupRow.is_quantity_based && amountCents === null) {
-          throw httpError(400, 'amountCents is required for monetary contributions');
-        }
-        if (groupRow.is_quantity_based && contributionQuantity === 0 && amountCents === null) {
-          throw httpError(400, 'quantity is required for quantity-based contributions');
-        }
-
-        const status = markFulfilled ? 'fulfilled' : 'pledged';
 
         const { rows: existing } = await client.query(
           `
@@ -485,7 +467,46 @@ const SharedPurchaseController = {
           [groupRow.id, userId]
         );
 
-        if (existing.length > 0) {
+        const existingContribution = existing[0] || null;
+        const amountCents =
+          payload.amountCents === undefined
+            ? existingContribution?.contribution_cents ?? null
+            : ensurePositiveInt(payload.amountCents, 'amountCents', { allowZero: false });
+        const contributionQuantity = groupRow.is_quantity_based
+          ? payload.quantity === undefined
+            ? existingContribution?.contribution_quantity ?? 0
+            : ensurePositiveInt(payload.quantity, 'quantity', { allowZero: false }) || 0
+          : 0;
+
+        if (groupRow.status === 'locked') {
+          if (!existingContribution) {
+            throw httpError(409, 'Shared purchase is locked pending completion');
+          }
+          if (
+            (payload.amountCents !== undefined &&
+              amountCents !== existingContribution.contribution_cents) ||
+            (payload.quantity !== undefined &&
+              contributionQuantity !== existingContribution.contribution_quantity)
+          ) {
+            throw httpError(409, 'Shared purchase is locked pending completion');
+          }
+        }
+
+        if (!groupRow.is_quantity_based && amountCents === null) {
+          throw httpError(400, 'amountCents is required for monetary contributions');
+        }
+        if (groupRow.is_quantity_based && contributionQuantity === 0 && amountCents === null) {
+          throw httpError(400, 'quantity is required for quantity-based contributions');
+        }
+
+        const status =
+          markFulfilled === undefined
+            ? existingContribution?.status || 'pledged'
+            : markFulfilled
+              ? 'fulfilled'
+              : 'pledged';
+
+        if (existingContribution) {
           await client.query(
             `
               UPDATE gift_contributions
@@ -505,7 +526,7 @@ const SharedPurchaseController = {
               contributionQuantity,
               status,
               note,
-              existing[0].id,
+              existingContribution.id,
             ]
           );
         } else {

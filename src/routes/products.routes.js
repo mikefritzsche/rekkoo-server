@@ -4,6 +4,7 @@ const fetch = require('node-fetch');
 
 const puppeteer = require('puppeteer-extra');
 const { enqueueAmazonScrape, MAX_BATCH_SIZE } = require('../services/amazonScraperService');
+const { enqueueEtsyScrape, MAX_BATCH_SIZE: ETSY_MAX_BATCH_SIZE } = require('../services/etsyScraperService');
 
 router.get('/link', async (req, res) => {
     // res.json({message: 'link fetch', link: req.query.link})
@@ -108,6 +109,23 @@ router.post('/scrape', async (req, res) => {
     }
 });
 
+router.post('/scrape/etsy', async (req, res) => {
+    const url = req.body.url;
+    if (!url) {
+        return res.status(400).json({ error: 'Provide a valid Etsy product URL' });
+    }
+    try {
+        const result = await enqueueEtsyScrape(url);
+        if (!result?.ok) {
+            return res.status(400).json({ error: result?.error || 'Scraping failed' });
+        }
+        return res.json(result.result);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Scraping failed' });
+    }
+});
+
 router.post('/data', async (req, res) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'Provide a valid URL' });
@@ -177,6 +195,48 @@ router.post('/scrape/batch', async (req, res) => {
         res.json({ results });
     } catch (err) {
         console.error('[products.scrape.batch] failed', err);
+        res.status(500).json({ error: 'Batch scraping failed' });
+    }
+});
+
+router.post('/scrape/etsy/batch', async (req, res) => {
+    const urls = req.body?.urls;
+    if (!Array.isArray(urls) || urls.length === 0) {
+        return res.status(400).json({ error: 'Provide at least one URL to scrape' });
+    }
+    if (urls.length > ETSY_MAX_BATCH_SIZE) {
+        return res.status(400).json({ error: `Batch limit is ${ETSY_MAX_BATCH_SIZE} URLs` });
+    }
+
+    const normalizedInputs = urls
+        .map((u) => (typeof u === 'string' ? u.trim() : ''))
+        .filter((u) => u.length > 0);
+
+    if (normalizedInputs.length === 0) {
+        return res.status(400).json({ error: 'Provide at least one URL to scrape' });
+    }
+
+    try {
+        const jobMap = new Map();
+        normalizedInputs.forEach((u) => {
+            if (!jobMap.has(u)) {
+                jobMap.set(u, enqueueEtsyScrape(u));
+            }
+        });
+
+        const results = await Promise.all(
+            normalizedInputs.map(async (inputUrl) => {
+                const outcome = await jobMap.get(inputUrl);
+                if (!outcome?.ok) {
+                    return { inputUrl, error: outcome?.error || 'Scraping failed' };
+                }
+                return { inputUrl, ...outcome.result };
+            })
+        );
+
+        res.json({ results });
+    } catch (err) {
+        console.error('[products.scrape.etsy.batch] failed', err);
         res.status(500).json({ error: 'Batch scraping failed' });
     }
 });
