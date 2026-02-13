@@ -458,7 +458,6 @@ function optimizedSyncControllerFactory(socketService) {
           JOIN public.secret_santa_rounds sr ON gi.round_id = sr.id
           JOIN public.lists l ON sr.list_id = l.id
           WHERE gi.id = ANY($1::uuid[])
-            AND gi.deleted_at IS NULL
             AND (l.owner_id = $2 OR sr.list_id = ANY($3::uuid[]) OR sr.created_by = $2)
         `;
         const invitesResult = await db.query(invitesQuery, [inviteIds, userId, listIdsArray]);
@@ -1041,8 +1040,7 @@ function optimizedSyncControllerFactory(socketService) {
             FROM public.secret_santa_guest_invites gi
             JOIN public.secret_santa_rounds sr ON gi.round_id = sr.id
             JOIN public.lists l ON sr.list_id = l.id
-            WHERE gi.deleted_at IS NULL
-              AND (l.owner_id = $2 OR sr.list_id = ANY($1::uuid[]) OR sr.created_by = $2)
+          WHERE (l.owner_id = $2 OR sr.list_id = ANY($1::uuid[]) OR sr.created_by = $2)
           `;
           const secretSantaInvitesBaselineResult = await db.query(secretSantaInvitesBaselineQuery, [listIdsArray, userId]);
           for (const row of secretSantaInvitesBaselineResult.rows) {

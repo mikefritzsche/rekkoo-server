@@ -207,6 +207,36 @@ function syncControllerFactory(socketService) {
     return DETAIL_TABLES_MAP[itemType.toLowerCase()] || null;
   };
 
+  const resolveMediaTypeFromPayload = (payload = {}) => {
+    const metadata =
+      parseJsonObject(payload.api_metadata) ||
+      parseJsonObject(payload.metadata) ||
+      payload.metadata ||
+      null;
+    const rawDetails =
+      parseJsonObject(metadata?.raw_details) ||
+      parseJsonObject(metadata?.rawDetails) ||
+      metadata?.raw_details ||
+      metadata?.rawDetails ||
+      null;
+    const candidates = [
+      payload.mediaType,
+      payload.media_type,
+      metadata?.media_type,
+      metadata?.type,
+      rawDetails?.media_type,
+      rawDetails?.tmdb_media_type,
+      rawDetails?.type,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string') continue;
+      const normalized = candidate.trim().toLowerCase();
+      if (normalized === 'tv') return 'tv';
+      if (normalized === 'movie' || normalized === 'movies') return 'movie';
+    }
+    return null;
+  };
+
   // Helper function to notify group members about list changes
   async function notifyGroupMembersOfListChanges(results, userId) {
     try {
@@ -1899,6 +1929,12 @@ function syncControllerFactory(socketService) {
                     logger.error('[SyncController] Failed to derive sourceType from parent list:', lookupErr);
                   }
                 }
+                const metadataMediaType = resolveMediaTypeFromPayload(createData);
+                if (metadataMediaType === 'tv') {
+                  sourceType = 'tv';
+                } else if (metadataMediaType === 'movie' && (!sourceType || sourceType === 'unknown')) {
+                  sourceType = 'movies';
+                }
                 let detailTable = null;
                 let detailIdColumn = null;
                 logger.info(`[SyncController] CREATE: Processing item with sourceType: '${sourceType}' for list_items creation`);
@@ -1970,25 +2006,36 @@ function syncControllerFactory(socketService) {
                 }
 
                 if (detailTable && detailIdColumn) {
-                  // Prioritize the 'raw' field for place_details, as it contains the full object
-                  // needed by the ListService, whereas api_metadata might be partial.
-                  // For gift_details, use the item data directly
-                  const detailSource = detailTable === 'gift_details' ? createData : 
-                                     (detailTable === 'place_details' && createData.raw) ? createData.raw : createData.api_metadata;
+                  try {
+                    // Prioritize the 'raw' field for place_details, as it contains the full object
+                    // needed by the ListService, whereas api_metadata might be partial.
+                    // For gift_details, use the item data directly
+                    const detailSource =
+                      detailTable === 'gift_details'
+                        ? createData
+                        : detailTable === 'place_details' && createData.raw
+                        ? createData.raw
+                        : createData.api_metadata;
 
-                  const detailRec = await ListService.createDetailRecord(
-                    client,
-                    detailTable,
-                    detailSource,
-                    insertedId,
-                    createData
-                  );
+                    const detailRec = await ListService.createDetailRecord(
+                      client,
+                      detailTable,
+                      detailSource,
+                      insertedId,
+                      createData
+                    );
 
-                  if (detailRec && detailRec.id) {
-                    // Patch list_items row with the FK to details
-                    await client.query(
-                      `UPDATE list_items SET ${detailIdColumn} = $1 WHERE id = $2`,
-                      [detailRec.id, insertedId]
+                    if (detailRec && detailRec.id) {
+                      // Patch list_items row with the FK to details
+                      await client.query(
+                        `UPDATE list_items SET ${detailIdColumn} = $1 WHERE id = $2`,
+                        [detailRec.id, insertedId]
+                      );
+                    }
+                  } catch (detailError) {
+                    logger.error(
+                      `[SyncController] Error creating detail record (${detailTable}) for list_item ${insertedId}:`,
+                      detailError?.message || detailError
                     );
                   }
                 }
@@ -2427,6 +2474,12 @@ function syncControllerFactory(socketService) {
                   } catch (lookupErr) {
                     logger.error('[SyncController] Failed to derive sourceType in update branch:', lookupErr);
                   }
+                }
+                const metadataMediaType = resolveMediaTypeFromPayload(updateData);
+                if (metadataMediaType === 'tv') {
+                  sourceType = 'tv';
+                } else if (metadataMediaType === 'movie' && (!sourceType || sourceType === 'unknown')) {
+                  sourceType = 'movies';
                 }
 
                 // Map to detail table / fk column
